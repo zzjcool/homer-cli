@@ -7,11 +7,26 @@
 
 ## Status
 
-🚧 立项中 — 设计文档见 [DESIGN.md](./DESIGN.md)
+**M1 已完成**（只读漂移感知）— 设计文档见 [DESIGN.md](./DESIGN.md)，实施计划见 [docs/m1-plan.md](./docs/m1-plan.md)，验收报告见 [docs/m1-report.md](./docs/m1-report.md)
 
 - 市场调研：已完成（3 路并行，覆盖 pi 同步器 / 多 agent 工具 / 传统 dotfiles 管理器 / 商业配置同步机制）
 - 定位：git 主通道 + age 密钥层 + tailcat 可选快车道 + 应用感知 adapter
 - MVP 验收场景：新机器 `homer home <repo-url>` → pi + herdr + opencode 配置与密钥全部归位
+
+### M1 已实现
+
+```bash
+npm install && npm run build
+homer init    # 扫描 ~/.pi/agent 生成 homer.json + store 快照
+homer status  # 漂移摘要 ↑n ↓n（--json 机器可读，--verbose 分类明细）
+homer diff    # 文本级差异（merge 键级 / mirror 行级，⚡ 冲突标记）
+```
+
+- 三路判定引擎（§2.7 merge/mirror 矩阵，数组原子值、del-vs-modify 冲突）
+- pi adapter 只读扫描（7 分类 + ignore 规则 + symlink 防逃逸/防循环）
+- store 原子写入（tmp+rename + 完整性标记）
+- 331 个测试（引擎矩阵 / fixture / e2e / 变异测试验证过强度）
+- 下一里程碑 M2：push/pull/merge 写路径 + 备份 + 密钥扫描
 
 ## Naming
 
