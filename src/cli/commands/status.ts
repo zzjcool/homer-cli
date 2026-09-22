@@ -15,7 +15,13 @@
 
 import { computeDrift, type AdapterDrift } from '../../core/engine/index.js';
 import { loadConfig } from '../../core/config.js';
-import { CliError, collectSnapshotSources, resolveHomerPaths, type CliDriftSources } from '../render.js';
+import {
+  CliError,
+  collectSnapshotSources,
+  resolveHomerPaths,
+  sourceErrorMessages,
+  type CliDriftSources,
+} from '../render.js';
 
 export interface StatusOptions {
   homerHome?: string;
@@ -31,6 +37,12 @@ export interface StatusReport {
     conflicts: number;
     categories: { name: string; push: number; pull: number; conflicts: number }[];
   }[];
+  /**
+   * 采集期错误（additive，M-A）：live scan 读不到 adapter root 时的告警文本。
+   * 空数组 = 无告警；`--json` 一并输出，文本输出渲染为 ⚠ 头行。
+   * 漂移仍是信息，exit 码保持 0。
+   */
+  errors: string[];
 }
 
 export const STATUS_USAGE = `用法: homer status [options]
@@ -46,9 +58,10 @@ export const STATUS_USAGE = `用法: homer status [options]
 
 漂移是信息而非错误：即使有漂移也以 0 退出；只有配置缺失等真错误才退出 1。`;
 
-/** 把引擎的 AdapterDrift[] 聚合为 §1.7 冻结的 StatusReport。 */
-export function buildStatusReport(drifts: readonly AdapterDrift[]): StatusReport {
+/** 把引擎的 AdapterDrift[] 聚合为 §1.7 冻结的 StatusReport（`errors` 为 additive 字段）。 */
+export function buildStatusReport(drifts: readonly AdapterDrift[], errors: string[] = []): StatusReport {
   return {
+    errors,
     adapters: drifts.map((adapter) => {
       let push = 0;
       let pull = 0;
@@ -84,5 +97,5 @@ export function runStatus(opts: StatusOptions, sources?: CliDriftSources): Statu
   }
 
   const src: CliDriftSources = sources ?? collectSnapshotSources(paths, config);
-  return buildStatusReport(computeDrift(src.base, src.local, src.remote));
+  return buildStatusReport(computeDrift(src.base, src.local, src.remote), sourceErrorMessages(src.errors ?? []));
 }

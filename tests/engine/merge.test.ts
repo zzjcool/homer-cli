@@ -246,3 +246,137 @@ describe('stripKeys — excludeKeys 顶层剥离', () => {
     expect(stripKeys({ a: 1 }, [])).toEqual({ a: 1 });
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* 对抗式 review 修复项 1：deepEqual 的 NaN / -0 语义                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 修复前 `deepEqual` 用 `a === b`，NaN !== NaN 会让「三方同值 NaN」被判成
+ * 双方都改 → 冲突（假冲突）；同时 +0/-0 被当成相等（漏报变更）。
+ * JSON 本身不能表示 NaN，但调用方（drift / CLI 注入）可直接传 JS 值，
+ * 且 `stripKeys` / 未来 YAML 前端也会产出非 JSON 字面量值。
+ */
+describe('deepEqual — Object.is 语义（NaN / -0）', () => {
+  it('base≡local≡remote 全为 NaN → 无冲突、无变更（不误报 both-modified）', () => {
+    const result = mergeJson({ threshold: Number.NaN }, { threshold: Number.NaN }, { threshold: Number.NaN });
+    expect(result.status).toBe('clean');
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('NaN 是「未变」：base≡local 的 NaN，remote 改值 → 取 remote（走 base≡local 分支）', () => {
+    const result = mergeJson({ threshold: Number.NaN }, { threshold: Number.NaN }, { threshold: 5 });
+    expect(result.status).toBe('clean');
+    expect(result.conflicts).toEqual([]);
+    expect(result.merged).toEqual({ threshold: 5 });
+  });
+
+  it('双方都改成不同值（含 NaN vs 数字）→ both-modified 冲突', () => {
+    const result = mergeJson({ threshold: 1 }, { threshold: Number.NaN }, { threshold: 2 });
+    expect(result.status).toBe('conflict');
+    expect(result.conflicts.map((c) => c.keyPath)).toEqual(['threshold']);
+  });
+
+  it('diffJson：NaN 与自身相等 → 不计 changed', () => {
+    expect(diffJson({ a: Number.NaN }, { a: Number.NaN })).toEqual({ changed: 0, added: 0, deleted: 0, keys: [] });
+  });
+
+  it('-0 与 +0 视为不同值（Object.is 语义）→ 计入 changed', () => {
+    // `===` 下 -0 === 0 为 true（漏报）；Object.is 下不同（报出来更安全）
+    expect(diffJson({ a: 0 }, { a: -0 })).toEqual({ changed: 1, added: 0, deleted: 0, keys: ['a'] });
+    expect(diffJson({ a: -0 }, { a: -0 })).toEqual({ changed: 0, added: 0, deleted: 0, keys: [] });
+  });
+
+  it('嵌套数组里的 NaN 同样按相等处理', () => {
+    expect(diffJson({ list: [Number.NaN, 1] }, { list: [Number.NaN, 1] })).toEqual({
+      changed: 0, added: 0, deleted: 0, keys: [],
+    });
+    expect(diffJson({ list: [Number.NaN] }, { list: [1] })).toEqual({
+      changed: 1, added: 0, deleted: 0, keys: ['list'],
+    });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 对抗式 review 修复项 2：原型键（__proto__ / constructor）守卫        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 修复前 `childSlot` 直接 `parent.value[key]`：`__proto__` / `constructor`
+ * 会沿原型链取到 `Object.prototype` 的成员（例如 `constructor` = Object 函数），
+ * 让「base 没有该 own key、local 也没有」的场景凭空生出漂移/冲突。
+ * 修复后一律先 `hasOwnProperty` 守卫，按普通键处理。
+ */
+describe('原型键守卫 — __proto__ / constructor 不污染判定', () => {
+  it('childSlot 不沿原型链取值：own key absent 即 absent（无假冲突）', () => {
+    // 普通对象：constructor 来自原型而非 own key。修复前 childSlot 会取到 Object 构造函数，
+    // 把「两侧都未声明 constructor」看成「都有且同值」；下述场景则把「只有 local 改」看错。
+    const base: Record<string, unknown> = { a: 1 };
+    const localSame: Record<string, unknown> = { a: 1 };
+    expect(diffJson(base, localSame).keys).toEqual([]);
+
+    const localChanged: Record<string, unknown> = { a: 2 };
+    expect(diffJson(base, localChanged).keys).toEqual(['a']);
+  });
+
+  it('Object.prototype 未被污染：merge / stripKeys 后全局原型干净', () => {
+    const evil = JSON.parse('{"__proto__":{"polluted":true}}') as Record<string, unknown>;
+    mergeJson(evil, evil, evil);
+    stripKeys(evil, []);
+
+    // 任何对象都不应被注入 polluted
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, 'polluted')).toBe(false);
+    expect(Object.keys({}).length).toBe(0);
+  });
+
+  it('同名字符串键 __proto__ 作为普通键参与判定（不抛错）', () => {
+    const base = JSON.parse('{"__proto__":"base"}') as Record<string, unknown>;
+    const local = JSON.parse('{"__proto__":"local"}') as Record<string, unknown>;
+    // parsed JSON 的 __proto__ 是 own key（值为字符串），改值记为 changed（不是 deleted）
+    expect(diffJson(base, local)).toEqual({ changed: 1, added: 0, deleted: 0, keys: ['__proto__'] });
+    const result = mergeJson(base, local, base);
+    expect(result.status).toBe('clean');
+  });
+
+  it('constructor 作为普通 own key 时正常参与 merge', () => {
+    const result = mergeJson({ constructor: 'a' }, { constructor: 'b' }, { constructor: 'a' });
+    expect(result.status).toBe('clean');
+    expect(result.merged).toEqual({ constructor: 'b' });
+  });
+
+  it('stripKeys 命中原型键名不做特殊处理（不污染原型，按普通键剥离）', () => {
+    const src = JSON.parse('{"__proto__":{"x":1},"constructor":"c","keep":2}') as Record<string, unknown>;
+    const stripped = stripKeys(src, ['keep']) as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(stripped, 'keep')).toBe(false);
+    expect(stripped['constructor']).toBe('c');
+    // 赋值 `out['__proto__'] = v` 会走原型 setter 被静默丢弃（不污染原型）
+    expect(({} as Record<string, unknown>)['x']).toBeUndefined();
+  });
+});
+
+describe('原型键守卫 — 区分 added 与 changed（修复前会把原型成员当成 own 值）', () => {
+  it('base 缺 constructor、local 新增 constructor → 记 added（修复前会沿原型取值记成 changed）', () => {
+    // 用普通对象字面量（带 Object.prototype）：修复前 `parent.value['constructor']`
+    // 会取到 Object 构造函数，把它当成「base 已有该键」→ 误记 changed 而非 added。
+    const base: Record<string, unknown> = {};
+    const local: Record<string, unknown> = { constructor: 'added' };
+    expect(diffJson(base, local)).toEqual({ changed: 0, added: 1, deleted: 0, keys: ['constructor'] });
+  });
+
+  it('base 缺 __proto__、local 新增 __proto__ → 记 added', () => {
+    const base: Record<string, unknown> = {};
+    // JSON.parse 会产出 own key `__proto__`（对象字面量则改原型，不用）
+    const local = JSON.parse('{"__proto__":"added"}') as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(local, '__proto__')).toBe(true);
+    expect(diffJson(base, local)).toEqual({ changed: 0, added: 1, deleted: 0, keys: ['__proto__'] });
+  });
+
+  it('merge：base 缺 constructor、仅 local 新增 → 取 local，无冲突', () => {
+    const base: Record<string, unknown> = {};
+    const local: Record<string, unknown> = { constructor: 'L' };
+    const result = mergeJson(base, local, base);
+    expect(result.status).toBe('clean');
+    expect(result.conflicts).toEqual([]);
+  });
+});

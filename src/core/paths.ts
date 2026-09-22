@@ -17,8 +17,9 @@ export interface HomerPaths {
 
 /**
  * 展开开头的 `~` / `~/`。只处理开头，不做全局替换（与 shell 语义一致）。
+ * 导出给 adapter 侧复用（scan.ts 曾自带一份同名私有实现，属重复代码）。
  */
-function expandTilde(input: string): string {
+export function expandHome(input: string): string {
   if (input === '~') return homedir();
   if (input.startsWith('~/') || input.startsWith('~\\')) {
     return path.join(homedir(), input.slice(2));
@@ -37,7 +38,7 @@ export function getHomerPaths(env: { HOMER_HOME?: string | undefined } = process
   const raw = env.HOMER_HOME;
   const home =
     typeof raw === 'string' && raw.trim() !== ''
-      ? path.resolve(expandTilde(raw.trim()))
+      ? path.resolve(expandHome(raw.trim()))
       : path.join(homedir(), '.homer');
 
   return {

@@ -61,20 +61,35 @@ function buildPiFixture(agentRoot: string): void {
   write('themes/dark.json', `${JSON.stringify({ name: 'dark' })}\n`);
   write('models.json', `${JSON.stringify({ apiKeys: { openai: 'sk-a' }, models: { openai: { id: 'gpt' } } })}\n`);
 
-  // 垃圾（adapter 级 ignore / exclude 必须全部拦掉）
+  // 垃圾（adapter 级 ignore / exclude / 「不在任何分类 path 内」必须全部拦掉）
+  // minor 8：内容对齐真实 ~/.pi/agent 的垃圾形态
   write('auth.json', '{"token":"secret"}\n');
   write('trust.json', '{"trusted":[]}\n');
   write('sessions/s1.jsonl', '{"turn":1}\n');
   write('npm/n1.json', '{}\n');
   write('settings.json.bak-predirect', '{}\n');
+  write('models.json.bak2', '{"STALE":"bak2"}\n'); // `.bak*` 命中
   write('pi-tui-crash.log', 'boom\n');
+  write('pi-tui-debug.log', 'debug\n');
   write('run-history.jsonl', '{}\n');
+  write('settings.json.bak-defaultmodel-20260921-052734', '{}\n'); // `.bak-*` 命中
+  // 以下不在任何分类声明的 path 内（不应被扫进任何 category）
+  write('AGENTS.md', '# agents instructions\n');
+  write('cursor-sdk-model-list.json', '{"models":[]}\n');
+  write('cursor-sdk-context-windows.json', '{"windows":[]}\n');
+  write('extensions-removed/tps.ts', 'export const tps = 1;\n');
+  write('extensions-removed/tps.ts.bak-20260916-132621', 'export const old = 1;\n');
 }
 
-/** 递归列出目录下所有文件（相对该目录，posix 分隔符），排序。 */
+/**
+ * 递归列出目录下所有文件（相对该目录，posix 分隔符），排序。
+ * store 的完整性标记 `.homer-complete` 是内部元数据（M-C），从清单里滤掉，
+ * 让各用例的断言聚焦在「快照内容」上。
+ */
 function listFiles(dir: string, prefix = ''): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.name !== '.homer-complete')
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     .flatMap((entry) =>
       entry.isDirectory()
@@ -198,13 +213,21 @@ describe('e2e: homer init（临时 HOME + HOMER_HOME）', () => {
       'pi/sessions',
       'pi/npm',
       'pi/settings/settings.json.bak-predirect',
+      'pi/settings/settings.json.bak-defaultmodel-20260921-052734',
       'pi/pi-tui-crash.log',
+      'pi/pi-tui-debug.log',
       'pi/run-history.jsonl',
+      'pi/models/models.json.bak2',
       'pi/extensions/tool-cache.json',
+      // minor 8：不在任何分类 path 内的文件同样不得进 store
+      'pi/AGENTS.md',
+      'pi/cursor-sdk-model-list.json',
+      'pi/cursor-sdk-context-windows.json',
+      'pi/extensions-removed/tps.ts',
     ]) {
       expect(existsSync(path.join(storeRoot, forbidden)), `${forbidden} 不应出现在 store`).toBe(false);
     }
-    expect(listFiles(storeRoot).some((f) => /\.bak|\.log$|run-history\.jsonl|tool-cache/.test(f))).toBe(false);
+    expect(listFiles(storeRoot).some((f) => /\.bak|\.log$|run-history\.jsonl|tool-cache|cursor-sdk|AGENTS\.md|extensions-removed/.test(f))).toBe(false);
   });
 
   it('homer.json 合法：version 1 / root 保留 ~ 写法 / 7 分类与默认配置逐字一致', async () => {
@@ -341,8 +364,9 @@ describe('e2e: 漂移 → status / diff', () => {
     expect(result.out).toContain('+# gamma');
 
     expect(result.out).toContain('pi/themes');
-    expect(result.out).toContain('{"name":"dark-edited-in-store"}');
-    expect(result.out).toContain('{"name":"dark"}');
+    // minor 8：行级精确匹配（不再用 toContain 比子串）
+    expect(result.out.split('\n')).toContain('-{"name":"dark-edited-in-store"}');
+    expect(result.out.split('\n')).toContain('+{"name":"dark"}');
   });
 
   it('diff 对无漂移分类输出空（prompts / extensions / agents / models）', async () => {
@@ -458,17 +482,33 @@ describe('e2e: 缝合点回归（store 缺目录 + merge 分类新增文件）',
     expect(diff.out).toContain('$: (无) → {"theme":"dark"}');
   });
 
-  it('pi root 不存在时 init 仍 exit 0，且随后 status 全零（error 不炸）', async () => {
+  it('pi root 不存在时 init 仍 exit 0，且报告/文本显式 ⚠ 提示（M-A）', async () => {
     rmSync(h.agentRoot, { recursive: true, force: true });
 
     const init = await cli(['init', '--json']);
     expect(init.code).toBe(0);
-    const report = JSON.parse(init.out) as { homerHome: string; adapters: { categories: unknown[] }[] };
+    const report = JSON.parse(init.out) as { homerHome: string; adapters: { categories: unknown[] }[]; errors: string[] };
     expect(report.homerHome).toBe(h.homerHome);
     expect(report.adapters[0]?.categories).toEqual([]);
+    // M-A：不再静默——root 不可读必须在报告里可见
+    expect(report.errors[0]).toMatch(/adapter root 不可读: pi/);
 
-    const status = await statusJson();
-    expect(Object.values(categoriesOf(status)).every((c) => c.push === 0 && c.pull === 0 && c.conflicts === 0)).toBe(true);
+    const initText = await cli(['init', '--force']);
+    expect(initText.out).toMatch(/⚠ adapter root 不可读: pi/);
+
+    // M-A：随后 status 必须报 ⚠（不产生假 push），计数全零
+    const status = await cli(['status', '--json']);
+    const parsed = JSON.parse(status.out) as StatusReport;
+    expect(parsed.errors[0]).toMatch(/adapter root 不可读: pi/);
+    expect(Object.values(categoriesOf(parsed)).every((c) => c.push === 0 && c.pull === 0 && c.conflicts === 0)).toBe(true);
+
+    const statusText = await cli(['status']);
+    expect(statusText.out).toMatch(/⚠ adapter root 不可读: pi/);
+    expect(statusText.out).not.toMatch(/↑[1-9]/);
+
+    // diff 也不能静默输出空（会被脚本当成「无漂移」）
+    expect((await cli(['diff'])).out).toMatch(/⚠ adapter root 不可读: pi/);
+
     expect(existsSync(path.join(h.homerHome, 'homer.json'))).toBe(true);
   });
 

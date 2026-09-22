@@ -12,8 +12,11 @@
  *   - 一方新增键 → 取新增方
  *   - merge 分类内 kind:'file' 条目由 drift 层降级（本模块不做判定）
  *
- * 本模块只依赖本文件内的类型；不 import 任何其他模块（含 types.ts），保持可独立测试。
+ * 本模块只依赖冻结的 types.ts（纯类型）与 core/entry-kind.ts（零 fs 的 JSON 形态判定），
+ * 保持可独立测试。
  */
+
+import { isPlainObject } from '../entry-kind.js';
 
 export interface MergeConflict {
   keyPath: string;  // 点路径，如 'models.openai'；数组整体记数组键名
@@ -63,6 +66,10 @@ export function diffJson(base: unknown, local: unknown):
  * excludeKeys 剥离（顶层键），drift 比较前对 local 与 base 各调一次。
  * 签名按 docs/m1-plan.md §1.2 冻结为 (unknown) => unknown —— 入参/出参都是任意 JSON 值，
  * 调用方自行 narrow，故此处显式豁免 no-unknown-returns 规则。
+ *
+ * 键存在性判定用 hasOwnProperty（原型键 `__proto__` / `constructor` 不得误命中），
+ * 拷贝用普通赋值：`__proto__` 作为普通字符串键会被 `out[k] = v` 静默丢弃（不污染原型），
+ * 这正好符合「不把原型键当配置项」的预期；其余键（含 constructor）正常保留。
  */
 // pi-lens-ignore: no-unknown-returns
 export function stripKeys(value: unknown, keys: string[]): unknown {
@@ -70,7 +77,8 @@ export function stripKeys(value: unknown, keys: string[]): unknown {
   const strip = new Set(keys);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value)) {
-    if (!strip.has(k)) out[k] = v;
+    if (strip.has(k)) continue;
+    out[k] = v;
   }
   return out;
 }
@@ -86,12 +94,13 @@ function slotOf(value: unknown): Slot {
   return value === undefined ? { has: false, value: undefined } : { has: true, value };
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
+/**
+ * 深比较（JSON 值语义）。
+ * 用 Object.is 而非 `===`：NaN 与自身不等，会让 base≡local 的 NaN 条目被误判为变更；
+ * Object.is 同时把 +0 / -0 视为不同值（对 JSON 而言极少见，但「不同就当变了」更安全）。
+ */
 function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
+  if (Object.is(a, b)) return true;
   if (Array.isArray(a) && Array.isArray(b)) {
     return a.length === b.length && a.every((item, i) => deepEqual(item, b[i]));
   }
@@ -111,6 +120,9 @@ function sameSlot(a: Slot, b: Slot): boolean {
 
 function childSlot(parent: Slot, key: string): Slot {
   if (!parent.has || !isPlainObject(parent.value)) return { has: false, value: undefined };
+  // hasOwnProperty 守卫：`__proto__` / `constructor` 这类原型键不能沿原型链取到值，
+  // 否则会把 Object.prototype 上的成员当成文件内容（无中生有的漂移）。当作普通键处理，取不到即 absent。
+  if (!Object.prototype.hasOwnProperty.call(parent.value, key)) return { has: false, value: undefined };
   return slotOf(parent.value[key]);
 }
 

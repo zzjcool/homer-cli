@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runDiff } from '../../src/cli/commands/diff.js';
 import { run } from '../../src/cli/index.js';
 import { CliError } from '../../src/cli/render.js';
-import { adapter, category, fileEntry, jsonEntry, writeConfig } from './helpers.js';
+import { adapter, category, fileEntry, jsonEntry, rawJsonEntry, writeConfig } from './helpers.js';
 
 describe('runDiff: merge 键行', () => {
   let home: string;
@@ -238,6 +238,8 @@ describe('CLI dispatch: homer diff', () => {
 
   it('有 config 无漂移 → exit 0 且无输出', async () => {
     mkdirSync(home, { recursive: true });
+    // root 必须可读（否则按 M-A 会打印 ⚠ 告警行；本用例测的是「无漂移 = 空输出」）
+    mkdirSync(join(home, 'pi-agent'), { recursive: true });
     writeFileSync(
       join(home, 'homer.json'),
       `${JSON.stringify({ version: 1, adapters: { pi: { root: join(home, 'pi-agent'), enabled: true, categories: {} } } }, null, 2)}\n`,
@@ -296,10 +298,101 @@ describe('runDiff: pull 方向 / 降级 / 冲突', () => {
     const remote = [adapter('pi', [category('pi', 'skills', 'mirror', { 'a.md': fileEntry('theirs\n') })])];
 
     const text = runDiff({ homerHome: home }, { base, local, remote });
-    expect(text).toContain('  a.md');
+    // 冲突行带 `⚡` 前缀（minor 3）
+    expect(text).toContain('  ⚡ a.md');
     expect(text).toContain('-base');
     expect(text).toContain('+mine');
     expect(text).toContain('远端(↓)');
     expect(text).toContain('+theirs');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* minor 3：冲突行 `⚡` 前缀                                            */
+/* ------------------------------------------------------------------ */
+
+describe('runDiff: 冲突标记 ⚡（minor 3）', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'homer-diff-conflict-'));
+    writeConfig(home);
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('merge 键级冲突（both-modified）→ 键行带 ⚡ 前缀', () => {
+    const base = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ theme: 'light' }) })])];
+    const local = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ theme: 'dark' }) })])];
+    const remote = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ theme: 'blue' }) })])];
+
+    const text = runDiff({ homerHome: home }, { base, local, remote });
+    const lines = text.split('\n');
+
+    // 键行 `⚡ theme: light → dark`；远端行为 `↓ ⚡ theme: light → blue`
+    expect(lines).toContain('    ⚡ theme: light → dark');
+    expect(lines).toContain('    ↓ ⚡ theme: light → blue');
+    // 非冲突键行不带 ⚡（用于对比的 clean 键）
+    expect(text).not.toContain('⚡ (无)');
+  });
+
+  it('merge 文件级冲突（modify-vs-delete）→ 文件名行带 ⚡', () => {
+    // base 有文件、local 删除、remote 改值 → 文件级 modify-vs-delete
+    const base = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ a: 1 }) })])];
+    const local = [adapter('pi', [category('pi', 'settings', 'merge', {})])];
+    const remote = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ a: 2 }) })])];
+
+    const text = runDiff({ homerHome: home }, { base, local, remote });
+    expect(text.split('\n')).toContain('  ⚡ settings.json');
+  });
+
+  it('mirror conflict op（双方都改）→ 文件名行带 ⚡', () => {
+    const base = [adapter('pi', [category('pi', 'skills', 'mirror', { 'a.md': fileEntry('base\n') })])];
+    const local = [adapter('pi', [category('pi', 'skills', 'mirror', { 'a.md': fileEntry('mine\n') })])];
+    const remote = [adapter('pi', [category('pi', 'skills', 'mirror', { 'a.md': fileEntry('theirs\n') })])];
+
+    const text = runDiff({ homerHome: home }, { base, local, remote });
+    expect(text.split('\n')).toContain('  ⚡ a.md');
+  });
+
+  it('无冲突的普通漂移不带 ⚡（反向断言）', () => {
+    const base = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ a: 1 }) })])];
+    const local = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': jsonEntry({ a: 2 }) })])];
+
+    const text = runDiff({ homerHome: home }, { base, local, remote: base });
+    expect(text).toContain('    a: 1 → 2');
+    expect(text).not.toContain('⚡');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* minor 4：diff slotOf 解析失败 → 降级行级（与 drift.isDegraded 对齐）  */
+/* ------------------------------------------------------------------ */
+
+describe('runDiff: 损坏 JSON 条目降级（minor 4）', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'homer-diff-degrade-'));
+    writeConfig(home);
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('kind:json 但内容损坏 → 走行级 diff（不再按字符串「键值」渲染）', () => {
+    // 修复前 slotOf 解析失败会退化成 `{ has: true, value: <原文> }`，
+    // 渲染出 `$: <原文> → ...` 这种假键行；修复后应与 drift 一致走 mirror 行级。
+    const base = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': rawJsonEntry('{ broken\n') })])];
+    const local = [adapter('pi', [category('pi', 'settings', 'merge', { 'settings.json': rawJsonEntry('{ broken changed\n') })])];
+
+    const text = runDiff({ homerHome: home }, { base, local, remote: base });
+    expect(text).toContain('  settings.json');
+    expect(text).toContain('-{ broken');
+    expect(text).toContain('+{ broken changed');
+    expect(text).not.toContain('$:');
   });
 });

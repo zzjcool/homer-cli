@@ -320,3 +320,48 @@ describe('scanAdapter — root 不存在 / 非目录', () => {
     expect(errors[0]?.message).toBe('not a directory');
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* minor 7：walk 内冗余排序已删除，最终排序仍稳定（fixture 锁定）        */
+/* ------------------------------------------------------------------ */
+
+describe('scanAdapter — 排序稳定性（minor 7：walk 内排序删除后的最终排序）', () => {
+  it('readdir 原始顺序被忽略：输出始终按 relPath 字典序', () => {
+    // 故意用「逆序 = 创建顺序」建文件，确保 readdir 顺序不是字典序
+    const names = ['zz.md', 'mm.md', 'aa.md', 'bb/deep.md', 'bb.md'];
+    for (const name of names) write(`skills/${name}`, `${name}\n`);
+
+    const { snapshot } = scanAdapter(PI_ADAPTER_ID, { ...DEFAULT_PI_ADAPTER, root: tmp });
+    const keys = [...cat(snapshot, 'skills').files.keys()];
+    expect(keys).toEqual(['aa.md', 'bb.md', 'bb/deep.md', 'mm.md', 'zz.md']);
+    expect(keys).toEqual([...keys].sort());
+  });
+
+  it('单文件 category 的 paths 顺序不影响输出（settings 按键排序）', () => {
+    write('settings.json', GOOD_SETTINGS);
+    write('keybindings.json', GOOD_SETTINGS);
+    const { snapshot } = scanAdapter(PI_ADAPTER_ID, { ...DEFAULT_PI_ADAPTER, root: tmp });
+    expect([...cat(snapshot, 'settings').files.keys()]).toEqual(['keybindings.json', 'settings.json']);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* M-A：root 不存在时 errors 必须能定位到具体 root                      */
+/* ------------------------------------------------------------------ */
+
+describe('scanAdapter — root 错误的可诊断性（M-A 上游）', () => {
+  it('root 缺失 → error.path 是该 root 的绝对路径（CLI 据此报 ⚠）', () => {
+    const missing = path.join(tmp, 'gone', 'agent');
+    const { snapshot, errors } = scanAdapter(PI_ADAPTER_ID, { ...DEFAULT_PI_ADAPTER, root: missing });
+    expect(snapshot.categories).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.path).toBe(missing);
+  });
+
+  it('enabled:false 的 adapter 不产生任何 error（不是「root 不可读」）', () => {
+    const missing = path.join(tmp, 'gone', 'agent');
+    const { snapshot, errors } = scanAdapter(PI_ADAPTER_ID, { ...DEFAULT_PI_ADAPTER, root: missing, enabled: false });
+    expect(snapshot.categories).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});

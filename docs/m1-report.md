@@ -217,3 +217,41 @@ $ git diff --stat src/core/types.ts
 1. **无法开 MR/PR**：本仓库 `git remote -v` 为空（`/root/code/homer-cli` 是本地仓库，无 origin），因此无法 push 分支 / 开 MR。提交已落在当前 `master`（`git log -1`，提交信息 `feat(m1): e2e acceptance + integration fixes + m1-report`）。若需要 MR 流程，请先配置 remote 后由 orchestrator 指定目标分支，我再补 push + MR（本地不自行 merge，也不 push 到 main/master）。
 2. **`homer init` 在 pi root 缺失时静默 exit 0**：见 §4 第 5 条，需产品决策（M2+）。
 3. **真实环境冒烟为只读单次**：未对真实 `~/.pi/agent` 做任何写操作，因此「store 与真实目录长期一致性」未验证（M2 写路径的事）。
+
+---
+
+## 6. 对抗式 review 修复（3 路 reviewer 综合裁决后）
+
+本节记录 M1 交付后的对抗式 review 修复（commit `fix(m1): address adversarial review ...`）。
+硬约束：未改 `src/core/types.ts`（`git diff --name-only` 无该文件）；每条修复附回归测试。
+
+### 6.1 Major
+
+| 项 | 结论 |
+|---|---|
+| **M-A** root 不存在 → status 误报全量 push | `collectSnapshotSources` 不再丢弃 `ScanOutcome.errors`；`StatusReport` / `InitReport` 增加 additive `errors: string[]`；文本输出置顶 `⚠ adapter root 不可读: <id>` / `⚠ 扫描告警: <id>`；root 不可读时判定侧 local 视作 = base（**不产生假 push 计数**）；exit 仍 0；`init` 也提示。回归：`tests/cli/missing-root.test.ts`（11 例）+ e2e。 |
+| **M-B** symlink 回环膨胀 / 逃逸 root | `walk` 维护 visited realpath 集合截断回环；每个 symlink（含声明的 category path 自身）先 `realpathSync`，realpath 不在 root 之下 → skip + 记 `ScanError`；悬空链接静默跳过。回归：`tests/adapters/pi/scan-symlink.test.ts`（12 例，含回环 / 逃逸 / 悬空 / root 内正常链接）。 |
+| **M-C** store 写入非原子 | 改为写 `<adapterDir>.tmp-<pid>`（最后落 `.homer-complete` 标记）→ rm 旧目录 → `renameSync` 原子替换；写失败清理 tmp 且旧目录保持完整；`readSnapshotFromStore` 发现 adapter 目录存在但缺标记 → 抛 `CliError("store 不完整...")`，不再静默当空 base。回归：`tests/store/store.test.ts` 原子写入 / 完整性校验组。 |
+
+### 6.2 Minor（8 条）
+
+1. `deepEqual` 用 `Object.is`（NaN / -0）—— `tests/engine/merge.test.ts`。
+2. `childSlot` / `diff` 加 `hasOwnProperty` 守卫处理 `__proto__` / `constructor` —— 同上。
+3. diff 冲突行（`mergeConflicts` / conflict op 命中）加 `⚡` 前缀 —— `tests/cli/diff.test.ts`。
+4. 新建 `src/core/entry-kind.ts` 统一 `entryKindFor(mode, content)` / `isPlainObject`；scan / store 改用它；diff 的 parse 失败条目降级为 mirror 行级（与 `drift.isDegraded` 对齐），删除第三套宽松解析 —— `tests/core/entry-kind.test.ts` + `tests/cli/diff.test.ts`。
+5. `expandHome` 提升到 `src/core/paths.ts` 导出，`scan.ts` 改 import。
+6. `isPlainObject` 收敛到共享模块（merge / config / diff 三处改 import）。
+7. 删除 `walk` 内的 `entries.sort`（`scanCategory` 末尾排序是唯一稳定来源）；fixture 锁定。
+8. e2e fixture 垃圾集扩充（`*.bak2`、`extensions-removed/`、`AGENTS.md`、`cursor-sdk-*.json`）；themes 旧值断言改行级精确匹配（`-{"name":"dark"}`）。
+
+### 6.3 `stripExcludeKeys` 假漂移查证（rev-correctness 报告项）
+
+**结论：按报告描述不可复现**（`tests/engine/strip-drift.test.ts` 钉住行为）。
+
+- `stripExcludeKeys` 在采集层对 base / local **对称**调用（`render.ts`），且 M1 的 remote 缺省 = base（已剥离），三方比较用同一套规范化文本；
+- `JSON.stringify` 的实际效果与担忧相反：它**统一数字键顺序**（整数键升序）并**消灭缩进差异**，因此**减少**假漂移。3000 次随机 key 顺序 + 空白 + 嵌套/数组/Unicode 的 fuzz 未产生任何假漂移；
+- 残留边界（已用测试钉住现状，未改冻结语义）：`drift.ts` 的 `l.content !== r.content` 是**字节级**比较，语义相等但**键插入顺序**不同的 JSON 仍可能判冲突；该分支**仅当显式注入 remote 且 base 缺失**时可达（M1 生产路径不可达）；且**不调用 strip 同样复现** —— 属 plan §1.3 冻结的「内容相等 = 字符串全等」，非本次 strip 引入。是否引入 canonical 序列化留待 M2 决策；
+
+### 6.4 行为变更提示
+
+`docs/m1-report.md` §4 第 5 条（「pi root 不存在时 init 静默 exit 0」）已在本次修复中改变：`init` 仍 exit 0，但会打印 `⚠ adapter root 不可读: pi` 并在 `--json` 的 `errors` 中给出原因。

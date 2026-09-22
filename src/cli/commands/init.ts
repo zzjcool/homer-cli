@@ -15,7 +15,13 @@ import type { AdapterConfig, AdapterSnapshot, HomerConfig } from '../../core/typ
 import { saveConfig } from '../../core/config.js';
 import { writeSnapshotToStore } from '../../core/store/store.js';
 import { DEFAULT_PI_ADAPTER, PI_ADAPTER_ID, scanAdapter } from '../../adapters/pi/index.js';
-import { CliError, resolveHomerPaths } from '../render.js';
+import {
+  CliError,
+  resolveHomerPaths,
+  scanOutcomeError,
+  sourceErrorMessages,
+  type SnapshotSourceErrors,
+} from '../render.js';
 
 export interface InitOptions {
   homerHome?: string;
@@ -26,6 +32,8 @@ export interface InitOptions {
 export interface InitReport {
   homerHome: string;
   adapters: { id: string; categories: { name: string; fileCount: number }[] }[];
+  /** 采集告警（additive，M-A）：root 缺失时 init 仍 exit 0，但报告里带上原因。 */
+  errors: string[];
 }
 
 /** M1 已知 adapter 注册表（后续 adapter 在此登记）。 */
@@ -87,10 +95,16 @@ export async function runInit(opts: InitOptions, runOpts: InitRunOptions = {}): 
   const config: HomerConfig = { version: 1, adapters };
 
   const reportAdapters: InitReport['adapters'] = [];
+  const errors: SnapshotSourceErrors = [];
   for (const [adapterId, adapterConfig] of Object.entries(adapters)) {
     const outcome = scanAdapter(adapterId, adapterConfig);
     const snapshot: AdapterSnapshot = outcome.snapshot;
     writeSnapshotToStore(paths, snapshot);
+
+    // M-A：root 缺失（如 pi 已卸载）时不能只静默写空快照——把原因带进报告，
+    // 让 `homer init` 的输出/JSON 能提醒用户「该 adapter 一个文件都没扫到」。
+    const errorEntry = scanOutcomeError(adapterId, outcome);
+    if (errorEntry !== undefined) errors.push(errorEntry);
 
     reportAdapters.push({
       id: adapterId,
@@ -103,5 +117,5 @@ export async function runInit(opts: InitOptions, runOpts: InitRunOptions = {}): 
 
   saveConfig(paths, config);
 
-  return { homerHome: paths.home, adapters: reportAdapters };
+  return { homerHome: paths.home, adapters: reportAdapters, errors: sourceErrorMessages(errors) };
 }

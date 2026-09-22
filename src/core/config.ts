@@ -2,15 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import type { HomerConfig } from './types.js';
+import { isPlainObject } from './entry-kind.js';
 import type { HomerPaths } from './paths.js';
 
 export type ConfigResult =
   | { ok: true; config: HomerConfig }
   | { ok: false; errors: string[] };
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function checkStringArray(value: unknown, where: string, errors: string[]): void {
   if (!Array.isArray(value)) {

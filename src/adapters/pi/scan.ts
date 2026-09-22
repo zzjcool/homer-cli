@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import type {
@@ -10,6 +9,8 @@ import type {
   SnapshotEntry,
   SnapshotFiles,
 } from '../../core/types.js';
+import { entryKindFor } from '../../core/entry-kind.js';
+import { expandHome } from '../../core/paths.js';
 import { matchesIgnore } from './ignore.js';
 
 export interface ScanError {
@@ -20,15 +21,6 @@ export interface ScanError {
 export interface ScanOutcome {
   snapshot: AdapterSnapshot; // 仅含 root 存在且 enabled 的分类
   errors: ScanError[]; // root 不存在 → snapshot 空 + error；读失败不炸
-}
-
-/** 展开开头的 '~'（'~' / '~/x' / '~\\x'），其余原样。 */
-function expandHome(input: string): string {
-  if (input === '~') return os.homedir();
-  if (input.startsWith('~/') || input.startsWith('~\\')) {
-    return path.join(os.homedir(), input.slice(2));
-  }
-  return input;
 }
 
 /** 目录型 path（以 '/' 结尾）→ true。 */
@@ -68,60 +60,102 @@ function isIgnored(relPath: string, ignore: string[] | undefined): boolean {
   return matchesIgnore(relPath, ignore);
 }
 
-function tryParseJson(content: string): boolean {
+const MAX_DEPTH = 32;
+
+interface WalkState {
+  ignore: string[] | undefined;
+  exclude: string[] | undefined;
+  errors: ScanError[];
+  out: string[];
+  /** adapter root 的真实路径（symlink containment 基准）。 */
+  rootReal: string;
+  /** 本次 walk 已展开过的目录真实路径（symlink 回环检测）。 */
+  visited: Set<string>;
+}
+
+/** realpath 封装：失败（悬空 / 竞争删除）→ undefined。 */
+function tryRealpath(target: string): string | undefined {
   try {
-    JSON.parse(content);
-    return true;
+    return fs.realpathSync(target);
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-const MAX_DEPTH = 32;
+/** child 是否位于 root 之下（两者都必须是 realpath）。 */
+function isWithinRoot(child: string, root: string): boolean {
+  if (child === root) return true;
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return child.startsWith(prefix);
+}
 
 /**
- * 递归收集目录下所有文件的 relPath（相对 root），已应用 ignore。
- * 目录本身命中 ignore / exclude 则整棵剪枝。
+ * symlink 条目处理（安全边界）：
+ *   1. realpath 失败（悬空链接）→ 静默跳过（等价于「该路径不存在」）；
+ *   2. realpath 落在 adapter root 之外 → 跳过 + 记 ScanError（防「链接把 root 外内容带进快照」）；
+ *   3. realpath 指向目录 → 交给 walk（其入口用 visited 集合截断回环）；
+ *   4. realpath 指向文件 → 正常收集。
  */
-function walk(
-  absBase: string,
-  relBase: string,
-  opts: {
-    ignore: string[] | undefined;
-    exclude: string[] | undefined;
-    depth: number;
-    errors: ScanError[];
-    out: string[];
-  },
-): void {
-  if (opts.depth > MAX_DEPTH) return;
+function visitSymlink(abs: string, rel: string, depth: number, state: WalkState): void {
+  const real = tryRealpath(abs);
+  if (real === undefined) return;
+
+  if (!isWithinRoot(real, state.rootReal)) {
+    state.errors.push({
+      path: abs,
+      message: `symlink 逃逸 adapter root: ${real}`,
+    });
+    return;
+  }
+
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(real);
+  } catch {
+    return;
+  }
+  if (st.isDirectory()) {
+    walk(abs, rel, depth + 1, state);
+  } else if (st.isFile()) {
+    state.out.push(rel);
+  }
+}
+
+/**
+ * 递归收集目录下所有文件的 relPath（相对扫描起点），已应用 ignore。
+ * 目录本身命中 ignore / exclude 则整棵剪枝。
+ *
+ * 顺序：readdir 原始顺序（不再在内层排序——scanCategory 末尾的统一排序才是稳定顺序的唯一来源，
+ * 两处排序纯属冗余）。symlink 见 visitSymlink：目录真实路径记入 visited，回环只展开一次。
+ */
+function walk(absBase: string, relBase: string, depth: number, state: WalkState): void {
+  if (depth > MAX_DEPTH) return;
+
+  const realBase = tryRealpath(absBase);
+  if (realBase === undefined) return;
+  if (state.visited.has(realBase)) return; // symlink 目录回环：不再重复展开
+  state.visited.add(realBase);
+
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(absBase, { withFileTypes: true });
   } catch (err) {
-    opts.errors.push({ path: absBase, message: (err as Error).message });
+    state.errors.push({ path: absBase, message: (err as Error).message });
     return;
   }
-  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const entry of entries) {
     const rel = relBase === '' ? entry.name : `${relBase}/${entry.name}`;
-    if (isIgnored(rel, opts.ignore) || isExcluded(rel, opts.exclude)) continue;
+    if (isIgnored(rel, state.ignore) || isExcluded(rel, state.exclude)) continue;
     const abs = path.join(absBase, entry.name);
-    let isDir = entry.isDirectory();
-    let isFile = entry.isFile();
+
     if (entry.isSymbolicLink()) {
-      try {
-        const st = fs.statSync(abs);
-        isDir = st.isDirectory();
-        isFile = st.isFile();
-      } catch {
-        continue;
-      }
+      visitSymlink(abs, rel, depth, state);
+      continue;
     }
-    if (isDir) {
-      walk(abs, rel, { ...opts, depth: opts.depth + 1 });
-    } else if (isFile) {
-      opts.out.push(rel);
+    if (entry.isDirectory()) {
+      walk(abs, rel, depth + 1, state);
+    } else if (entry.isFile()) {
+      state.out.push(rel);
     }
   }
 }
@@ -134,12 +168,48 @@ function readEntry(abs: string, mode: CategoryConfig['mode'], errors: ScanError[
     errors.push({ path: abs, message: (err as Error).message });
     return undefined;
   }
-  const kind: SnapshotEntry['kind'] = mode === 'merge' && tryParseJson(content) ? 'json' : 'file';
-  return { kind, content };
+  return { kind: entryKindFor(mode, content), content };
+}
+
+/**
+ * 解析用户在 homer.json 里声明的 path（单文件 / 目录）——同样适用 root containment。
+ *
+ * 计划原文：「对每个 symlink 先 fs.realpathSync 解析真实路径——realpath 不在 root realpath 之下
+ * → skip + 记 ScanError（防逃逸）」。因此**包括**声明的 category path 自身为 symlink 的情况。
+ * 返回 undefined = 该 path 不存在（缺文件/缺目录，不视为错误）。
+ */
+function resolveConfiguredPath(
+  abs: string,
+  rootReal: string,
+  errors: ScanError[],
+): { real: string; stat: fs.Stats } | undefined {
+  let lst: fs.Stats;
+  try {
+    lst = fs.lstatSync(abs);
+  } catch {
+    return undefined; // 不存在 = 此处无文件，不报错
+  }
+
+  if (!lst.isSymbolicLink()) {
+    return { real: abs, stat: lst };
+  }
+
+  const real = tryRealpath(abs);
+  if (real === undefined) return undefined; // 悬空链接 → 静默跳过
+  if (!isWithinRoot(real, rootReal)) {
+    errors.push({ path: abs, message: `symlink 逃逸 adapter root: ${real}` });
+    return undefined;
+  }
+  try {
+    return { real, stat: fs.statSync(real) };
+  } catch {
+    return undefined;
+  }
 }
 
 function scanCategory(
   root: string,
+  rootReal: string,
   category: string,
   cfg: CategoryConfig,
   ignore: string[] | undefined,
@@ -153,37 +223,38 @@ function scanCategory(
       if (relDir === '') continue;
       if (isIgnored(relDir, ignore) || isExcluded(relDir, cfg.exclude)) continue;
       const absDir = path.join(root, relDir);
-      let st: fs.Stats;
-      try {
-        st = fs.statSync(absDir);
-      } catch {
-        // 目录不存在 = 该分类此处无文件，不视为错误
-        continue;
-      }
-      if (!st.isDirectory()) continue;
+      const resolved = resolveConfiguredPath(absDir, rootReal, errors);
+      // 目录不存在 / 不是目录 / symlink 逃逸 → 该分类此处无文件
+      if (resolved === undefined || !resolved.stat.isDirectory()) continue;
+
+      // 合法（root 内）的 symlink 目录 → 用真实路径作扫描起点；walk 内部的 visited 集合
+      // 仍会截断回环，readEntry 也用 realpath 读（scanBase 已 realpath）。
+      const scanBase = resolved.real;
       const collected: string[] = [];
-      walk(absDir, '', { ignore, exclude: cfg.exclude, depth: 0, errors, out: collected });
+      walk(scanBase, '', 0, {
+        ignore,
+        exclude: cfg.exclude,
+        errors,
+        out: collected,
+        rootReal,
+        visited: new Set<string>(),
+      });
       for (const rel of collected) {
-        const entry = readEntry(path.join(absDir, rel), cfg.mode, errors);
+        const entry = readEntry(path.join(scanBase, rel), cfg.mode, errors);
         if (entry) files.set(normalizeRel(rel), entry);
       }
     } else {
       if (isIgnored(p, ignore) || isExcluded(p, cfg.exclude)) continue;
       const abs = path.join(root, p);
-      let st: fs.Stats;
-      try {
-        st = fs.statSync(abs);
-      } catch {
-        continue;
-      }
-      if (!st.isFile()) continue;
-      const entry = readEntry(abs, cfg.mode, errors);
+      const resolved = resolveConfiguredPath(abs, rootReal, errors);
+      if (resolved === undefined || !resolved.stat.isFile()) continue;
+      const entry = readEntry(resolved.real, cfg.mode, errors);
       // §1.6：单文件 → relPath = 文件名本身
       if (entry) files.set(basenameOf(normalizeRel(p)), entry);
     }
   }
 
-  // 稳定顺序：按 relPath 排序，方便测试与 diff
+  // 稳定顺序：按 relPath 排序，方便测试与 diff（walk 内的中间排序已删除，这里是唯一来源）
   const sorted: SnapshotFiles = new Map<string, SnapshotEntry>();
   for (const key of [...files.keys()].sort()) {
     const value = files.get(key);
@@ -219,9 +290,11 @@ export function scanAdapter(adapterId: string, config: AdapterConfig): ScanOutco
     return { snapshot, errors };
   }
 
+  const rootReal = tryRealpath(root) ?? root;
+
   for (const [category, cfg] of Object.entries(config.categories)) {
     if (cfg.enabled === false) continue;
-    const cat = scanCategory(root, category, cfg, config.ignore, errors);
+    const cat = scanCategory(root, rootReal, category, cfg, config.ignore, errors);
     cat.adapterId = adapterId;
     snapshot.categories.push(cat);
   }

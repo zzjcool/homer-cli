@@ -106,6 +106,7 @@ describe('buildStatusReport', () => {
     ];
     const report = buildStatusReport(drifts);
     expect(report).toEqual({
+      errors: [],
       adapters: [
         {
           id: 'pi',

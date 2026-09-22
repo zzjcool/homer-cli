@@ -12,10 +12,15 @@
  */
 
 import { getHomerPaths, type HomerPaths } from '../core/paths.js';
+import { CliError } from '../core/errors.js';
 import { stripExcludeKeys } from '../core/engine/index.js';
 import { readSnapshotFromStore } from '../core/store/store.js';
-import { scanAdapter } from '../adapters/pi/index.js';
+import { scanAdapter, type ScanError } from '../adapters/pi/index.js';
 import type { AdapterSnapshot, HomerConfig } from '../core/types.js';
+
+// CliError 现在定义在 core/errors.ts（store 也要抛它，避免 core → cli 反向依赖）；
+// 这里 re-export，既有 `import { CliError } from '../render.js'` 的调用方无需改动。
+export { CliError };
 
 const UP = '↑';
 const DOWN = '↓';
@@ -23,20 +28,6 @@ const DOWN = '↓';
 /* ------------------------------------------------------------------ */
 /* CLI 通用工具                                                        */
 /* ------------------------------------------------------------------ */
-
-/**
- * 可预期的用户级错误（配置缺失 / 拒绝覆盖等）。
- * 分发层捕获后打印 `message`（+ 可选 `hint`）并以退出码 1 结束。
- */
-export class CliError extends Error {
-  readonly hint: string | undefined;
-
-  constructor(message: string, hint?: string) {
-    super(message);
-    this.name = 'CliError';
-    this.hint = hint;
-  }
-}
 
 /**
  * 解析 homer 工作区路径。
@@ -48,6 +39,16 @@ export function resolveHomerPaths(homerHome?: string): HomerPaths {
 }
 
 /**
+ * 采集期错误条目（additive，M-A）：live scan 的 ScanOutcome.errors 按 adapterId 聚合。
+ * 缺失 adapter root 时 local 快照为空，若丢弃 errors 会把「扫不到」静默当成「本地全空」
+ * → status 报出全量 push 的假漂移。保留 errors 让命令层能显式提示并避免误报。
+ *
+ * `rootUnreadable`：整个 root 不可读（不存在 / 不是目录）。文本层据此决定告警措辞：
+ * 根级失败 → `⚠ adapter root 不可读: <id>`（M-A 要求）；其余（如 symlink 逃逸）→ `⚠ 扫描告警`。
+ */
+export type SnapshotSourceErrors = { adapterId: string; rootUnreadable: boolean; errors: ScanError[] }[];
+
+/**
  * 三方判定原料（§1.4）：
  *   base   = store 快照（最后一次同步态）
  *   local  = 各 enabled adapter root 的实时扫描
@@ -57,6 +58,42 @@ export interface CliDriftSources {
   base: AdapterSnapshot[];
   local: AdapterSnapshot[];
   remote?: AdapterSnapshot[];
+  /**
+   * 采集期错误（可选：`collectSnapshotSources` 永远填它；单测 / M2 手工注入时可省略 = 无告警）。
+   */
+  errors?: SnapshotSourceErrors;
+}
+
+/** 单条采集错误 → 人类可读文本（路径 + 原因）。 */
+export function formatScanError(error: ScanError): string {
+  return `${error.path}: ${error.message}`;
+}
+
+/**
+ * 采集错误 → 报告层字符串（`errors: string[]`，StatusReport / InitReport 的 additive 字段）。
+ * 措辞区分根级失败（root 不可读）与其它扫描告警，避免对「root 明明可读」的场景误报。
+ */
+export function sourceErrorMessages(errors: SnapshotSourceErrors): string[] {
+  return errors.flatMap((entry) =>
+    entry.errors.map((error) => {
+      const prefix = entry.rootUnreadable ? 'adapter root 不可读' : '扫描告警';
+      return `${prefix}: ${entry.adapterId} (${formatScanError(error)})`;
+    }),
+  );
+}
+
+/**
+ * root 级失败判定：扫描结果空分类 + 有错 → 整个 root 不可读（不存在 / 不是目录）。
+ * 用于 status 抑制「local 视作全空」造成的假 push。
+ */
+function isRootUnreadable(outcome: { snapshot: AdapterSnapshot; errors: ScanError[] }): boolean {
+  return outcome.snapshot.categories.length === 0 && outcome.errors.length > 0;
+}
+
+/** 把单个 adapter 的 ScanOutcome 转为采集错误条目（无错时返回 undefined）。 */
+export function scanOutcomeError(adapterId: string, outcome: { snapshot: AdapterSnapshot; errors: ScanError[] }): SnapshotSourceErrors[number] | undefined {
+  if (outcome.errors.length === 0) return undefined;
+  return { adapterId, rootUnreadable: isRootUnreadable(outcome), errors: outcome.errors };
 }
 
 /** 对单个快照应用该 adapter 各分类的 excludeKeys 剥离（§1.2：drift 比较前对 base / local 各调一次）。 */
@@ -78,18 +115,33 @@ function stripAdapterExcludedKeys(snapshot: AdapterSnapshot, config: HomerConfig
  * 从 store + 实时扫描采集三方判定原料。
  * base / local 都按 config 的 enabled adapter & category 结构对齐（store 侧保证同构），
  * 这样 local 新增/删除才会被判成 push。
+ *
+ * live scan 的 `ScanOutcome.errors` 一律保留在返回值的 `errors` 里（M-A）：
+ * root 不可读时 local 快照会退化为空，若直接参与比较则 base 里的每个文件都会被算成
+ * push-delete（假漂移）。因此 root 不可读的 adapter 在判定时 local 视作 = base（零漂移），
+ * 依靠 `errors` 把原因暴露给命令层。
  */
 export function collectSnapshotSources(paths: HomerPaths, config: HomerConfig): CliDriftSources {
   const base = readSnapshotFromStore(paths, config).map((snapshot) => stripAdapterExcludedKeys(snapshot, config));
 
   const local: AdapterSnapshot[] = [];
+  const errors: SnapshotSourceErrors = [];
   for (const [adapterId, adapterConfig] of Object.entries(config.adapters)) {
     if (adapterConfig.enabled === false) continue;
     const outcome = scanAdapter(adapterId, adapterConfig);
+    const entry = scanOutcomeError(adapterId, outcome);
+    if (entry !== undefined) errors.push(entry);
+
+    if (entry?.rootUnreadable === true) {
+      // root 不可读：不把「扫不到」当成「本地全空」。
+      const baseSnapshot = base.find((snapshot) => snapshot.adapterId === adapterId);
+      local.push(baseSnapshot ?? stripAdapterExcludedKeys(outcome.snapshot, config));
+      continue;
+    }
     local.push(stripAdapterExcludedKeys(outcome.snapshot, config));
   }
 
-  return { base, local };
+  return { base, local, errors };
 }
 
 /* ------------------------------------------------------------------ */
@@ -105,12 +157,16 @@ export interface StatusReportLike {
     conflicts: number;
     categories: { name: string; push: number; pull: number; conflicts: number }[];
   }[];
+  /** 采集期错误（additive）：人类可读输出以 ⚠ 头行提示。 */
+  errors?: string[];
 }
 
 /** renderInit 只依赖这个结构化形状，避免与 commands/init.ts 产生循环 import。 */
 export interface InitReportLike {
   homerHome: string;
   adapters: { id: string; categories: { name: string; fileCount: number }[] }[];
+  /** 采集期错误（additive）：root 缺失时 init 也打印明显提示。 */
+  errors?: string[];
 }
 
 export interface RenderStatusOptions {
@@ -121,16 +177,21 @@ export interface RenderStatusOptions {
 /**
  * status 人类可读输出：
  *
+ *   ⚠ adapter root 不可读: pi (/home/u/.pi/agent: ENOENT ...)
  *   pi  ↑3 ↓0
  *     settings  ↑1 ↓0
  *     skills  ↑2 ↓0
  *
- * 全零时追加一行 `无漂移`。
+ * 全零时追加一行 `无漂移`。采集错误（errors，可选）一律置顶为 ⚠ 头行。
  */
 export function renderStatus(report: StatusReportLike, opts: RenderStatusOptions = {}): string {
-  if (report.adapters.length === 0) return '（homer.json 中没有启用的 adapter）';
+  const warningLines = renderSourceWarnings(report.errors ?? []);
 
-  const lines: string[] = [];
+  if (report.adapters.length === 0) {
+    return [...warningLines, '（homer.json 中没有启用的 adapter）'].join('\n');
+  }
+
+  const lines: string[] = [...warningLines];
   let totalPush = 0;
   let totalPull = 0;
   let totalConflicts = 0;
@@ -155,9 +216,17 @@ function conflictTag(conflicts: number): string {
   return conflicts > 0 ? `  冲突${conflicts}` : '';
 }
 
+/** 采集错误 → `⚠ <message>` 头行。 */
+function renderSourceWarnings(errors: string[]): string[] {
+  return errors.map((message) => `⚠ ${message}`);
+}
+
 /** init 人类可读输出：homer 工作区 + 每个 adapter / 分类写入了多少文件。 */
 export function renderInit(report: InitReportLike): string {
   const lines: string[] = [`homer init: ${report.homerHome}`];
+  if (report.errors && report.errors.length > 0) {
+    lines.push(...renderSourceWarnings(report.errors).map((line) => `  ${line}`));
+  }
   if (report.adapters.length === 0) {
     lines.push('（没有要初始化的 adapter）');
     return lines.join('\n');
