@@ -106,8 +106,8 @@ chezmoi 双方案参考：① 密钥不进仓库——模板函数运行时从�
 }
 ```
 
-- **merge 模式**：JSON 字段级三路合并（VS Code settingsMerge 模式）
-- **mirror 模式**：目录整树同步（文件级，冲突 last-writer-wins + 备份）
+- **merge 模式**：JSON 字段级三路合并（VS Code settingsMerge 模式），语义详见 §2.7
+- **mirror 模式**：目录整树同步（文件级三路判定，冲突交人工，LWW 仅作批量降级选项，详见 §2.7）
 - **excludeKeys**：字段级排除（密钥占位符替换，参考 legout/pi-config 的 `__REQUIRED__` 方案）
 - 首发三个 adapter：**pi**（最深）、**herdr**（独家）、**opencode**；预留 adapter 插件机制供社区贡献 claude/codex/shell 等
 
@@ -141,9 +141,9 @@ pi 扩展形态：`pi install npm:homer-cli` 后提供 `/homer status` 等命令
 
 ### 2.5 冲突处理（借鉴 VS Code）
 
-1. JSON 配置（settings/models）：**三路按键合并**；同键不同值 → 冲突列表
+1. JSON 配置（settings/models）：**三路按键合并**（语义详见 §2.7）；同键不同值 → 冲突列表
 2. 冲突解决：`homer merge` 交互式（Accept Local / Accept Remote / 手动编辑 diff）
-3. 目录文件：last-writer-wins + 应用前本地备份到 `~/.homer/backups/`
+3. 目录文件：文件级三路判定 + 应用前本地备份到 `~/.homer/backups/`（详见 §2.7）
 4. 首次对接新机器：Pull（远端覆盖）/ Merge / Skip 三选一
 5. **never auto-push**：自动同步只做安全 pull（参考 @dbaida/pi-sync 的保守策略）
 
@@ -154,6 +154,95 @@ pi 扩展形态：`pi install npm:homer-cli` 后提供 `/homer status` 等命令
 - 密钥轮转：age 支持多 recipient，换设备 = 加新 recipient + 重加密（git-crypt 的撤销红线已避开）
 - tailcat 通道密钥不落 git
 - 本地状态/锁/备份在 `~/.homer/` 下，不污染各工具目录
+
+## 2.7 同步语义层（base / 三路判定 / 冲突矩阵）
+
+> 设计决策（2026-09-22 确认）：mirror 从盲 last-writer-wins 升级为**文件级三路判定**；
+> merge 的数组按**原子值**处理。理由：跨机 mtime 不可信（clone/解压即重置），
+> 盲 LWW 静默丢数据；真正的"谁后写"只能靠"哪边相对 base 变了"来判断。
+
+### base 从哪来：git 历史
+
+- `state.json` 记录**上次同步成功的 commit**（本来就要记）
+- base 内容 = 该 commit 时 `store/` 的文件内容；local = 工具目录当前内容；remote = 远端最新 commit
+- 不存文件快照、不做文件监听，三路判定的原料全部现成
+
+### merge 模式判定矩阵（JSON 字段级）
+
+| 情形 | 规则 |
+|---|---|
+| 嵌套对象 | 递归合并 |
+| 数组 | **原子值**——整体替换；双方都改 → 冲突（可预测性 > 灵活性，照抄 VS Code）|
+| 本地删键 / 远端未动 | 删除生效（删除也是配置）|
+| 本地删键 / 远端改值 | 冲突（del vs modify 是真歧义）|
+| 双方改不同键 | 自动合并 ✅ |
+| 双方改同键不同值 | 进冲突列表 → `homer merge` 交互 |
+| 分类内混入非 JSON 文件 | 该文件自动降级按 mirror 处理（不炸、日志提示）|
+
+`excludeKeys` 是 merge 子特性：push 时剥离并换 `__REQUIRED__` 占位符，pull 时反向校验——缺失必填项进 doctor 报告。
+
+### mirror 模式判定矩阵（文件级三路）
+
+| 本地 vs base | 远端 vs base | 结果 |
+|---|---|---|
+| 未变 | 未变 | 无事 |
+| **改了** | 未变 | push 方向，自动 ✅ |
+| 未变 | **改了** | pull 方向，自动 ✅（"单向变更自动走"的实现基础）|
+| 未变 | **删除** | pull 时删本地文件（先备份）|
+| **删除** | 改了 | 冲突（不静默复活、不静默丢）|
+| **改了** | **改了** | 冲突 → Accept Local / Remote / 逐文件 diff |
+| **改了** | **删除** | 冲突（同上）|
+
+LWW 仅保留为 `--accept-local` / `--accept-remote` 批量降级 flag（用户明确授权才整体覆盖）。
+
+### 首次同步（无 base）
+
+Pull / Merge / Skip 三选一不变；选 Merge 且无 base 时，merge 退化为**并集合并 + 同键冲突列表**（VS Code 首次对接同款），mirror 退化为并集 + 同路径不同内容进冲突列表。
+
+### status/diff/sync/pull 共用判定引擎
+
+`homer status` 的 `↑n ↓n` 漂移计数就是上述判定的只读输出。**M1 实现判定引擎 + 只读输出（status/diff），M2 给同一引擎接写路径（push/pull/merge）**，不重复造轮子。
+
+### 备份策略
+
+- 任何写操作（pull 应用 / 删除传播 / 冲突覆盖）前，受影响文件备份到 `~/.homer/backups/<date>/`
+- 按日期保留最近 N 份（默认 7），doctor 可清理
+
+## 2.8 CLI 交互设计（@clack/prompts + 无 TTY 降级）
+
+### 交互哲学
+
+交互只在**有风险或需要决策**的时刻出现；日常同步静默自动化（与 never auto-push 一脉相承）。
+
+### 已设计的交互点（§2.3 / §2.5）
+
+- `homer init`：扫描到哪些工具 → 勾选启用 adapter/分类（多选）
+- `homer pull`：diff 预览 → 确认 → 应用
+- `homer merge`：逐项 Accept Local / Accept Remote / 手动编辑
+- 首次对接：Pull / Merge / Skip 三选一
+- `homer sync`：单向变更自动走，双向冲突才进交互
+
+### 技术选型：@clack/prompts
+
+- 现代、轻量、UX 好，当前社区主流选择 ✅（选定）
+- inquirer：老牌但重 ❌
+- ink：React 终端 UI，对问答式交互是杀鸡用牛刀 ❌
+- 裸 readline：零依赖但多选/确认体验差；交互是 homer 高频门面，不值得省 ❌
+
+### 无 TTY / 自动化降级（接口从 M1 起冻结）
+
+**每个交互命令必须有无交互 flag 降级路径**，M1 定命令签名时就留好位置，避免 M4 破坏性改接口：
+
+```
+homer pull --yes                 # 全自动，冲突走默认策略（保持现状+标红）+ 备份
+homer merge --accept-local       # 全听本地（LWW 降级出口）
+homer merge --accept-remote      # 全听远端
+homer status --json              # 机器可读输出（脚本/CI/footer 共用）
+```
+
+### pi 扩展形态的交互协议（M4 落地，现在只留协议位）
+
+homer 作为 pi 子进程运行时**不能抢占 TTY**。模式：homer 子进程输出**结构化冲突清单（JSON）**，pi 扩展在聊天里问用户，再带着决定回调 homer（`homer merge --resolve <json>`）。交互输出与机器输出分离是骨架期约定。
 
 ## 3. MVP 范围（首个可用版本）
 
