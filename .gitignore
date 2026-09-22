@@ -11,3 +11,9 @@ coverage/
 
 # herdr-subagents 运行记录（本地工具产物，不入库）
 .pi-subagents/
+
+# herdr subagent 运行目录（worktree / 运行元数据，本地工具产物）
+.pi/
+
+# vitest 缓存
+.vitest/

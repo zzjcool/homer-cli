@@ -153,6 +153,23 @@ function accumulateMergeFile(
   drift.push += localDiff.changed + localDiff.added + localDiff.deleted;
   for (const key of localDiff.keys) drift.changedKeys.push(`${relPath}:${key}`);
 
+  // base 缺失（首次对接）→ 并集语义，与 mirror compareFile 的 baseAbsent 分支对齐：
+  //   仅 local 有 → push（已计）；仅 remote 有 → pull；两侧都有且内容不同 → 冲突。
+  // 本分支必须先于下面的单边删除分支：否则「init 时文件不存在、之后本地新增」
+  //（remote 缺省 = base，同样不存在）会被 `r === undefined` 分支误判成 modify-vs-delete 冲突。
+  if (b === undefined) {
+    if (l === undefined) {
+      drift.pull += 1;
+      return;
+    }
+    if (r === undefined) return;
+    if (l.content !== r.content) {
+      drift.conflicts += 1;
+      drift.mergeConflicts.push({ keyPath: relPath, reason: 'both-modified' });
+    }
+    return;
+  }
+
   // local 删除，remote 未删 → 删除生效；remote 同时改 → 文件级 modify-vs-delete
   if (l === undefined) {
     if (r !== undefined && r.content !== b?.content) {
@@ -173,15 +190,6 @@ function accumulateMergeFile(
   }
 
   const remoteValue = parseEntry(r);
-
-  // base 缺失（首次对接）：并集语义
-  if (b === undefined) {
-    if (l.content !== r.content) {
-      drift.conflicts += 1;
-      drift.mergeConflicts.push({ keyPath: relPath, reason: 'both-modified' });
-    }
-    return;
-  }
 
   const result = mergeJson(baseValue, localValue, remoteValue);
   drift.conflicts += result.conflicts.length;
