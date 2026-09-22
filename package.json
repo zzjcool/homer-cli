@@ -1,0 +1,29 @@
+{
+  "name": "homer-cli",
+  "version": "0.0.0",
+  "description": "Dotfiles for humans and their AI agents.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "homer": "./bin/homer.js"
+  },
+  "files": [
+    "bin/",
+    "dist/"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}

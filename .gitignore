@@ -1,5 +1,13 @@
-node_modules/
+# 构建产物
 dist/
+
+# 依赖
+node_modules/
+
+# 覆盖率 / 日志 / 系统文件
+coverage/
 *.log
 .DS_Store
-coverage/
+
+# herdr-subagents 运行记录（本地工具产物，不入库）
+.pi-subagents/
