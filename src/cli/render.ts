@@ -14,6 +14,7 @@
 import { getHomerPaths, type HomerPaths } from '../core/paths.js';
 import { CliError } from '../core/errors.js';
 import { stripExcludeKeys } from '../core/engine/index.js';
+import { gitExec, isGitRepo, isStoreClean, readStoreSnapshotAtCommit, upstreamRef } from '../core/git/index.js';
 import { readSnapshotFromStore } from '../core/store/store.js';
 import { scanAdapter, type ScanError } from '../adapters/pi/index.js';
 import type { AdapterSnapshot, HomerConfig } from '../core/types.js';
@@ -52,7 +53,7 @@ export type SnapshotSourceErrors = { adapterId: string; rootUnreadable: boolean;
  * 三方判定原料（§1.4）：
  *   base   = store 快照（最后一次同步态）
  *   local  = 各 enabled adapter root 的实时扫描
- *   remote = M1 缺省 = base；M2 接 git remote 后由调用方注入
+ *   remote = M2-W10 起：git 仓库存在且 upstream 可读时 = upstream 快照；否则 = base（M1 语义）
  */
 export interface CliDriftSources {
   base: AdapterSnapshot[];
@@ -62,6 +63,12 @@ export interface CliDriftSources {
    * 采集期错误（可选：`collectSnapshotSources` 永远填它；单测 / M2 手工注入时可省略 = 无告警）。
    */
   errors?: SnapshotSourceErrors;
+  /**
+   * 采集期告警（additive，M2-W10）：非致命但用户必须看见的事实。
+   * 目前唯一来源是「store 工作区脏」（直改 store 的 ↓ 计数依据的远端/基线不一致，需先 push）。
+   * 文本层渲染为置顶 `⚠` 行，`--json` 消费者按 `warnings.length > 0` 判定。
+   */
+  warnings?: string[];
 }
 
 /** 单条采集错误 → 人类可读文本（路径 + 原因）。 */
@@ -120,6 +127,19 @@ function stripAdapterExcludedKeys(snapshot: AdapterSnapshot, config: HomerConfig
  * root 不可读时 local 快照会退化为空，若直接参与比较则 base 里的每个文件都会被算成
  * push-delete（假漂移）。因此 root 不可读的 adapter 在判定时 local 视作 = base（零漂移），
  * 依靠 `errors` 把原因暴露给命令层。
+ *
+ * ## M2-W10：remote 注入（additive）
+ *
+ * - `paths.home` **是 git 仓库根**且 `@{upstream}` 可解析 → `git fetch` 后
+ *   `remote` = 该 commit 的 store 快照。于是 `homer status` / `homer diff` 的 `↓`（pull）
+ *   计数在 git 模式下真正激活（M1 已知限制 #1：「↓ 恒为 0」由此关闭）。
+ *   base 仍是 store 工作区（M1 语义，status 不依赖 state.json）。
+ * - **会 `git fetch`**（与 `collectSyncSources` 默认一致）：否则远端刚推进的 commit 不可见，
+ *   `↓` 依旧恒 0。fetch 失败（离线 / 无网）→ `⚠` 告警 + `remote` 缺省（回落 = base），
+ *   status 仍然可用、exit 码不变。
+ * - 无 upstream / upstream 不可解析 → `remote` 缺省（调用方回落 = base），静默（不报错）。
+ * - **store 工作区脏** → 置顶 `⚠` 告警：直改 store 后 base（工作区）与 HEAD / upstream 不再自洽，
+ *   push 才能把三者对齐。
  */
 export function collectSnapshotSources(paths: HomerPaths, config: HomerConfig): CliDriftSources {
   const base = readSnapshotFromStore(paths, config).map((snapshot) => stripAdapterExcludedKeys(snapshot, config));
@@ -141,7 +161,51 @@ export function collectSnapshotSources(paths: HomerPaths, config: HomerConfig): 
     local.push(stripAdapterExcludedKeys(outcome.snapshot, config));
   }
 
-  return { base, local, errors };
+  const warnings: string[] = [];
+
+  // store 脏：master（HEAD）/ upstream 与工作区脱节，↓ 计数可能含刚被直改的字节。
+  if (isGitRepo(paths.home) && !isStoreClean(paths.home)) {
+    warnings.push(
+      'store 工作区有未提交的改动（漂移计数以 git 基线为准，可能未反映刚直改的内容）；如需提交请运行 `homer push`',
+    );
+  }
+
+  const remote = collectGitRemote(paths, config, warnings);
+
+  const sources: CliDriftSources = { base, local, errors, warnings };
+  if (remote !== undefined) sources.remote = remote;
+  return sources;
+}
+
+/**
+ * `remote` = `@{upstream}` 的 store 快照；不可得（非仓库 / 无 upstream / ref 不可解析）→ undefined
+ * （调用方回落 M1 语义 = base）。
+ *
+ * fetch 失败 → `warnings` 里记一条 + 返回 undefined（远端变更不可见，status 仍可用）。
+ */
+function collectGitRemote(
+  paths: HomerPaths,
+  config: HomerConfig,
+  warnings: string[],
+): AdapterSnapshot[] | undefined {
+  if (!isGitRepo(paths.home)) return undefined;
+
+  const ref = upstreamRef(paths.home);
+  if (ref === undefined) return undefined;
+
+  // fetch 是「↓」能真正激活的前提：不 fetch 则 origin/main 停留在上次同步点，↓ 恒 0。
+  const fetched = gitExec(paths.home, ['fetch']);
+  if (!fetched.ok) {
+    const reason = fetched.stderr.trim() === '' ? '未知错误' : fetched.stderr.trim();
+    warnings.push(`git fetch 失败（远端变更不可见，↓ 计数可能偏小）: ${reason}`);
+    return undefined;
+  }
+
+  const resolved = gitExec(paths.home, ['rev-parse', '--verify', `${ref}^{commit}`]);
+  const commit = resolved.ok ? resolved.stdout.trim() : '';
+  if (commit === '') return undefined;
+
+  return readStoreSnapshotAtCommit(paths, config, commit).map((snapshot) => stripAdapterExcludedKeys(snapshot, config));
 }
 
 /* ------------------------------------------------------------------ */
@@ -159,6 +223,8 @@ export interface StatusReportLike {
   }[];
   /** 采集期错误（additive）：人类可读输出以 ⚠ 头行提示。 */
   errors?: string[];
+  /** 采集期告警（additive，M2-W10）：同样以 ⚠ 头行置顶。 */
+  warnings?: string[];
 }
 
 /** renderInit 只依赖这个结构化形状，避免与 commands/init.ts 产生循环 import。 */
@@ -185,7 +251,7 @@ export interface RenderStatusOptions {
  * 全零时追加一行 `无漂移`。采集错误（errors，可选）一律置顶为 ⚠ 头行。
  */
 export function renderStatus(report: StatusReportLike, opts: RenderStatusOptions = {}): string {
-  const warningLines = renderSourceWarnings(report.errors ?? []);
+  const warningLines = renderSourceWarnings([...(report.errors ?? []), ...(report.warnings ?? [])]);
 
   if (report.adapters.length === 0) {
     return [...warningLines, '（homer.json 中没有启用的 adapter）'].join('\n');

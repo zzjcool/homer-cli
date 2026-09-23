@@ -271,7 +271,10 @@ export function runDiff(opts: DiffOptions, sources?: CliDriftSources): string {
   const drifts = computeDrift(src.base, src.local, src.remote);
   const remoteSnapshots = src.remote ?? src.base;
 
-  const out: string[] = sourceErrorMessages(src.errors ?? []).map((message) => `⚠ ${message}`);
+  // 采集期错误 + 告警（M-A / M2-W10）一律以 ⚠ 行置顶：diff 的空输出是脚本判据。
+  const out: string[] = [...sourceErrorMessages(src.errors ?? []), ...(src.warnings ?? [])].map(
+    (message) => `⚠ ${message}`,
+  );
   for (const adapter of drifts) {
     if (opts.adapter !== undefined && adapter.adapterId !== opts.adapter) continue;
     if (isEmptyDrift(adapter)) continue;

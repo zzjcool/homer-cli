@@ -41,9 +41,7 @@ import { CliError } from '../../core/errors.js';
 import { loadConfig } from '../../core/config.js';
 import { pruneBackups } from '../../core/backup/backup.js';
 import { saveState } from '../../core/state.js';
-import * as gitCore from '../../core/git/index.js';
-import type { GitExecResult } from '../../core/git/index.js';
-import { requireCleanStore, requireFastForwardable } from '../../core/sync/pipeline.js';
+import { resolveGitPort, type GitPort } from './git-port.js';
 import { applyPullActions } from '../../core/sync/apply.js';
 import { planPull } from '../../core/sync/plan.js';
 import { collectSyncSources } from '../../core/sync/base.js';
@@ -57,7 +55,6 @@ import type {
   SyncSources,
 } from '../../core/sync/types.js';
 import type { AdapterSnapshot } from '../../core/types.js';
-import type { HomerPaths } from '../../core/paths.js';
 import { diffLines, resolveHomerPaths } from '../render.js';
 import { createDefaultPromptPort, type PromptPort } from '../ui.js';
 
@@ -67,25 +64,19 @@ export interface PullDeps {
   sources?: SyncSources;
   noFetch?: boolean;
   noApply?: boolean;
-  /** git 端口注入（additive 可选字段，同 W7-push 做法；缺省走真实 `src/core/git`）。 */
-  git?: PullGitPort;
+  /** git 端口注入（additive 可选字段；缺省走真实 `src/core/git`）。 */
+  git?: GitPort;
 }
 
 /**
- * git 端口（additive，`Deps` 的可选注入位，与 W7-push 同款做法）。
+ * git 端口（additive，`Deps` 的可选注入位）。
  *
- * 每一项都可单独覆盖；未覆盖的走 `src/core/git` / `src/core/sync/pipeline` 的真实实现。
+ * **P4-W10 起收敛为命令层共享类型**：push / pull / merge 三者共用 `src/cli/commands/git-port.ts`
+ * 的 `GitPort`（每一项都可单独覆盖；未覆盖的走 `src/core/git` / `src/core/sync/pipeline`
+ * 的真实实现）。`PullGitPort` 保留为别名，既有 import 与调用点无需改动。
  * 存在的意义：单测可以在**零 git 仓库**的前提下验证命令层的前置检查顺序与降级分支。
  */
-export interface PullGitPort {
-  isGitRepo?: (home: string) => boolean;
-  hasUpstream?: (home: string) => boolean;
-  requireCleanStore?: (paths: HomerPaths) => void;
-  gitFetch?: (home: string) => GitExecResult;
-  requireFastForwardable?: (paths: HomerPaths) => void;
-  mergeFfUpstream?: (home: string) => GitExecResult;
-  headCommit?: (home: string) => string | undefined;
-}
+export type PullGitPort = GitPort;
 
 export interface PullReport {
   ok: boolean;   // true = 应用完成且无残留冲突
@@ -125,19 +116,6 @@ function emptyApplyResult(): ApplyResult {
 const NOT_A_REPO_HINT = '请先运行 `homer push` 建立 git 历史与 remote。';
 const NO_UPSTREAM_HINT =
   '请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。';
-
-/** 把注入的 git 端口与真实实现合并（未覆盖项走真实实现）。 */
-function resolveGitPort(port: PullGitPort | undefined): Required<PullGitPort> {
-  return {
-    isGitRepo: port?.isGitRepo ?? gitCore.isGitRepo,
-    hasUpstream: port?.hasUpstream ?? gitCore.hasUpstream,
-    requireCleanStore: port?.requireCleanStore ?? requireCleanStore,
-    gitFetch: port?.gitFetch ?? ((home: string) => gitCore.gitFetch(home)),
-    requireFastForwardable: port?.requireFastForwardable ?? requireFastForwardable,
-    mergeFfUpstream: port?.mergeFfUpstream ?? ((home: string) => gitCore.mergeFfUpstream(home)),
-    headCommit: port?.headCommit ?? gitCore.headCommit,
-  };
-}
 
 function isConflict(action: PullAction): action is PullConflictAction {
   return action.type === 'conflict';
@@ -363,6 +341,14 @@ export async function runPull(opts: PullOptions, deps?: PullDeps): Promise<PullR
     // 故即使本轮无可备份文件（全新增 / 全冲突）也照常裁剪，避免 backups/ 无限增长。
     pruneBackups(paths, config.backup?.keep);
 
+    // ff 之前记下当前 HEAD（= base）。ff 成功后 HEAD 会变成 upstream，
+    // 但**残留冲突时 base 不能前移**：否则下一轮 `homer merge` 的三方基准变成「新 HEAD（= 远端）」，
+    // 本地改动会被当成单纯的 push 方向漂移，冲突消失、merge 只会报 no-conflicts
+    // —— §3-P4 ⑤「B pull → conflicts-remain → B merge --accept-remote」就不可达。
+    // 语义裁定：`lastSyncCommit` = 「上次**成功**同步后的 HEAD」；带残留冲突的 pull 不算成功，
+    // 因此保留 base = 本轮 pull 之前的工作区 HEAD（= 本轮判定使用的 base），由 merge 收尾前移。
+    const preFfHead = git.headCommit(paths.home);
+
     const ff = git.mergeFfUpstream(paths.home);
     if (!ff.ok) {
       // ff 本应被 requireFastForwardable 挡住（并发 fetch 等边界）。
@@ -378,14 +364,16 @@ export async function runPull(opts: PullOptions, deps?: PullDeps): Promise<PullR
       };
     }
 
+    const residualConflicts = plan.actions.filter(isConflict);
     commit = git.headCommit(paths.home);
-    if (commit === undefined) {
+    // 残留冲突 → base 不前移（保留 preFfHead）；否则 base 前移到新 HEAD（§1 D6）。
+    const nextBase = residualConflicts.length === 0 ? commit : preFfHead;
+    if (nextBase === undefined) {
       warnings.push('ff 后无法解析 HEAD，state.lastSyncCommit 未更新');
     } else {
-      // 远端变更已被看见：base 前移到新 HEAD（§1 D6）。
       saveState(paths, {
         version: 1,
-        lastSyncCommit: commit,
+        lastSyncCommit: nextBase,
         lastSyncAt: new Date().toISOString(),
         lastSyncCommand: 'pull',
       });

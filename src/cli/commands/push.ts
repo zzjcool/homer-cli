@@ -45,20 +45,20 @@ import process from 'node:process';
 
 import { loadConfig } from '../../core/config.js';
 import { CliError } from '../../core/errors.js';
-import { ensureGitRepo, gitPush, hasUpstream, headCommit, isStoreClean } from '../../core/git/index.js';
 import { filterIgnored, scanSnapshots } from '../../core/secrets/index.js';
 import { loadState, saveState } from '../../core/state.js';
 import { writeSnapshotToStore } from '../../core/store/store.js';
-import { collectSyncSources, checkPushSafety, prepareStoreSnapshot, commitStoreIfNeeded } from '../../core/sync/index.js';
+import { collectSyncSources, checkPushSafety, prepareStoreSnapshot } from '../../core/sync/index.js';
 import type { PullConflictAction } from '../../core/sync/types.js';
 import type { SecretFinding } from '../../core/secrets/types.js';
 import type { SyncSources } from '../../core/sync/types.js';
 import type { PromptPort } from '../ui.js';
 import { createDefaultPromptPort } from '../ui.js';
 import { resolveHomerPaths } from '../render.js';
+import { resolveGitPort, type GitPort } from './git-port.js';
 
 export interface PushOptions { homerHome?: string; json?: boolean; yes?: boolean; noPush?: boolean; }
-export interface PushDeps { ui?: PromptPort; sources?: SyncSources; }
+export interface PushDeps { ui?: PromptPort; sources?: SyncSources; git?: GitPort; }
 export interface PushReport {
   ok: boolean;
   status: 'pushed' | 'no-drift' | 'secrets-rejected' | 'remote-ahead' | 'conflicts' | 'aborted' | 'error';
@@ -94,7 +94,9 @@ export function fileRef(file: { adapterId: string; category: string; relPath: st
 
 /** 同步 commit 的提交信息（`git log --oneline` 可读，见 §5 人工核验项）。 */
 export function pushCommitMessage(changedCount: number): string {
-  return `homer push: 同步 ${changedCount} 个变更文件`;
+  return changedCount === 0
+    ? 'homer push: 建立同步基线（store 首次入库）'
+    : `homer push: 同步 ${changedCount} 个变更文件`;
 }
 
 /** 统一构造报告（字段齐全，避免各出口漏字段）。 */
@@ -135,6 +137,8 @@ export async function runPush(opts: PushOptions, deps?: PushDeps): Promise<PushR
 
 async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushReport> {
   const paths = resolveHomerPaths(opts.homerHome);
+  // git 端口（P4-W10 收敛为命令层共享类型；测试可注入，缺省走真实 `src/core/git`）。
+  const git = resolveGitPort(deps?.git);
   const config = loadConfig(paths);
   if (config === undefined) {
     throw new CliError(
@@ -189,8 +193,22 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
   }
 
   const changedFiles = check.changedFiles;
-  if (changedFiles.length === 0) {
+  // 无漂移的两种含义必须分开：
+  //   (a) 已有同步基线（store 已在某个 commit 中）→ 真正的 no-op（§2.8「changedFiles 空 → no-drift exit 0」）；
+  //   (b) **尚未建立基线**（`homer init` 只写了 store 工作区，仓库已有历史但 store 还没进版本控制）
+  //       → 必须把 store 补进 git 历史：否则用户永远拿不到第一个 store commit 与
+  //       `state.lastSyncCommit`（§5 的 Done 判据），pull / merge 的 `requireFastForwardable`
+  //       也会因「无 store 历史」而不可用。
+  // 判据 = `仓库已有 commit（HEAD 可解析）∩ store 相对 HEAD 未提交`：
+  //   - 无仓库 / 无 HEAD（未提交的 local-only 工作区）→ 保持 no-drift（W7 已钉的语义）；
+  //   - 已 clone（有 homer.json 的 commit）+ init 后首次 push → 补 store commit（§1-D1 的首次基线；
+  //     §3-P4 ①「init → push --yes → origin 有 commit」、§5「state.lastSyncCommit == git rev-parse HEAD」）。
+  const needsBaseline = git.headCommit(paths.home) !== undefined && !git.isStoreClean(paths.home);
+  if (changedFiles.length === 0 && !needsBaseline) {
     return makeReport('no-drift', { warnings });
+  }
+  if (changedFiles.length === 0) {
+    warnings.push('本地快照已在 store 中，本次不重写 store 内容；仅把 store 补进 git 历史（建立同步基线）');
   }
 
   // ---- 4. 交互确认（--yes 时完全不创建 port，§2.7 约定 1）-------------------
@@ -212,10 +230,9 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
   // 逐 adapter 原子覆盖（writeSnapshotToStore）；push 不碰工具目录、不做备份。
   for (const snapshot of prepared) writeSnapshotToStore(paths, snapshot);
 
-  ensureGitRepo(paths.home);
-  const commit = commitStoreIfNeeded(paths, pushCommitMessage(changedFiles.length));
-
-  if (commit === undefined && !isStoreClean(paths.home)) {
+  git.ensureGitRepo(paths.home);
+  const commit = git.commitStoreIfNeeded(paths, pushCommitMessage(changedFiles.length));
+  if (commit === undefined && !git.isStoreClean(paths.home)) {
     // store 有未提交改动 = commit 真的失败了（缺 git 身份 / git 不可用），不能谎报成功。
     return makeReport('error', {
       changedFiles,
@@ -227,7 +244,7 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
     });
   }
 
-  const head = commit ?? headCommit(paths.home);
+  const head = commit ?? git.headCommit(paths.home);
   if (head === undefined) {
     return makeReport('error', {
       changedFiles,
@@ -257,12 +274,12 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
     return report;
   }
 
-  if (!hasUpstream(paths.home)) {
+  if (!git.hasPushTarget(paths.home)) {
     warnings.push('未配置 git upstream，仅本地 commit（local-only 模式；如需推送请 `git push -u <remote> <branch>`）');
     return report;
   }
 
-  const pushed = gitPush(paths.home);
+  const pushed = git.gitPush(paths.home);
   if (!pushed.ok) {
     const reason = pushed.stderr.trim() === '' ? '未知错误' : pushed.stderr.trim();
     return makeReport('error', {

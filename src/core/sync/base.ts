@@ -181,5 +181,23 @@ export function collectSyncSources(
     return build(base, upstream);
   }
 
+  // 首次接入：upstream commit 里**根本没有 store/ 树**（远端还是一个不含同步内容的仓库，
+  // 例如刚 clone 下只有 homer.json 的配置中心）→ 不能把「远端没有 store」当成
+  // 「远端把每个文件都删了」（那会把首次 `homer push` 误拦成 remote-ahead，永远建不了基线）。
+  // 此时按 §1 D3 的 fallback 语义（base = store 工作区「= M1 语义」）令 remote := base。
+  // 告警只在 base 确实有内容时发（空 base 下「remote := base」无观察差异，不骚扰）。
+  if (!hasStoreTree(paths, remoteCommit)) {
+    if (base.some((snapshot) => snapshot.categories.some((category) => category.files.size > 0))) {
+      warnings.push(`git upstream ${upstream} 中尚无 store 内容（首次同步？），remote 视作 = base（M1 语义）`);
+    }
+    return build(base, upstream);
+  }
+
   return build(readStoreSnapshotAtCommit(paths, config, remoteCommit), upstream);
+}
+
+/** upstream commit 里是否存在 `store/` 树（= 是否已有同步内容）。 */
+function hasStoreTree(paths: HomerPaths, commit: string): boolean {
+  const result = gitExec(paths.home, ['ls-tree', '-r', '--name-only', '-z', commit, '--', 'store/']);
+  return result.ok && result.stdout.trim() !== '';
 }

@@ -46,7 +46,6 @@ import process from 'node:process';
 
 import { loadConfig } from '../../core/config.js';
 import { CliError } from '../../core/errors.js';
-import { gitFetch, gitPush, hasUpstream, headCommit, isGitRepo, isStoreClean, mergeFfUpstream } from '../../core/git/index.js';
 import { resolveHomerPaths, splitLines } from '../render.js';
 import { saveState } from '../../core/state.js';
 import { writeSnapshotToStore } from '../../core/store/store.js';
@@ -55,13 +54,10 @@ import {
   applyPullActions,
   checkPushSafety,
   collectSyncSources,
-  commitStoreIfNeeded,
   excludedKeysFor,
   planPull,
   plantExcludedKeys,
   prepareStoreSnapshot,
-  requireCleanStore,
-  requireFastForwardable,
   serializeJsonContent,
   REQUIRED_PLACEHOLDER,
   type ApplyResult,
@@ -74,11 +70,12 @@ import {
 } from '../../core/sync/index.js';
 import { isJsonObject, parseJsonContent } from '../../core/sync/excluded-keys.js';
 import { createDefaultPromptPort, type PromptPort } from '../ui.js';
+import { resolveGitPort, type GitPort, type ResolvedGitPort } from './git-port.js';
 import type { AdapterSnapshot, HomerConfig, SnapshotEntry } from '../../core/types.js';
 import type { HomerPaths } from '../../core/paths.js';
 
 export interface MergeOptions { homerHome?: string; json?: boolean; acceptLocal?: boolean; acceptRemote?: boolean; }
-export interface MergeDeps { ui?: PromptPort; sources?: SyncSources; noFetch?: boolean; }
+export interface MergeDeps { ui?: PromptPort; sources?: SyncSources; noFetch?: boolean; git?: GitPort; }
 export interface MergeReport {
   ok: boolean;
   status: 'resolved' | 'no-conflicts' | 'aborted' | 'error';
@@ -181,6 +178,8 @@ function contentSizes(action: PullConflictAction): string {
  */
 export async function runMerge(opts: MergeOptions, deps: MergeDeps = {}): Promise<MergeReport> {
   const paths = resolveHomerPaths(opts.homerHome);
+  // git 端口（P4-W10 收敛为命令层共享类型；测试可注入，缺省走真实 `src/core/git`）。
+  const git = resolveGitPort(deps.git);
   const config = loadConfig(paths);
   if (config === undefined) {
     throw new CliError(
@@ -190,7 +189,7 @@ export async function runMerge(opts: MergeOptions, deps: MergeDeps = {}): Promis
   }
 
   // ---- 前置（§2.8 冻结顺序；全部先于任何写操作）----
-  requireMergePreconditions(paths, deps);
+  requireMergePreconditions(paths, deps, git);
 
   if (opts.acceptLocal === true && opts.acceptRemote === true) {
     throw new CliError(
@@ -257,7 +256,7 @@ export async function runMerge(opts: MergeOptions, deps: MergeDeps = {}): Promis
   const progress: Progress = { ffDone: false, stateAdvanced: false };
 
   try {
-    return executeResolutions({ paths, config, sources, plan, resolutions, warnings, errors, progress });
+    return executeResolutions({ paths, config, sources, plan, resolutions, warnings, errors, progress, git });
   } catch (err) {
     errors.push(err instanceof Error ? err.message : String(err));
     if (progress.ffDone) {
@@ -283,25 +282,25 @@ export async function runMerge(opts: MergeOptions, deps: MergeDeps = {}): Promis
 /* ------------------------------------------------------------------ */
 
 /** 冻结前置链：isGitRepo → hasUpstream → requireCleanStore → gitFetch → requireFastForwardable。 */
-function requireMergePreconditions(paths: HomerPaths, deps: MergeDeps): void {
-  if (!isGitRepo(paths.home)) {
+function requireMergePreconditions(paths: HomerPaths, deps: MergeDeps, git: ResolvedGitPort): void {
+  if (!git.isGitRepo(paths.home)) {
     throw new CliError(
       `工作区不是 git 仓库: ${paths.home}`,
       'merge 需要 git 历史与 upstream；请先运行 `homer push` 建立。',
     );
   }
 
-  if (!hasUpstream(paths.home)) {
+  if (!git.hasUpstream(paths.home)) {
     throw new CliError(
       '未配置 git upstream，无法确定远端',
       '请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。',
     );
   }
 
-  requireCleanStore(paths);
+  git.requireCleanStore(paths);
 
   if (deps.noFetch !== true) {
-    const fetched = gitFetch(paths.home);
+    const fetched = git.gitFetch(paths.home);
     if (!fetched.ok) {
       throw new CliError(
         `git fetch 失败: ${firstLine(fetched.stderr)}`,
@@ -310,7 +309,7 @@ function requireMergePreconditions(paths: HomerPaths, deps: MergeDeps): void {
     }
   }
 
-  requireFastForwardable(paths);
+  git.requireFastForwardable(paths);
 }
 
 /* ------------------------------------------------------------------ */
@@ -326,16 +325,17 @@ interface ExecuteInput {
   warnings: string[];
   errors: string[];
   progress: Progress;
+  git: ResolvedGitPort;
 }
 
 function executeResolutions(input: ExecuteInput): MergeReport {
-  const { paths, config, sources, plan, resolutions, warnings, errors, progress } = input;
+  const { paths, config, sources, plan, resolutions, warnings, errors, progress, git } = input;
 
   // ---- 再次校验（裁决期间用户可能弄脏 store）+ ff：store 对齐远端、base 前进 ----
-  requireCleanStore(paths);
-  requireFastForwardable(paths);
+  git.requireCleanStore(paths);
+  git.requireFastForwardable(paths);
 
-  const ff = mergeFfUpstream(paths.home);
+  const ff = git.mergeFfUpstream(paths.home);
   if (!ff.ok) {
     throw new CliError(
       `git merge --ff-only @{upstream} 失败: ${firstLine(ff.stderr)}`,
@@ -346,7 +346,7 @@ function executeResolutions(input: ExecuteInput): MergeReport {
 
   // base 前进：ff 之后立刻记 upstream HEAD，**先于**工具目录写入（§2.8 冻结顺序）——
   // 即使后续应用 / 同步失败，远端变更也已被「看见」，下一轮不会再被当成新冲突。
-  const upstreamHead = headCommit(paths.home);
+  const upstreamHead = git.headCommit(paths.home);
   if (upstreamHead !== undefined) {
     saveMergeState(paths, upstreamHead);
     progress.stateAdvanced = true;
@@ -366,10 +366,10 @@ function executeResolutions(input: ExecuteInput): MergeReport {
       writeSnapshotToStore(paths, snapshot);
     }
 
-    commit = commitStoreIfNeededForMerge(paths, resolutions, warnings);
+    commit = commitStoreIfNeededForMerge(paths, resolutions, warnings, git);
     if (commit !== undefined) {
-      if (hasUpstream(paths.home)) {
-        const pushed = gitPush(paths.home);
+      if (git.hasUpstream(paths.home)) {
+        const pushed = git.gitPush(paths.home);
         if (!pushed.ok) {
           warnings.push(
             `git push 失败：本地合并提交已生成但未推送到远端（${firstLine(pushed.stderr)}）`,
@@ -401,8 +401,9 @@ function commitStoreIfNeededForMerge(
   paths: HomerPaths,
   resolutions: readonly Resolution[],
   warnings: string[],
+  git: ResolvedGitPort,
 ): string | undefined {
-  if (isStoreClean(paths.home)) {
+  if (git.isStoreClean(paths.home)) {
     // 重扫出的 drift 与实际 store 字节不一致（保守情况）：交回 warning 而不当成 commit 失败。
     warnings.push('重扫出的变更与 store 当前内容一致，无需新的提交');
     return undefined;
@@ -410,7 +411,7 @@ function commitStoreIfNeededForMerge(
 
   const remote = resolutions.filter((item) => item.choice === REMOTE).length;
   const message = `homer merge: resolve ${resolutions.length} conflict(s) (remote ${remote}, local ${resolutions.length - remote})`;
-  const commit = commitStoreIfNeeded(paths, message);
+  const commit = git.commitStoreIfNeeded(paths, message);
   if (commit === undefined) {
     warnings.push(
       'store 已更新但未能生成 git commit（检查仓库的 user.name / user.email）；请手动提交或重跑 `homer push`',

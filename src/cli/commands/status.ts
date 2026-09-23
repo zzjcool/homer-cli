@@ -7,7 +7,9 @@
  * M1 的 base / remote 来源（§1.4「remote 缺省 = base」）：
  *   base   = store 快照（readSnapshotFromStore，即最后一次同步态）
  *   local  = 实时扫描各 enabled adapter 的 root
- *   remote = 缺省 = base
+ *   remote = M1 缺省 = base；**M2-W10 起**由 `collectSnapshotSources` 注入：git 仓库存在
+ *            且 upstream 可读时 = upstream 快照（`↓` 计数由此激活，关闭 M1 已知限制 #1），
+ *            否则回落 = base。
  *
  * `sources` 是第二参数（可选，生产不传）：允许调用方（单测 / 未来接 git remote 的 M2）
  * 注入三方快照，保持 §1.7 的单参签名依然可用。
@@ -43,6 +45,14 @@ export interface StatusReport {
    * 漂移仍是信息，exit 码保持 0。
    */
   errors: string[];
+  /**
+   * 采集期告警（additive，M2-W10）：非致命但用户必须看见的事实。
+   * 目前唯一来源是「store 工作区脏」（直改 store 后的 ↓ 计数说明），同样渲染为置顶 ⚠ 行。
+   *
+   * **仅在非空时出现**（`undefined` = 无告警）：保持 M1 冻结的 StatusReport 形状在
+   * 常规路径上逐字不变，`--json` 消费者用 `report.warnings?.length` 判定。
+   */
+  warnings?: string[];
 }
 
 export const STATUS_USAGE = `用法: homer status [options]
@@ -58,9 +68,13 @@ export const STATUS_USAGE = `用法: homer status [options]
 
 漂移是信息而非错误：即使有漂移也以 0 退出；只有配置缺失等真错误才退出 1。`;
 
-/** 把引擎的 AdapterDrift[] 聚合为 §1.7 冻结的 StatusReport（`errors` 为 additive 字段）。 */
-export function buildStatusReport(drifts: readonly AdapterDrift[], errors: string[] = []): StatusReport {
-  return {
+/** 把引擎的 AdapterDrift[] 聚合为 §1.7 冻结的 StatusReport（`errors` / `warnings` 为 additive 字段）。 */
+export function buildStatusReport(
+  drifts: readonly AdapterDrift[],
+  errors: string[] = [],
+  warnings: readonly string[] = [],
+): StatusReport {
+  const report: StatusReport = {
     errors,
     adapters: drifts.map((adapter) => {
       let push = 0;
@@ -80,6 +94,13 @@ export function buildStatusReport(drifts: readonly AdapterDrift[], errors: strin
       return { id: adapter.adapterId, push, pull, conflicts, categories };
     }),
   };
+
+  // `warnings` 只在非空时出现（additive，M2-W10）：这样 M1 冻结的 StatusReport 形状在
+  // 「没有任何告警」的常规路径上逐字不变（既有 --json 消费者与快照测试不受影响），
+  // 而带告警时 `--json` 消费者可用 `report.warnings?.length` 判定。
+  if (warnings.length > 0) report.warnings = [...warnings];
+
+  return report;
 }
 
 /**
@@ -97,5 +118,9 @@ export function runStatus(opts: StatusOptions, sources?: CliDriftSources): Statu
   }
 
   const src: CliDriftSources = sources ?? collectSnapshotSources(paths, config);
-  return buildStatusReport(computeDrift(src.base, src.local, src.remote), sourceErrorMessages(src.errors ?? []));
+  return buildStatusReport(
+    computeDrift(src.base, src.local, src.remote),
+    sourceErrorMessages(src.errors ?? []),
+    src.warnings ?? [],
+  );
 }
