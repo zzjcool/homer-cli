@@ -393,15 +393,17 @@ describe('M3 P0 · 分发层（§2.1 flag 表 + usage）', () => {
     }
   });
 
-  it('home 的 flag 表：--yes / --json / --mode 都被接受（实现是 stub → 报"尚未实现"）', async () => {
+  it('home 的 flag 表：--yes / --json / --mode 都被接受（分发层已进真实流程）', async () => {
     const cap = capture();
     const code = await run(
       ['home', 'git@host:repo.git', '--home', tmpHome(), '--mode', 'merge', '--yes', '--json'],
       cap.io,
     );
-    // stub 抛 CliError('尚未实现') → 分发层捕获，exit 1（参数解析本身已通过）。
+    // P0 时这里断言 stub 抛 CliError('尚未实现')。P3-W8 落地 runHome 后，同一组 flag 会通过
+    // 参数解析进入真实流程；本用例继续只钉「flag 表全部被接受」这件事——因此断言 1 = 失败
+    // 来自流程本身（该 repo-url 不可 clone），而不是 usage / 未知选项（那会打印用法文本）。
     expect(code).toBe(1);
-    expect(cap.err.join('\n')).toContain('尚未实现');
+    expect(cap.err.join('\n')).not.toContain('用法: homer home');
   });
 
   it('HOME_USAGE / DOCTOR_USAGE / SECRET_USAGE 均为非空用法文本', () => {
