@@ -383,3 +383,16 @@ H=$(mktemp -d); FAKE_HOME=$(mktemp -d)
 # 全程 exit code 与 §2.8 总表一致；state.json.lastSyncCommit 与 git rev-parse HEAD 相等
 ```
 外加人工核验：`git -C ~/.homer log --oneline` 提交信息可读、`~/.homer/.gitignore` 含 state.json/backups/、真实 `~/.pi/agent` 除 pull --yes 显式应用外零写入。
+
+---
+
+## 6. 实施裁定追认（orchestrator，2026-09-23）
+
+W10-integrator 上报的 4 处接缝裁定（docs/m2-report.md §4.2）全部追认：
+
+- **S1 首次同步基线**：零漂移且仓库有 HEAD 且 store 未入库 → 落「建立同步基线」commit（否则 git 模式永不可启动，与 §3-P4①/§5 矛盾）。§2.8 push 流程据此补一行。
+- **S2 首次接入判定**：upstream commit 无 store/ 树 → remote := base（非「远端删光」）。
+- **S3 hasPushTarget**：push 推送判定用 `@{upstream} 或 branch.<name>.remote`（clone 空 origin 无 upstream ref 的 git 事实）。
+- **S4 base 前移语义收口**：`lastSyncCommit` = 上次**成功**同步后的 HEAD；带残留冲突的 pull 不前移 base（由 merge 收尾前移）。§1-D6 据此修正。
+
+W9 三未决问题裁决（docs/m2-report.md §6 建议）：clean 动作维持「有冲突才应用」；`applied` 部分结果留 M3 additive；merge push 失败维持 exit 0 + warning。
