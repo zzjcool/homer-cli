@@ -333,3 +333,23 @@ $ homer doctor --json | jq ... # 仍然 fail
 3. **⑦ 组是「只读冒烟」而非「真实验收」**：真实环境依赖本机已装 pi/herdr/opencode；
    CI 下自动降级。M3 的机器化证明是 ①②③（双假 HOME + 假 origin）。
 4. **`homer pair` / tailcat / pi 扩展形态 / adapter 插件机制**仍是 M4/M5 范围。
+5. **⚠️ 安全：`docs/m3-p0-report.md` 里粘了一把 bech32 合法的 age 私钥（非 W9 引入，属 P0-M0 遗留）**。
+   W9 做 repo 内密钥扫描时发现：
+
+   ```
+   $ git show master:docs/m3-p0-report.md | grep -c 'AGE-SECRET-KEY-19WJMMZ92DNEPCVR2P4W63SEK'
+   1
+   $ node --import tsx -e "(await import('./src/core/age/keys.ts')).parseIdentityFile('<该串>')"
+   DECODES AS VALID KEY. recipient = age10nv7c3jw5nuqh7rclyvpwyl07sjkjtw99699dpuyhqmd7fj2nglq87lsy9
+   ```
+
+   即它**能通过 `parseIdentityFile` 校验**（不是占位符），与 `docs/m3-scout-report.md` 的结构示例
+   （`AGE-SECRET-KEY-1...` 省略写法）不同性质。
+   **未私改**：该文件不在 W9 授权文件集内（属 P0-M0 的交付物），且修改历史报告会丢失追溯；
+   但**如果这是当时真实生成的一把私钥**，应当：① 将其换成省略/占位形式（如 `AGE-SECRET-KEY-1...`）；
+   ② 若这把 key 曾在任何机器上被 `secret keygen`/`secret push` 用过，则视为已泄露、需轮换
+   （在旧机 `secret push` 前先移除该 recipient 并在各机重新 `secret keygen`）。
+   **求 orchestrator 裁定**是否授权 W9（或单独一个 worker）改写该行。
+
+   > 注：W9 仓库内并未引入任何新私钥——`tests/e2e/m3.test.ts` 的 identity 全部在临时目录
+   > 运行时 `secret keygen` 生成，且 bare origin 的 `git grep AGE-SECRET-KEY` 断言为空（已自动化）。
