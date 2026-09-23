@@ -65,12 +65,37 @@ const MAX_DEPTH = 32;
 interface WalkState {
   ignore: string[] | undefined;
   exclude: string[] | undefined;
+  /** symlink 逃逸 allowlist（相对 adapter root 的 glob，§2.0-1 / D7）。 */
+  allowEscape: string[] | undefined;
   errors: ScanError[];
   out: string[];
   /** adapter root 的真实路径（symlink containment 基准）。 */
   rootReal: string;
+  /**
+   * allowlist 匹配基准：本次 walk 起点相对 **adapter root** 的路径（= 声明的 category path）。
+   * 快照 key（`rel`）是相对 **category 目录** 的，而 allowEscape 是相对 root 的 glob，
+   * 故匹配时必须用 `joinRel(rootRelBase, rel)` 还原成 root 相对路径。
+   */
+  rootRelBase: string;
   /** 本次 walk 已展开过的目录真实路径（symlink 回环检测）。 */
   visited: Set<string>;
+}
+
+/** 拼接 root 相对路径（rootRelBase 与 category 内 rel；两段都可能为空）。 */
+function joinRel(rootRelBase: string, rel: string): string {
+  if (rootRelBase === '') return rel;
+  if (rel === '') return rootRelBase;
+  return `${rootRelBase}/${rel}`;
+}
+
+/**
+ * 逃逸是否被 allowlist 放行（D7）：对 **root 相对路径** 跑 `matchesIgnore`，语义与
+ * adapter 级 ignore 完全一致（字面量 + `*` 不跨 `/`，尾 `/` 为目录前缀）；
+ * 缺省 / 空数组 = 维持 M1 安全边界。
+ */
+function isEscapeAllowed(rootRel: string, allowEscape: string[] | undefined): boolean {
+  if (!allowEscape || allowEscape.length === 0) return false;
+  return matchesIgnore(rootRel, allowEscape);
 }
 
 /** realpath 封装：失败（悬空 / 竞争删除）→ undefined。 */
@@ -92,15 +117,19 @@ function isWithinRoot(child: string, root: string): boolean {
 /**
  * symlink 条目处理（安全边界）：
  *   1. realpath 失败（悬空链接）→ 静默跳过（等价于「该路径不存在」）；
- *   2. realpath 落在 adapter root 之外 → 跳过 + 记 ScanError（防「链接把 root 外内容带进快照」）；
+ *   2. realpath 落在 adapter root 之外 → skip + 记 ScanError（防「链接把 root 外内容带进快照」），
+ *      **除非** root 相对路径命中 `allowEscape`（D7，显式 opt-in）→ 视同 root 内链接继续走 3/4；
  *   3. realpath 指向目录 → 交给 walk（其入口用 visited 集合截断回环）；
  *   4. realpath 指向文件 → 正常收集。
+ *
+ * 注意 allowlist 只放行**这条链接本身**：逃逸目录内部的后续 symlink 仍按同规则重新判定
+ * （要连带放行整棵子树，用尾 `/` 前缀模式，如 `skills/agent-browser/`）。
  */
 function visitSymlink(abs: string, rel: string, depth: number, state: WalkState): void {
   const real = tryRealpath(abs);
   if (real === undefined) return;
 
-  if (!isWithinRoot(real, state.rootReal)) {
+  if (!isWithinRoot(real, state.rootReal) && !isEscapeAllowed(joinRel(state.rootRelBase, rel), state.allowEscape)) {
     state.errors.push({
       path: abs,
       message: `symlink 逃逸 adapter root: ${real}`,
@@ -177,11 +206,16 @@ function readEntry(abs: string, mode: CategoryConfig['mode'], errors: ScanError[
  * 计划原文：「对每个 symlink 先 fs.realpathSync 解析真实路径——realpath 不在 root realpath 之下
  * → skip + 记 ScanError（防逃逸）」。因此**包括**声明的 category path 自身为 symlink 的情况。
  * 返回 undefined = 该 path 不存在（缺文件/缺目录，不视为错误）。
+ *
+ * D7（§2.0-1）：与 `visitSymlink` 共用同一逃逸判定 —— 声明的 path 逃逸时同样先查
+ * `allowEscape`（匹配基准 = 声明的 path 去掉尾 `/` 后的 root 相对路径），命中才跟随。
  */
 function resolveConfiguredPath(
   abs: string,
   rootReal: string,
   errors: ScanError[],
+  rootRel: string,
+  allowEscape: string[] | undefined,
 ): { real: string; stat: fs.Stats } | undefined {
   let lst: fs.Stats;
   try {
@@ -195,8 +229,8 @@ function resolveConfiguredPath(
   }
 
   const real = tryRealpath(abs);
-  if (real === undefined) return undefined; // 悬空链接 → 静默跳过
-  if (!isWithinRoot(real, rootReal)) {
+  if (real === undefined) return undefined; // 悬空链接 → 静默跳过（allowlist 命中也不例外）
+  if (!isWithinRoot(real, rootReal) && !isEscapeAllowed(rootRel, allowEscape)) {
     errors.push({ path: abs, message: `symlink 逃逸 adapter root: ${real}` });
     return undefined;
   }
@@ -213,6 +247,7 @@ function scanCategory(
   category: string,
   cfg: CategoryConfig,
   ignore: string[] | undefined,
+  allowEscape: string[] | undefined,
   errors: ScanError[],
 ): CategorySnapshot {
   const files: SnapshotFiles = new Map<string, SnapshotEntry>();
@@ -223,7 +258,7 @@ function scanCategory(
       if (relDir === '') continue;
       if (isIgnored(relDir, ignore) || isExcluded(relDir, cfg.exclude)) continue;
       const absDir = path.join(root, relDir);
-      const resolved = resolveConfiguredPath(absDir, rootReal, errors);
+      const resolved = resolveConfiguredPath(absDir, rootReal, errors, relDir, allowEscape);
       // 目录不存在 / 不是目录 / symlink 逃逸 → 该分类此处无文件
       if (resolved === undefined || !resolved.stat.isDirectory()) continue;
 
@@ -234,9 +269,12 @@ function scanCategory(
       walk(scanBase, '', 0, {
         ignore,
         exclude: cfg.exclude,
+        allowEscape,
         errors,
         out: collected,
         rootReal,
+        // allowlist 匹配基准用**声明的 path**（而非 realpath），与用户写的 glob 对齐
+        rootRelBase: relDir,
         visited: new Set<string>(),
       });
       for (const rel of collected) {
@@ -246,7 +284,7 @@ function scanCategory(
     } else {
       if (isIgnored(p, ignore) || isExcluded(p, cfg.exclude)) continue;
       const abs = path.join(root, p);
-      const resolved = resolveConfiguredPath(abs, rootReal, errors);
+      const resolved = resolveConfiguredPath(abs, rootReal, errors, p, allowEscape);
       if (resolved === undefined || !resolved.stat.isFile()) continue;
       const entry = readEntry(resolved.real, cfg.mode, errors);
       // §1.6：单文件 → relPath = 文件名本身
@@ -294,7 +332,7 @@ export function scanAdapter(adapterId: string, config: AdapterConfig): ScanOutco
 
   for (const [category, cfg] of Object.entries(config.categories)) {
     if (cfg.enabled === false) continue;
-    const cat = scanCategory(root, rootReal, category, cfg, config.ignore, errors);
+    const cat = scanCategory(root, rootReal, category, cfg, config.ignore, config.allowEscape, errors);
     cat.adapterId = adapterId;
     snapshot.categories.push(cat);
   }

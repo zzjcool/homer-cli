@@ -1,5 +1,6 @@
 /**
  * P1-W2 · `homer.json` 的 P0 additive 校验补测（docs/m2-plan.md §2.0-3 / §3-P1-W2）。
+ * P1-W3 · 追加 `adapters.*.allowEscape` 校验用例（docs/m3-plan.md §2.0-3 / D7）。
  *
  * `backup.keep` / `secrets.ignorePaths` 的校验实现在 P0 已落地（src/core/config.ts），
  * W2 补上验收要求的用例：`backup.keep: 0` / `'x'`、`secrets.ignorePaths: [42]` 必须报错，
@@ -13,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { loadConfig, validateConfig } from '../../src/core/config.js';
+import { loadConfig, saveConfig, validateConfig } from '../../src/core/config.js';
 import { getHomerPaths, type HomerPaths } from '../../src/core/paths.js';
 import type { HomerConfig } from '../../src/core/types.js';
 
@@ -45,6 +46,13 @@ function validConfig(): HomerConfig {
       },
     },
   };
+}
+
+/** 在上面的合法配置上只改 `adapters.pi.allowEscape`（支持故意塞非法值）。 */
+function withAllowEscape(allowEscape: unknown): unknown {
+  const config = validConfig();
+  (config.adapters['pi'] as unknown as Record<string, unknown>)['allowEscape'] = allowEscape;
+  return config;
 }
 
 describe('validateConfig — backup 段（P0 additive，W2 补测）', () => {
@@ -138,6 +146,91 @@ describe('validateConfig — secrets 段（P0 additive，W2 补测）', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errors.join('\n')).toMatch(/secrets 必须是对象/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* adapters.*.allowEscape（P1-W3，§2.0-3 / D7）                          */
+/* ------------------------------------------------------------------ */
+
+describe('validateConfig — adapters.*.allowEscape（P1-W3）', () => {
+  it('缺省 → 合法（维持 M1 安全边界，不改既有字段要求）', () => {
+    const result = validateConfig(validConfig());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.adapters['pi']?.allowEscape).toBeUndefined();
+  });
+
+  it('字符串数组 → 合法且原样返回（glob 语义由 scan 侧解释，校验只看形状）', () => {
+    const allowEscape = ['skills/agent-browser', 'extensions/*', 'settings.json'];
+    const result = validateConfig(withAllowEscape(allowEscape));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.adapters['pi']?.allowEscape).toEqual(allowEscape);
+  });
+
+  it('空数组 → 合法（等价缺省：什么都不放行）', () => {
+    const result = validateConfig(withAllowEscape([]));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.adapters['pi']?.allowEscape).toEqual([]);
+  });
+
+  it('非 string[]（字符串 / 对象 / 数字 / null）→ 报错且信息含 allowEscape', () => {
+    for (const value of ['skills/agent-browser', { 0: 'x' }, 42, null]) {
+      const result = validateConfig(withAllowEscape(value));
+      expect(result.ok, JSON.stringify(value)).toBe(false);
+      if (result.ok) continue;
+      expect(result.errors.join('\n'), JSON.stringify(value)).toMatch(/allowEscape/);
+    }
+  });
+
+  it('数组元素非字符串 / 空串 → 报错（错误信息定位到 adapters.pi.allowEscape）', () => {
+    for (const value of [[42], ['ok', 7], ['']]) {
+      const result = validateConfig(withAllowEscape(value));
+      expect(result.ok, JSON.stringify(value)).toBe(false);
+      if (result.ok) continue;
+      expect(result.errors.join('\n')).toMatch(/adapters\.pi\.allowEscape/);
+    }
+  });
+
+  it('其它 adapter 的非法 allowEscape 也报错（定位到具体 adapterId）', () => {
+    const config = validConfig();
+    config.adapters['herdr'] = {
+      root: '~/.config/herdr',
+      categories: { settings: { paths: ['config.toml'], mode: 'merge' } },
+    };
+    (config.adapters['herdr'] as unknown as Record<string, unknown>)['allowEscape'] = 'config.toml';
+
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.join('\n')).toMatch(/adapters\.herdr\.allowEscape/);
+  });
+
+  it('loadConfig 读回：allowEscape 完整保留；非法值 loadConfig throw', () => {
+    const paths = tmpPaths();
+    fs.mkdirSync(paths.home, { recursive: true });
+    fs.writeFileSync(
+      paths.configFile,
+      `${JSON.stringify(withAllowEscape(['skills/agent-browser']), null, 2)}\n`,
+      'utf8',
+    );
+    expect(loadConfig(paths)?.adapters['pi']?.allowEscape).toEqual(['skills/agent-browser']);
+
+    fs.writeFileSync(
+      paths.configFile,
+      `${JSON.stringify(withAllowEscape('skills/agent-browser'), null, 2)}\n`,
+      'utf8',
+    );
+    expect(() => loadConfig(paths)).toThrow(/allowEscape/);
+  });
+
+  it('saveConfig 拒绝非法 allowEscape（不落盘）', () => {
+    const paths = tmpPaths();
+    fs.mkdirSync(paths.home, { recursive: true });
+    expect(() => saveConfig(paths, withAllowEscape([42]) as HomerConfig)).toThrow(/allowEscape/);
+    expect(fs.existsSync(paths.configFile)).toBe(false);
   });
 });
 
