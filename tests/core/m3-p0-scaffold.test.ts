@@ -140,10 +140,25 @@ describe('M3 P0 · recipientIsValid（§2.2）', () => {
   });
 });
 
-describe('M3 P0 · createAgeCryptoPort stub（§2.2）', () => {
-  it('P0 阶段抛 CliError"尚未实现"（实现由 W1 落地）', () => {
-    expect(() => createAgeCryptoPort()).toThrow(CliError);
-    expect(() => createAgeCryptoPort()).toThrow('尚未实现');
+describe('M3 P0 · createAgeCryptoPort（§2.2；P1-W1 已从 stub 换成真实现）', () => {
+  // P0 时这里断言 stub 抛 CliError('尚未实现')。W1 按任务书替换了 stub（类型/签名未动），
+  // 故本块的断言随之更新为「拿到真 port + types/cipher 两个入口是同一实现」。
+  it('返回可用的 AgeCryptoPort（同一实现从 types 与 cipher 两个路径可见）', async () => {
+    const port = createAgeCryptoPort();
+    expect(typeof port.encrypt).toBe('function');
+    expect(typeof port.decrypt).toBe('function');
+
+    const { createAgeCryptoPort: fromCipher } = await import('../../src/core/age/cipher.js');
+    expect(fromCipher).toBe(createAgeCryptoPort);
+  });
+
+  it('真实现可完成 roundtrip（防止 stub 被原样留下的回归）', async () => {
+    const { generateIdentity } = await import('../../src/core/age/keys.js');
+    const identity = generateIdentity();
+    const port = createAgeCryptoPort();
+    const ciphertext = await port.encrypt(Buffer.from('homer-m3-p0-port'), [identity.recipient]);
+    expect(ciphertext.toString('utf8')).not.toContain('homer-m3-p0-port');
+    await expect(port.decrypt(ciphertext, identity)).resolves.toEqual(Buffer.from('homer-m3-p0-port'));
   });
 });
 
