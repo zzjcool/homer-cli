@@ -323,14 +323,19 @@ export async function runPull(opts: PullOptions, deps?: PullDeps): Promise<PullR
   const preview = buildPullPreview(sources, plan);
 
   if (opts.yes !== true) {
-    // §2.7 约定 1：--yes 时完全不创建 port。非 TTY 下 port 的 confirm 返回 fallback=false → abort。
-    const port = deps?.ui ?? createDefaultPromptPort();
+    // §2.7 约定 1：--yes 时完全不创建 port（连 createDefaultPromptPort 都不调用）。
+    const injected = deps?.ui;
+    const port = injected ?? createDefaultPromptPort();
+    // confirm 的 fallback 必须是 false：非交互下不能默认同意破坏性操作。
     const confirmed = await port.confirm(
       `${preview}\n\n以上变更将应用到本机工具目录（受影响文件会先备份）。是否继续？`,
       false,
     );
     if (!confirmed) {
-      if (process.stdout.isTTY !== true) {
+      // 区分「非交互降级自动拒绝」与「TTY 下用户真的说了不」：
+      // 只有前者（未注入 port 且非 TTY = createDefaultPromptPort 的 non-interactive 分支）
+      // 才该提示「请加 --yes」。
+      if (injected === undefined && process.stdout.isTTY !== true) {
         warnings.push('非交互环境无法确认，已中止；如需自动应用请加 --yes');
       }
       return {

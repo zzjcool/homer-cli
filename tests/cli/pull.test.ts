@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildPullPreview,
+  PREVIEW_DIFF_MAX_INPUT_LINES,
   PREVIEW_MAX_LINES,
   renderPullReport,
   runPull,
@@ -429,6 +430,8 @@ describe('runPull — 注入 sources + git 端口', () => {
     // 预览（含行级 diff）进了 confirm 的 message
     expect(port.calls[0]?.message).toContain('-old');
     expect(port.calls[0]?.message).toContain('+new');
+    // 注入的 port 说了「不」≠ 非交互降级，不该加「请加 --yes」的提示
+    expect(report.warnings).toEqual([]);
   });
 
   it('非 --yes + confirm=true → applied', async () => {
@@ -622,6 +625,23 @@ describe('buildPullPreview — 行级预览', () => {
     expect(omittedCount).toBeGreaterThan(0);
     // 未截断时行数 = 1(old '-') + 1(+line 0) ... 总之远超 20
     expect(diffLinesOut.length).toBeLessThanOrEqual(PREVIEW_MAX_LINES + 1);
+  });
+
+  it(`超大文件（>${PREVIEW_DIFF_MAX_INPUT_LINES} 行）跳过逐行 diff，只报规模`, async () => {
+    const h = setup();
+    const { planPull } = await import('../../src/core/sync/plan.js');
+    const huge = Array.from({ length: PREVIEW_DIFF_MAX_INPUT_LINES + 10 }, (_, i) => `l${i}`).join('\n') + '\n';
+    const src = sources(
+      { skills: { 'huge.md': 'old\n' } },
+      { skills: { 'huge.md': 'old\n' } },
+      { skills: { 'huge.md': huge } },
+    );
+    const plan = planPull(h.config, src.base, src.local, src.remote);
+
+    const preview = buildPullPreview(src, plan);
+
+    expect(preview).toContain('跳过逐行预览');
+    expect(preview).not.toContain('    +l0');
   });
 });
 
@@ -867,6 +887,46 @@ describe('退出码总表 / --json（run() 分发层，真实临时仓库）', (
 
     expect(code).toBe(1);
     expect(io.err.join('\n')).toContain('不是 git 仓库');
+  });
+
+  it('error → 1：ff 失败（PATH 上的 git shim 只让 merge --ff-only 失败）', async () => {
+    const h = setupRepo({ 'pi/skills/alpha/SKILL.md': '# alpha v1\n' });
+    write(path.join(h.agentRoot, 'skills', 'alpha', 'SKILL.md'), '# alpha v1\n');
+    advanceRemote(h, { 'pi/skills/beta/SKILL.md': '# beta\n' });
+
+    // git shim：除 `merge --ff-only` 外全部转发给真实 git。
+    // 这样前置检查（含 requireFastForwardable）全过，只有 ff 这一步失败 → 走到 error 分支。
+    const shimDir = path.join(h.paths.home, '..', 'git-shim');
+    fs.mkdirSync(shimDir, { recursive: true });
+    // 转发给真实 git 的绝对路径（shim 自己也在 PATH 上，不能递归调用自己）。
+    const realGit = process.env['HOMER_TEST_REAL_GIT'] ?? '/usr/bin/git';
+    fs.writeFileSync(
+      path.join(shimDir, 'git'),
+      `#!/bin/sh\nfor a in "$@"; do if [ "$a" = "--ff-only" ]; then echo "shim: refusing ff" >&2; exit 1; fi; done\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath ?? ''}`;
+    try {
+      const io = captureIO();
+      const code = await run(['pull', '--home', h.home, '--yes', '--json'], io.io);
+
+      expect(code).toBe(1);
+      const report = parseJsonOut(io.out);
+      expect(report.status).toBe('error');
+      expect(report.ok).toBe(false);
+      expect(report.errors.join('\n')).toContain('ff-only 失败');
+      // state 不前移（工具目录已写入，但 base 绝不假装前进）
+      const state = JSON.parse(read(h.paths.stateFile)) as Record<string, unknown>;
+      const remoteHead = gitOk(h.paths.home, ['rev-parse', '@{upstream}']).trim();
+      expect(state['lastSyncCommit']).not.toBe(remoteHead);
+      expect(state['lastSyncCommand']).toBe('push'); // setupRepo 写入的旧记录未被覆写
+      // 工具目录确实已被写入（error 的语义就是「应用了但 store 没前移」）
+      expect(read(path.join(h.agentRoot, 'skills', 'beta', 'SKILL.md'))).toBe('# beta\n');
+    } finally {
+      process.env['PATH'] = originalPath;
+    }
   });
 
   it('前置检查失败 → 1：分叉（本地未推送 commit + 远端前进）', async () => {
