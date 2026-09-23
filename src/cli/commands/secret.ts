@@ -1,10 +1,9 @@
 /**
  * `homer secret` —— age 密钥投递子命令族（docs/m3-plan.md §2.6 / §2.1）。
  *
- * **P0 落地范围（本文件）**：§2.6 的全部接口（类型 + `SECRET_USAGE` + 四个 `runSecret*`
- * 的 **stub `throw CliError('尚未实现')`**）+ 子命令参数切分（`parseSecretSubcommand`）
- * + 渲染钩子（`renderSecret*Report`，使 W6 实现时无需改分发层）。
- * 真实流程由 **P2-W6** 在本文件内实现。
+ * **P0 落地范围**：§2.6 的全部接口（类型 + `SECRET_USAGE` + 四个 `runSecret*` 的 stub）
+ * + 子命令参数切分（`parseSecretSubcommand`）+ 渲染钩子（`renderSecret*Report`，使实现时
+ * 无需改分发层）。**P2-W6 在本文件内实现四个子命令的真实流程**（类型/签名一字未动）。
  *
  * ## 为什么子命令解析放在本文件
  *
@@ -22,36 +21,57 @@
  *           aborted / error → 1
  *   list  ：恒 0
  *
+ * ## 管线边界（§1-D4 冻结）
+ *
+ * `secret push|pull` 与 store 管线（push/pull/merge）**零耦合**：
+ *   - commit 只 `add secrets/`（`commitPaths(['secrets/'])`）——store/ 的脏工作区保持原样；
+ *   - `secret pull` 从 `@{upstream}`（fetch 后）读密文，**不 ff 整仓**（避免 store 工作区被
+ *     远端悄悄推进）；
+ *   - vault 只写密文：密文自检在 `encryptSecretToFile` 内（§2.2），明文从不进 git。
+ *
  * ## 安全约束（§2.2 / §4-2，冻结）
  *
  * 报告与 stdout **只含 recipient（公钥）**，绝不回显 `secretKey`、也不含任何明文密钥内容。
  */
 
-import { CliError } from '../../core/errors.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import process from 'node:process';
+
+import {
+  createAgeCryptoPort,
+  encryptSecretToFile,
+  generateIdentity,
+  identityFilePath,
+  loadIdentity,
+  listSecrets,
+  secretFilePath,
+  secretRelativePath,
+  writeIdentityFile,
+} from '../../core/age/index.js';
 import type { AgeCryptoPort } from '../../core/age/types.js';
-import type { PromptPort } from '../ui.js';
-import type { GitPort } from './git-port.js';
+import type { VaultEntryStatus } from '../../core/age/vault.js';
+import { backupFiles, type BackupTarget } from '../../core/backup/backup.js';
+import { loadConfig } from '../../core/config.js';
+import { CliError } from '../../core/errors.js';
+import { commitPaths, gitExec, readVaultFileAtCommit } from '../../core/git/index.js';
+import { expandHome, type HomerPaths } from '../../core/paths.js';
+import type { HomerConfig } from '../../core/types.js';
+import { resolveHomerPaths } from '../render.js';
+import { createDefaultPromptPort, type PromptPort } from '../ui.js';
+import { resolveGitPort, type GitPort } from './git-port.js';
 
 /**
  * 子命令集合（冻结顺序 = §2.1 表格顺序）。
  *
- * ⚠️ **P0 的 VaultEntryStatus 临时声明**：`src/core/age/vault.ts` 由 P1-W1 落地，
- * 其导出的 `VaultEntryStatus`（§2.2 冻结形状）是 `SecretListReport` 的成员类型。
- * P0 阶段该文件不存在，故这里按 §2.2 **逐字**声明一份同名类型。
- *
- * TODO(P1-W1)：`src/core/age/vault.ts` 落地后，删除下面的本地声明，改为
- *   `import type { VaultEntryStatus } from '../../core/age/vault.js';`
- * （1 行改动；形状逐字相同，故不是接口变更）。
+ * `VaultEntryStatus` 的权威定义在 `src/core/age/vault.ts`（P1-W1 已落地，形状与 §2.2 逐字
+ * 相同）。此处**转出**而非本地声明：`SecretListReport` 的成员类型只有一个真相，且与
+ * `listSecrets()` 的返回类型恒同构（不会因两处各自演进产生假兼容）。
  */
 export const SECRET_SUBCOMMANDS = ['keygen', 'push', 'pull', 'list'] as const;
 export type SecretSubcommand = (typeof SECRET_SUBCOMMANDS)[number];
 
-/** `vault.ts` 的 `VaultEntryStatus`（§2.2 冻结形状的 P0 逐字副本，见文件头 TODO）。 */
-export interface VaultEntryStatus {
-  name: string;
-  destination: string;
-  vaultFile: 'present' | 'missing';
-}
+export type { VaultEntryStatus } from '../../core/age/vault.js';
 
 export interface SecretDeps {
   ui?: PromptPort;
@@ -105,7 +125,64 @@ export function parseSecretSubcommand(argv: readonly string[]): SecretSubcommand
   return { ok: false, unknown: first };
 }
 
-// ---- keygen ----
+/* ------------------------------------------------------------------ */
+/* 共用工具                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 非交互环境确认失败时的提示（§2.7 约定 2 的固定措辞，同 `push.ts`）。 */
+const NON_INTERACTIVE_HINT = '非交互环境，请加 --yes';
+
+/** `secrets.files` 的 name→目标路径映射，name 已按字典序排序（报告稳定可断言）。 */
+function secretNames(config: HomerConfig): string[] {
+  return Object.keys(config.secrets?.files ?? {}).sort();
+}
+
+/** 配置里某 secret 的目标绝对路径（`~` 展开；config 已校验值以 `~` / `/` 开头）。 */
+function destinationOf(config: HomerConfig, name: string): string {
+  const raw = config.secrets?.files?.[name];
+  if (raw === undefined) {
+    throw new CliError(`homer.json 的 secrets.files 不含 ${JSON.stringify(name)}`);
+  }
+  return path.resolve(expandHome(raw));
+}
+
+/** 缺 homer.json 的统一提示（与 `push.ts` / `status.ts` 同款）。 */
+function requireConfig(paths: HomerPaths): HomerConfig {
+  const config = loadConfig(paths);
+  if (config === undefined) {
+    throw new CliError(
+      `未找到 homer 配置: ${paths.configFile}`,
+      '请先运行 `homer init` 生成 homer.json 与 store 快照。',
+    );
+  }
+  return config;
+}
+
+/** 把 CliError 收敛为 `errors` 数组（报告可解析，exit 1）。 */
+function errorLines(err: CliError): string[] {
+  return err.hint === undefined ? [err.message] : [err.message, err.hint];
+}
+
+/** `name → destination` 的确认清单文本。 */
+function confirmPreview(config: HomerConfig, names: readonly string[], verb: string): string {
+  const lines = names.map((name) => `  ${name} → ${destinationOf(config, name)}`);
+  return `${verb} ${names.length} 个密钥：\n${lines.join('\n')}\n继续？`;
+}
+
+/** 目标文件是否存在（用于备份目标收集）。 */
+function existingDestinations(config: HomerConfig, names: readonly string[]): string[] {
+  return names.filter((name) => fs.existsSync(destinationOf(config, name)));
+}
+
+/** `git status --porcelain -- secrets/` 非空 = 有未提交的 vault 改动。 */
+function secretsDirty(home: string): boolean {
+  const status = gitExec(home, ['status', '--porcelain', '--', 'secrets/']);
+  return status.ok && status.stdout.trim() !== '';
+}
+
+/* ------------------------------------------------------------------ */
+/* keygen                                                              */
+/* ------------------------------------------------------------------ */
 
 export interface SecretKeygenOptions { homerHome?: string; json?: boolean; }
 export interface SecretKeygenReport { ok: boolean; identityFile: string; recipient: string; created: boolean; }
@@ -113,14 +190,26 @@ export interface SecretKeygenReport { ok: boolean; identityFile: string; recipie
 /**
  * 生成本机 identity 并落盘 `<keysDir>/age.txt`（0600，拒绝覆盖，原子写）。
  * 输出**只含 recipient**；私钥永不回显、不进错误消息（§2.2 / D2）。
+ *
+ * 已存在 identity → `writeIdentityFile` 抛 `CliError`（分发层渲染 + exit 1），**绝不覆盖**：
+ * 覆盖等于永久销毁旧机可解的历史密文。
+ *
+ * 本函数只做「生成 + 落盘」（§2.6 冻结流程），不碰 git——`keys/` 的 gitignore 防护由
+ * `ensureGitRepo`（`homer init` / `homer push` / `secret push` 路径）幂等维护，且私钥
+ * 从不被列入任何 commit pathspec。
  */
 export async function runSecretKeygen(opts: SecretKeygenOptions): Promise<SecretKeygenReport> {
-  // P0 stub：参数按冻结签名保留（W6 实现时逐项消费），此处显式标记为暂未使用。
-  void opts;
-  throw new CliError('尚未实现');
+  const paths = resolveHomerPaths(opts.homerHome);
+
+  const identity = generateIdentity();
+  writeIdentityFile(paths, identity);
+
+  return { ok: true, identityFile: identityFilePath(paths), recipient: identity.recipient, created: true };
 }
 
-// ---- push ----
+/* ------------------------------------------------------------------ */
+/* push                                                                */
+/* ------------------------------------------------------------------ */
 
 export interface SecretPushOptions { homerHome?: string; json?: boolean; yes?: boolean; noPush?: boolean; }
 export interface SecretPushReport {
@@ -133,14 +222,185 @@ export interface SecretPushReport {
   errors: string[];
 }
 
-/** 读明文 → 多 recipient 加密 → 写 vault → `commitPaths(['secrets/'])` →（可选）`git push`。 */
-export async function runSecretPush(opts: SecretPushOptions, deps?: SecretDeps): Promise<SecretPushReport> {
-  void opts;
-  void deps;
-  throw new CliError('尚未实现');
+/** 统一构造报告（字段齐全，避免各出口漏字段）。 */
+function makePushReport(
+  status: SecretPushReport['status'],
+  patch: Partial<SecretPushReport> = {},
+): SecretPushReport {
+  return {
+    ok: status === 'pushed' || status === 'no-secrets',
+    status,
+    encrypted: [],
+    pushedToRemote: false,
+    warnings: [],
+    errors: [],
+    ...patch,
+  };
 }
 
-// ---- pull ----
+/**
+ * 读明文 → 多 recipient 加密 → 写 vault → `commitPaths(['secrets/'])` →（可选）`git push`。
+ *
+ * 流程严格照 §2.6 的冻结顺序（「先读全部 → 逐项加密 → 确认 → commit → push」）：
+ * `missing-source` 判定前**不写任何 vault**（全有或全无）；`--yes` 不创建 port；
+ * commit 只覆盖 `secrets/`。
+ *
+ * 只把 `CliError` 收敛为 `status='error'` 报告（用户级问题 → exit 1 + 可解析 `--json`），
+ * 其它异常照旧抛给分发层（编程错误不伪装成同步结果）。
+ */
+export async function runSecretPush(opts: SecretPushOptions, deps?: SecretDeps): Promise<SecretPushReport> {
+  try {
+    return await pushPipeline(opts, deps);
+  } catch (err) {
+    if (err instanceof CliError) return makePushReport('error', { errors: errorLines(err) });
+    throw err;
+  }
+}
+
+async function pushPipeline(opts: SecretPushOptions, deps?: SecretDeps): Promise<SecretPushReport> {
+  const paths = resolveHomerPaths(opts.homerHome);
+  const git = resolveGitPort(deps?.git);
+  const config = requireConfig(paths);
+  const warnings: string[] = [];
+
+  const names = secretNames(config);
+  if (names.length === 0) {
+    return makePushReport('no-secrets', {
+      warnings: ['homer.json 的 secrets.files 为空，没有需要投递的密钥'],
+    });
+  }
+
+  const identity = loadIdentity(paths);
+  if (identity === undefined) {
+    return makePushReport('no-identity', {
+      warnings,
+      errors: [
+        `未找到本机 age identity: ${identityFilePath(paths)}`,
+        '请先运行 `homer secret keygen` 生成本机私钥，并把输出的 recipient 写进 homer.json 的 secrets.recipients。',
+      ],
+    });
+  }
+
+  const recipients = config.secrets?.recipients ?? [];
+  if (recipients.length === 0) {
+    return makePushReport('no-recipients', {
+      warnings,
+      errors: [
+        'homer.json 的 secrets.recipients 为空：没有加密目标',
+        '把各机器的 recipient（`age1...`，由 `homer secret keygen` 输出）写进 secrets.recipients 后重试。',
+      ],
+    });
+  }
+
+  // ---- 1. 先读全部明文（任一缺失 → 全有或全无，未写任何 vault 文件）---------
+  const plaintexts = new Map<string, Buffer>();
+  const missing: string[] = [];
+  for (const name of names) {
+    const destination = destinationOf(config, name);
+    try {
+      plaintexts.set(name, fs.readFileSync(destination));
+    } catch {
+      missing.push(`${name} → ${destination}`);
+    }
+  }
+  if (missing.length > 0) {
+    return makePushReport('missing-source', {
+      warnings,
+      errors: [
+        `以下目标文件不可读（${missing.length}/${names.length}），已中止且未写入任何 vault 文件：`,
+        ...missing,
+      ],
+    });
+  }
+
+  // ---- 2. 逐项加密写入 vault（全部 recipients；密文自检在 vault 层）---------
+  const crypto = deps?.age ?? createAgeCryptoPort();
+  const encrypted: string[] = [];
+  for (const name of names) {
+    await encryptSecretToFile(crypto, paths, name, plaintexts.get(name)!, recipients);
+    encrypted.push(name);
+  }
+
+  // ---- 3. 交互确认（§2.6 冻结顺序：加密之后、commit 之前）------------------
+  // 注意：拒绝（aborted）时 vault 工作区已含新密文但**未 commit**（`secrets/` 保持脏），
+  // 明文/私钥从不落盘，故无泄漏面；下次 push 会重新加密覆盖。
+  if (opts.yes !== true) {
+    const port = deps?.ui ?? createDefaultPromptPort();
+    const approved = await port.confirm(confirmPreview(config, encrypted, '将加密并提交'), false);
+    if (!approved) {
+      if (deps?.ui === undefined && process.stdout.isTTY !== true) warnings.push(NON_INTERACTIVE_HINT);
+      return makePushReport('aborted', {
+        encrypted,
+        warnings,
+        errors: ['已取消：未确认投递（vault 未 commit，远端未推送）'],
+      });
+    }
+  }
+
+  // ---- 4. commit 只覆盖 secrets/ ------------------------------------------
+  git.ensureGitRepo(paths.home);
+  if (!git.isGitRepo(paths.home)) {
+    return makePushReport('error', {
+      encrypted,
+      warnings,
+      errors: [
+        `vault 已写入但 ${paths.home} 不是 git 仓库（git 不可用？），无法提交`,
+        '请确认 git 已安装并可用，然后重试。',
+      ],
+    });
+  }
+
+  const commit = commitPaths(paths.home, ['secrets/'], `homer secret push: 更新 ${encrypted.length} 个密钥`);
+  if (commit === undefined) {
+    if (secretsDirty(paths.home)) {
+      return makePushReport('error', {
+        encrypted,
+        warnings,
+        errors: [
+          `vault 已写入但 git commit 失败: ${paths.home}`,
+          '请检查 git 是否可用与 user.name / user.email 配置（`git -C <home> config user.email`），然后重试。',
+        ],
+      });
+    }
+    warnings.push('vault 内容与 HEAD 一致，未产生新 commit');
+  }
+
+  const report = makePushReport('pushed', { encrypted, warnings });
+  if (commit !== undefined) report.commit = commit;
+
+  // ---- 5. 远端推送（有 push target 且非 --no-push）-------------------------
+  if (opts.noPush === true) {
+    warnings.push('--no-push: 只做本地 commit，未推送远端');
+    return report;
+  }
+
+  if (!git.hasPushTarget(paths.home)) {
+    warnings.push('未配置 git upstream，仅本地 commit（local-only 模式；如需推送请 `git push -u <remote> <branch>`）');
+    return report;
+  }
+
+  const pushed = git.gitPush(paths.home);
+  if (!pushed.ok) {
+    const reason = pushed.stderr.trim() === '' ? '未知错误' : pushed.stderr.trim();
+    warnings.push(`远端推送失败: ${reason}`);
+    return makePushReport('error', {
+      encrypted,
+      commit,
+      warnings,
+      errors: [
+        `本地 commit 已成功${commit === undefined ? '' : `（${commit.slice(0, 7)}）`}，远端推送失败: ${reason}`,
+        '密钥已在本地提交，修复远端问题后重试 `homer secret push`。',
+      ],
+    });
+  }
+
+  report.pushedToRemote = true;
+  return report;
+}
+
+/* ------------------------------------------------------------------ */
+/* pull                                                                */
+/* ------------------------------------------------------------------ */
 
 export interface SecretPullOptions { homerHome?: string; json?: boolean; yes?: boolean; }
 export interface SecretPullReport {
@@ -152,25 +412,184 @@ export interface SecretPullReport {
   errors: string[];
 }
 
-/** 从 `@{upstream}`（fetch 后）读密文 → 解密 → 备份后写回目标（0600）。 */
-export async function runSecretPull(opts: SecretPullOptions, deps?: SecretDeps): Promise<SecretPullReport> {
-  void opts;
-  void deps;
-  throw new CliError('尚未实现');
+function makePullReport(
+  status: SecretPullReport['status'],
+  patch: Partial<SecretPullReport> = {},
+): SecretPullReport {
+  return {
+    ok: status === 'applied' || status === 'no-secrets',
+    status,
+    pulled: [],
+    warnings: [],
+    errors: [],
+    ...patch,
+  };
 }
 
-// ---- list ----
+/**
+ * 从 `@{upstream}`（fetch 后）读密文 → 解密 → 备份后写回目标（0600）。
+ *
+ * 冻结语义（§2.6）：
+ *   - `gitFetch` 失败 → warning + 回落读**工作区** vault；成功且 upstream 可解析 → 逐项
+ *     `readVaultFileAtCommit(home, 'secrets/<name>.age', upstreamRef)`（**不 ff 整仓**）；
+ *   - 任一 vault 缺失 → `missing-vault`（不写任何目标）；
+ *   - 任一解密失败 → `undecryptable`（**不写任何目标**，全有或全无）；
+ *   - 非 `--yes` → confirm；已存在的目标先 `backupFiles`（label = `secret/<name>`）再写。
+ */
+export async function runSecretPull(opts: SecretPullOptions, deps?: SecretDeps): Promise<SecretPullReport> {
+  try {
+    return await pullPipeline(opts, deps);
+  } catch (err) {
+    if (err instanceof CliError) return makePullReport('error', { errors: errorLines(err) });
+    throw err;
+  }
+}
+
+/** 从工作区读 vault 密文（`readVaultFileAtCommit` 的回落口，fetch 失败 / 无 upstream 时用）。 */
+function readWorkspaceVault(paths: HomerPaths, name: string): Buffer | undefined {
+  try {
+    return fs.readFileSync(secretFilePath(paths, name));
+  } catch {
+    return undefined;
+  }
+}
+
+async function pullPipeline(opts: SecretPullOptions, deps?: SecretDeps): Promise<SecretPullReport> {
+  const paths = resolveHomerPaths(opts.homerHome);
+  const git = resolveGitPort(deps?.git);
+  const config = requireConfig(paths);
+  const warnings: string[] = [];
+
+  const names = secretNames(config);
+  if (names.length === 0) {
+    return makePullReport('no-secrets', {
+      warnings: ['homer.json 的 secrets.files 为空，没有需要归位的密钥'],
+    });
+  }
+
+  const identity = loadIdentity(paths);
+  if (identity === undefined) {
+    return makePullReport('no-identity', {
+      warnings,
+      errors: [
+        `未找到本机 age identity: ${identityFilePath(paths)}`,
+        '先在本机运行 `homer secret keygen`；若要从旧机迁移：在旧机把本机 recipient 加入 homer.json 的 secrets.recipients 后重新 `homer secret push`，再回到本机 `homer secret pull`。',
+      ],
+    });
+  }
+
+  // ---- 1. fetch（失败降级为 warning + 读工作区）----------------------------
+  const fetched = git.gitFetch(paths.home);
+  let upstream: string | undefined;
+  if (!fetched.ok) {
+    const reason = fetched.stderr.trim() === '' ? '未知错误' : fetched.stderr.trim();
+    warnings.push(`git fetch 失败（${reason}）：回落读取工作区 vault`);
+  } else {
+    upstream = git.upstreamRef(paths.home);
+    if (upstream === undefined) warnings.push('当前分支无 upstream：读取工作区 vault');
+  }
+
+  // ---- 2. 读全部密文（全有或全无，先于任何写操作）--------------------------
+  const ciphertexts = new Map<string, Buffer>();
+  const missing: string[] = [];
+  for (const name of names) {
+    const rel = secretRelativePath(name);
+    const bytes = upstream !== undefined
+      ? readVaultFileAtCommit(paths.home, rel, upstream)
+      : readWorkspaceVault(paths, name);
+    if (bytes === undefined) {
+      missing.push(`${rel}${upstream === undefined ? '（工作区）' : `（${upstream}）`}`);
+      continue;
+    }
+    ciphertexts.set(name, bytes);
+  }
+  if (missing.length > 0) {
+    return makePullReport('missing-vault', {
+      warnings,
+      errors: [
+        `以下 vault 文件缺失（${missing.length}/${names.length}），已中止且未写入任何目标文件：`,
+        ...missing,
+        '确认旧机已 `homer secret push`（密文进 git）后重试 `homer secret pull`。',
+      ],
+    });
+  }
+
+  // ---- 3. 逐项解密（任一失败 → 零写入）------------------------------------
+  const crypto = deps?.age ?? createAgeCryptoPort();
+  const plaintexts = new Map<string, Buffer>();
+  const failures: string[] = [];
+  for (const name of names) {
+    try {
+      plaintexts.set(name, await crypto.decrypt(ciphertexts.get(name)!, identity));
+    } catch (err) {
+      // crypto.decrypt 的 CliError 文案不含密文细节（cipher.ts 保证），可直接进报告。
+      failures.push(`${name}: ${err instanceof Error ? err.message : '解密失败'}`);
+    }
+  }
+  if (failures.length > 0) {
+    return makePullReport('undecryptable', {
+      warnings,
+      errors: [
+        `以下密钥无法用本机 identity 解密（${failures.length}/${names.length}），已中止且未写入任何目标文件：`,
+        ...failures,
+        '本机 recipient 可能不在旧机的 secrets.recipients 里：请在旧机追加本机 recipient 后重新 `homer secret push`。',
+      ],
+    });
+  }
+
+  // ---- 4. 交互确认（写任何目标之前）---------------------------------------
+  if (opts.yes !== true) {
+    const port = deps?.ui ?? createDefaultPromptPort();
+    const approved = await port.confirm(confirmPreview(config, names, '将归位'), false);
+    if (!approved) {
+      if (deps?.ui === undefined && process.stdout.isTTY !== true) warnings.push(NON_INTERACTIVE_HINT);
+      return makePullReport('aborted', {
+        warnings,
+        errors: ['已取消：未确认归位（未写入任何目标文件）'],
+      });
+    }
+  }
+
+  // ---- 5. 备份已存在的目标（先于写盘，保证「备份内容 == 覆盖前」）-----------
+  let backupDir: string | undefined;
+  const existing = existingDestinations(config, names);
+  if (existing.length > 0) {
+    const targets: BackupTarget[] = existing.map((name) => ({
+      sourceAbs: destinationOf(config, name),
+      label: `secret/${name}`,
+    }));
+    backupDir = backupFiles(paths, 'secret', targets).backupDir;
+  }
+
+  // ---- 6. 写入目标（父目录 mkdir -p，0600）--------------------------------
+  for (const name of names) {
+    const destination = destinationOf(config, name);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, plaintexts.get(name)!, { mode: 0o600 });
+    // 已存在的文件不会被 writeFileSync 的 mode 改动（open(2) 的 mode 只在创建时生效）。
+    fs.chmodSync(destination, 0o600);
+  }
+
+  return makePullReport('applied', { pulled: [...names], backupDir, warnings });
+}
+
+/* ------------------------------------------------------------------ */
+/* list                                                                */
+/* ------------------------------------------------------------------ */
 
 export interface SecretListOptions { homerHome?: string; json?: boolean; }
 export interface SecretListReport { secrets: VaultEntryStatus[]; }
 
 /** 列出 `secrets.files` 的每一项及 vault 文件 present/missing（纯读，不解密）。 */
 export function runSecretList(opts: SecretListOptions): SecretListReport {
-  void opts;
-  throw new CliError('尚未实现');
+  const paths = resolveHomerPaths(opts.homerHome);
+  const config = requireConfig(paths);
+  return { secrets: listSecrets(paths, config) };
 }
 
-// ---- 渲染钩子（P0 预置，使 W6 实现时无需改 index.ts）----
+/* ------------------------------------------------------------------ */
+/* 渲染钩子（P0 预置，使 W6 实现时无需改 index.ts）                     */
+/* ------------------------------------------------------------------ */
 
 export function renderSecretKeygenReport(report: SecretKeygenReport): string {
   const lines = [

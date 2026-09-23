@@ -10,8 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { readStoreSnapshotAtCommit } from '../../../src/core/git/reader.js';
-import { commitAllStore, ensureGitRepo } from '../../../src/core/git/git.js';
+import { readStoreSnapshotAtCommit, readVaultFileAtCommit } from '../../../src/core/git/reader.js';
+import { commitAllStore, commitPaths, ensureGitRepo, gitFetch } from '../../../src/core/git/git.js';
 import { readSnapshotFromStore, writeSnapshotToStore, STORE_COMPLETE_MARKER } from '../../../src/core/store/store.js';
 import type {
   AdapterSnapshot,
@@ -20,7 +20,7 @@ import type {
   SnapshotEntry,
   SnapshotFiles,
 } from '../../../src/core/types.js';
-import { cleanupTmp, gitOk, initRepo, mkTmp, pathsFor, writeFile } from './helpers.js';
+import { cleanupTmp, gitOk, initBare, initRepo, mkTmp, pathsFor, writeFile } from './helpers.js';
 
 afterEach(cleanupTmp);
 
@@ -316,5 +316,71 @@ describe('readStoreSnapshotAtCommit — config 对齐与过滤', () => {
       const read = readStoreSnapshotAtCommit(paths, sampleConfig(), commitish);
       expect(read.every((a) => a.categories.every((c) => c.files.size === 0))).toBe(true);
     }
+  });
+});
+
+describe('readVaultFileAtCommit — 二进制 blob 读取（§2.3 additive）', () => {
+  it('读回 Buffer，逐字节等于写入内容（含 0x00 / 0xFF，防 UTF-8 置换）', () => {
+    const home = initRepo('readvault-binary');
+    const bytes = Buffer.from([0x00, 0xff, 0x80, 0x41, 0x0a, 0xc3, 0x28, 0x00, 0xfe]);
+    writeFile(path.join(home, 'secrets', 'bin.age'), '');
+    fs.writeFileSync(path.join(home, 'secrets', 'bin.age'), bytes);
+    commitPaths(home, ['secrets/'], 'seed');
+
+    const read = readVaultFileAtCommit(home, 'secrets/bin.age', 'HEAD');
+    expect(read).toBeInstanceOf(Buffer);
+    expect(read!.equals(bytes)).toBe(true);
+  });
+
+  it('不同 commitish 读到各自版本；HEAD~1 里不存在的路径 → undefined', () => {
+    const home = initRepo('readvault-revs');
+    writeFile(path.join(home, 'secrets', 'old.age'), 'v1\n');
+    const c1 = commitPaths(home, ['secrets/'], 'c1');
+    writeFile(path.join(home, 'secrets', 'old.age'), 'v2\n');
+    writeFile(path.join(home, 'secrets', 'added.age'), 'new\n');
+    commitPaths(home, ['secrets/'], 'c2');
+
+    expect(readVaultFileAtCommit(home, 'secrets/old.age', 'HEAD')!.toString()).toBe('v2\n');
+    expect(readVaultFileAtCommit(home, 'secrets/old.age', c1!)!.toString()).toBe('v1\n');
+    // 该文件在此 commit 不存在（而不是空内容）→ undefined，与「缺失」同构。
+    expect(readVaultFileAtCommit(home, 'secrets/added.age', c1!)).toBeUndefined();
+  });
+
+  it('`@{upstream}` 可作 commitish（pull 的远端读取口）', () => {
+    const bare = initBare('readvault-upstream');
+    const local = initRepo('readvault-upstream-local');
+    writeFile(path.join(local, 'secrets', 'a.age'), 'local-v1\n');
+    commitPaths(local, ['secrets/'], 'seed');
+    gitOk(local, ['remote', 'add', 'origin', bare]);
+    gitOk(local, ['push', '-u', 'origin', 'main']);
+
+    writeFile(path.join(local, 'secrets', 'a.age'), 'local-v2\n');
+    const second = commitPaths(local, ['secrets/'], 'v2');
+    expect(second).toBeDefined();
+    gitOk(local, ['push']);
+
+    // 远端已被看到：@ (upstream) 指向最新已推送版本。
+    expect(gitFetch(local).ok).toBe(true);
+    expect(readVaultFileAtCommit(local, 'secrets/a.age', '@{upstream}')!.toString()).toBe('local-v2\n');
+  });
+
+  it('路径不存在 / 非法 commitish / 非仓库 / git 不可用 → undefined（不抛）', () => {
+    const home = initRepo('readvault-miss');
+    writeFile(path.join(home, 'secrets', 'a.age'), 'c1\n');
+    commitPaths(home, ['secrets/'], 'seed');
+
+    expect(readVaultFileAtCommit(home, 'secrets/nope.age', 'HEAD')).toBeUndefined();
+    expect(readVaultFileAtCommit(home, 'secrets/a.age', 'definitely-not-a-ref')).toBeUndefined();
+    expect(readVaultFileAtCommit(mkTmp('readvault-nonrepo'), 'secrets/a.age', 'HEAD')).toBeUndefined();
+  });
+
+  it('空 blob（合法空文件）→ 空 Buffer（与 undefined 可区分）', () => {
+    const home = initRepo('readvault-emptyblob');
+    writeFile(path.join(home, 'secrets', 'empty.age'), '');
+    commitPaths(home, ['secrets/'], 'seed');
+
+    const read = readVaultFileAtCommit(home, 'secrets/empty.age', 'HEAD');
+    expect(read).toBeInstanceOf(Buffer);
+    expect(read!.length).toBe(0);
   });
 });

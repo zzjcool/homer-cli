@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   commitAllStore,
+  commitPaths,
   ensureGitRepo,
   gitExec,
   gitFetch,
@@ -401,5 +402,85 @@ describe('ensureGitRepo 与 commit 的组合（local-only 模式，D1）', () =>
     expect(headCommit(home)).toBe(sha);
     expect(isStoreClean(home)).toBe(true);
     expect(hasUpstream(home)).toBe(false);
+  });
+});
+
+describe('commitPaths — 只提交指定 pathspec（§2.3 additive，D4 secret 通道）', () => {
+  it('commit 只含 secrets/：store/ 的脏改动保持未提交（零耦合）', () => {
+    const home = initRepo('commit-paths-scope');
+    writeFile(path.join(home, 'secrets', 'a.age'), 'cipher-a\n');
+    writeFile(path.join(home, 'store', 'pi', 'x.txt'), 'store-v1\n');
+    expect(commitPaths(home, ['secrets/'], 'secret push')).toBeDefined();
+
+    const files = gitOk(home, ['show', '--name-only', '--format=', 'HEAD']).trim().split('\n');
+    expect(files).toEqual(['secrets/a.age']);
+    // store/ 仍是未跟踪 / 未提交状态（补进历史不是 secret 通道的职责）。
+    expect(isStoreClean(home)).toBe(false);
+    expect(gitOk(home, ['status', '--porcelain', '--', 'store/']).trim()).not.toBe('');
+  });
+
+  it('新增 + 修改 + 删除都在 pathspec 内正确入库', () => {
+    const home = initRepo('commit-paths-all');
+    writeFile(path.join(home, 'secrets', 'keep.age'), 'keep-v1\n');
+    writeFile(path.join(home, 'secrets', 'gone.age'), 'gone\n');
+    commitPaths(home, ['secrets/'], 'seed');
+
+    writeFile(path.join(home, 'secrets', 'new.age'), 'new\n');
+    writeFile(path.join(home, 'secrets', 'keep.age'), 'keep-v2\n');
+    fs.rmSync(path.join(home, 'secrets', 'gone.age'));
+    const sha = commitPaths(home, ['secrets/'], 'update');
+
+    expect(sha).toBe(headCommit(home));
+    expect(gitOk(home, ['ls-tree', '-r', '--name-only', 'HEAD', '--', 'secrets/']).trim().split('\n')).toEqual([
+      'secrets/keep.age',
+      'secrets/new.age',
+    ]);
+  });
+
+  it('无变更 → undefined（幂等重跑不产生空 commit）', () => {
+    const home = initRepo('commit-paths-noop');
+    writeFile(path.join(home, 'secrets', 'a.age'), 'c1\n');
+    const first = commitPaths(home, ['secrets/'], 'seed');
+    expect(first).toBeDefined();
+    expect(commitPaths(home, ['secrets/'], 'again')).toBeUndefined();
+    expect(headCommit(home)).toBe(first);
+  });
+
+  it('secrets/ 目录不存在（还没 vault 文件）→ undefined，且不抛', () => {
+    const home = initRepo('commit-paths-absent');
+    writeFile(path.join(home, 'store', 'pi', 'x.txt'), 'v1\n');
+    expect(() => commitPaths(home, ['secrets/'], 'nothing')).not.toThrow();
+    expect(commitPaths(home, ['secrets/'], 'nothing')).toBeUndefined();
+    // 只有 store/ 的脏改动时也不该凭空提交任何东西（HEAD 仍是 unborn）。
+    expect(headCommit(home)).toBeUndefined();
+  });
+
+  it('pathspecs 为空 → undefined（无意义调用不炸 git）', () => {
+    const home = initRepo('commit-paths-empty');
+    writeFile(path.join(home, 'secrets', 'a.age'), 'c1\n');
+    expect(commitPaths(home, [], 'no pathspec')).toBeUndefined();
+    expect(gitOk(home, ['status', '--porcelain', '--', 'secrets/']).trim()).not.toBe('');
+  });
+
+  it('非仓库 / 缺 git 身份 → undefined（不抛）', () => {
+    const notRepo = mkTmp('commit-paths-nonrepo');
+    expect(commitPaths(notRepo, ['secrets/'], 'x')).toBeUndefined();
+
+    const home = mkTmp('commit-paths-noident');
+    gitOk(home, ['init', '-b', 'main']);
+    writeFile(path.join(home, 'secrets', 'a.age'), 'c1\n');
+    // 用空全局配置 + 屏蔽系统配置隔离，避免继承本机的 user.email（同 commitAllStore 的既有用例）。
+    const isolated = path.join(home, 'empty-gitconfig');
+    fs.writeFileSync(isolated, '', 'utf8');
+    const saved = process.env['GIT_CONFIG_GLOBAL'];
+    try {
+      process.env['GIT_CONFIG_GLOBAL'] = isolated;
+      process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+      expect(commitPaths(home, ['secrets/'], 'x')).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = saved;
+      delete process.env['GIT_CONFIG_NOSYSTEM'];
+    }
   });
 });

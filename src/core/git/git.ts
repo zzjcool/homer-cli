@@ -195,6 +195,40 @@ export function commitAllStore(home: string, message: string): string | undefine
   return headCommit(home);
 }
 
+/**
+ * `git add -A -- <pathspecs...>` + `git commit -m <message> -- <pathspecs...>`
+ * （docs/m3-plan.md §2.3 additive；§1-D4 secret 管线边界）。
+ *
+ * 与 `commitAllStore` 的区别只在 pathspec：secret 通道用 `['secrets/']`，**不与 store/ 耦合**
+ * —— 未列入 pathspec 的路径即使有改动也不会进这次 commit（store/ 的脏工作区保持原样，
+ * 反之亦然）。`git status --porcelain -- <pathspecs>` 空 = 无变更 → `undefined`（幂等重跑）。
+ *
+ * 返回新 HEAD SHA；无变更 / 非仓库 / commit 失败（如缺 user.email）→ `undefined`（不抛）。
+ * 调用方（`secret push`）据此区分「无事可做」与「真的提交失败」。
+ *
+ * `pathspecs` 为空数组 → `undefined`（无意义调用；`git status --` 空 pathspec 会报错）。
+ */
+export function commitPaths(
+  home: string,
+  pathspecs: readonly string[],
+  message: string,
+): string | undefined {
+  if (pathspecs.length === 0) return undefined;
+
+  // 变更检测必须先于 `git add`：`git add -- secrets/` 在目录尚不存在时会以 pathspec
+  // 不匹配失败（fatal），而「还没有任何 vault 文件」是合法状态而不是错误。
+  const status = gitExec(home, ['status', '--porcelain', '--', ...pathspecs]);
+  if (!status.ok || status.stdout.trim() === '') return undefined;
+
+  const add = gitExec(home, ['add', '-A', '--', ...pathspecs]);
+  if (!add.ok) return undefined;
+
+  const commit = gitExec(home, ['commit', '-m', message, '--', ...pathspecs]);
+  if (!commit.ok) return undefined;
+
+  return headCommit(home);
+}
+
 /** `git merge --ff-only @{upstream}`（D6：ff 失败 = 分叉，调用方在应用工具目录前拦截）。 */
 export function mergeFfUpstream(home: string): GitExecResult {
   return gitExec(home, ['merge', '--ff-only', '@{upstream}']);

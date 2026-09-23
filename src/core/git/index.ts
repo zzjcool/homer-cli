@@ -13,6 +13,7 @@ export {
   gitPush,
   headCommit,
   commitAllStore,
+  commitPaths,
   mergeFfUpstream,
   isStoreClean,
   isAncestorOf,
@@ -21,4 +22,4 @@ export {
   type GitExecResult,
 } from './git.js';
 
-export { readStoreSnapshotAtCommit } from './reader.js';
+export { readStoreSnapshotAtCommit, readVaultFileAtCommit } from './reader.js';
