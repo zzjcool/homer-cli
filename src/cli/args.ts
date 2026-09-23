@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util';
 
-/** M1 支持的命令（P1 由 M4-cli worker 接入真实实现）。 */
-export const COMMANDS = ['init', 'status', 'diff', 'help'] as const;
+/** 支持的命令（M1 四个 + M2 新增 push/pull/merge，docs/m2-plan.md §2.8）。 */
+export const COMMANDS = ['init', 'status', 'diff', 'push', 'pull', 'merge', 'help'] as const;
 export type Command = (typeof COMMANDS)[number];
 
 export interface ParsedArgs {
@@ -35,6 +35,9 @@ export const USAGE = `homer — dotfiles for humans and their AI agents
   init      扫描 adapter 并生成 homer.json + store 快照
   status    显示本地/仓库之间的漂移概览
   diff      显示漂移的详细差异
+  push      密钥扫描后推送本地快照到 store 并提交（+ 推送远端）
+  pull      拉取远端快照，备份后应用到工具目录
+  merge     逐项裁决本地/远端冲突
 
 全局选项:
   -h, --help    显示本帮助
@@ -43,6 +46,9 @@ export const USAGE = `homer — dotfiles for humans and their AI agents
   homer init
   homer status --json
   homer diff --category settings
+  homer push --yes
+  homer pull --yes
+  homer merge --accept-remote
 
 提示: 直接运行 TypeScript 源码可用 \`npx tsx src/cli/index.ts <command>\`。
 `;

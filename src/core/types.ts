@@ -15,9 +15,21 @@ export interface AdapterConfig {
   ignore?: string[];            // adapter 级忽略，相对 root 的路径 glob
 }
 
+/** 备份保留策略（docs/m2-plan.md §2.0-1；可选，缺省保留最近 7 个日期目录）。 */
+export interface BackupConfig {
+  keep?: number;                // 保留最近 N 个日期目录，默认 7
+}
+
+/** 密钥扫描豁免（docs/m2-plan.md §2.0-1；可选）。 */
+export interface SecretsConfig {
+  ignorePaths?: string[];       // store 相对路径 glob（matchesIgnore 语义）
+}
+
 export interface HomerConfig {
   version: 1;
   adapters: Record<string, AdapterConfig>;
+  backup?: BackupConfig;
+  secrets?: SecretsConfig;
 }
 
 export interface SnapshotEntry {

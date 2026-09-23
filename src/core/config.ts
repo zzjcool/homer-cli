@@ -79,6 +79,36 @@ function validateAdapter(raw: unknown, where: string, errors: string[]): void {
 }
 
 /**
+ * `backup` 段（docs/m2-plan.md §2.0-3）：可缺省；给出时必须是对象，
+ * `keep` 若给出必须是正整数。
+ */
+function validateBackup(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!isPlainObject(raw)) {
+    errors.push('backup 必须是对象');
+    return;
+  }
+  const keep = raw['keep'];
+  if (keep === undefined) return;
+  if (typeof keep !== 'number' || !Number.isInteger(keep) || keep <= 0) {
+    errors.push(`backup.keep 必须是正整数（当前: ${JSON.stringify(keep)}）`);
+  }
+}
+
+/**
+ * `secrets` 段（docs/m2-plan.md §2.0-3）：可缺省；给出时必须是对象，
+ * `ignorePaths` 若给出必须是字符串数组。
+ */
+function validateSecrets(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!isPlainObject(raw)) {
+    errors.push('secrets 必须是对象');
+    return;
+  }
+  checkOptionalStringArray(raw['ignorePaths'], 'secrets.ignorePaths', errors);
+}
+
+/**
  * 手写校验 `homer.json` 的原始解析值（零依赖）。
  * 只返回错误信息，不抛异常；`errors` 为空即合法。
  */
@@ -101,6 +131,10 @@ export function validateConfig(raw: unknown): ConfigResult {
       validateAdapter(adapter, `adapters.${adapterId}`, errors);
     }
   }
+
+  // additive（§2.0-3）：缺省合法。
+  validateBackup(raw['backup'], errors);
+  validateSecrets(raw['secrets'], errors);
 
   if (errors.length > 0) return { ok: false, errors };
   // SAFETY: 上面已逐字段校验 version/adapters/categories/root/mode/paths 等全部形状，

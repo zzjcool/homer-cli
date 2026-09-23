@@ -7,6 +7,9 @@ import { CliError, renderInit, renderStatus } from './render.js';
 import { INIT_USAGE, runInit } from './commands/init.js';
 import { STATUS_USAGE, runStatus } from './commands/status.js';
 import { DIFF_USAGE, runDiff } from './commands/diff.js';
+import { PUSH_USAGE, renderPushReport, runPush } from './commands/push.js';
+import { PULL_USAGE, renderPullReport, runPull } from './commands/pull.js';
+import { MERGE_USAGE, renderMergeReport, runMerge } from './commands/merge.js';
 
 export interface CliIO {
   out: (line: string) => void;
@@ -87,6 +90,12 @@ async function dispatch(command: Command, rest: readonly string[], io: CliIO): P
       return dispatchStatus(rest, io);
     case 'diff':
       return dispatchDiff(rest, io);
+    case 'push':
+      return await dispatchPush(rest, io);
+    case 'pull':
+      return await dispatchPull(rest, io);
+    case 'merge':
+      return await dispatchMerge(rest, io);
     case 'help':
       io.out(USAGE);
       return 0;
@@ -175,6 +184,85 @@ async function dispatchInit(argv: readonly string[], io: CliIO): Promise<number>
   if (json === true) io.out(JSON.stringify(report, null, 2));
   else io.out(renderInit(report));
   return 0;
+}
+
+async function dispatchPush(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: {
+        ...COMMON_OPTIONS,
+        json: { type: 'boolean' },
+        yes: { type: 'boolean' },
+        'no-push': { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('push', parsed.message, PUSH_USAGE, io);
+
+  const { home, help, json, yes, 'no-push': noPush } = parsed.value.values;
+  if (help === true) {
+    io.out(PUSH_USAGE);
+    return 0;
+  }
+
+  const report = await runPush({ homerHome: home, json, yes, noPush });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderPushReport(report));
+  return report.status === 'pushed' || report.status === 'no-drift' ? 0 : 1;
+}
+
+async function dispatchPull(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: { ...COMMON_OPTIONS, json: { type: 'boolean' }, yes: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('pull', parsed.message, PULL_USAGE, io);
+
+  const { home, help, json, yes } = parsed.value.values;
+  if (help === true) {
+    io.out(PULL_USAGE);
+    return 0;
+  }
+
+  const report = await runPull({ homerHome: home, json, yes });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderPullReport(report));
+  return report.status === 'applied' || report.status === 'no-drift' ? 0 : 1;
+}
+
+async function dispatchMerge(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: {
+        ...COMMON_OPTIONS,
+        json: { type: 'boolean' },
+        'accept-local': { type: 'boolean' },
+        'accept-remote': { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('merge', parsed.message, MERGE_USAGE, io);
+
+  const { home, help, json, 'accept-local': acceptLocal, 'accept-remote': acceptRemote } = parsed.value.values;
+  if (help === true) {
+    io.out(MERGE_USAGE);
+    return 0;
+  }
+
+  const report = await runMerge({ homerHome: home, json, acceptLocal, acceptRemote });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderMergeReport(report));
+  return report.status === 'resolved' || report.status === 'no-conflicts' ? 0 : 1;
 }
 
 async function main(): Promise<void> {

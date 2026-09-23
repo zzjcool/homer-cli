@@ -7,12 +7,14 @@ import path from 'node:path';
  *   <home>/homer.json   主配置（随 git 仓库走）
  *   <home>/store/       adapter 分类快照
  *   <home>/state.json   本地同步状态（不入库）
+ *   <home>/backups/     应用远端变更前的备份（不入库，见 docs/m2-plan.md §2.0-2）
  */
 export interface HomerPaths {
   home: string;
   storeDir: string;
   configFile: string;
   stateFile: string;
+  backupsDir: string;
 }
 
 /**
@@ -46,5 +48,6 @@ export function getHomerPaths(env: { HOMER_HOME?: string | undefined } = process
     storeDir: path.join(home, 'store'),
     configFile: path.join(home, 'homer.json'),
     stateFile: path.join(home, 'state.json'),
+    backupsDir: path.join(home, 'backups'),
   };
 }
