@@ -174,3 +174,10 @@ homer doctor: 通过   合计: ok 8  warn 0  fail 0
    若旧机在 clone 之后又 `secret push`，需用户自行 `homer secret pull`（warning 已给出该提示）。
 5. **`docs/m3-p3-w8-report.md`（本文件）** 是唯一超出任务书点名字范围的产出（沿用 W1/W2/W6/W7 各自的报告惯例）；
    如需严格限定文件集，删除本文件即可，代码与测试零依赖它。
+
+## 5. 交付信息
+
+- 分支：`m3-p3-w8-home`（基线 `94f1a0f`，已 push 到 `origin`）
+- 实现 commit：`4358216`（`src/cli/commands/home.ts` + `tests/cli/home.test.ts` + `tests/core/m3-p0-scaffold.test.ts` 断言更新）
+- PR 链接（远端提示，仓库无 glab/gh CLI）：<https://github.com/zzjcool/homer-cli/pull/new/m3-p3-w8-home>
+- 隔离：独立 worktree `/root/code/homer-cli-w8`，未触碰 master checkout / 其它 wave 的 worktree。
