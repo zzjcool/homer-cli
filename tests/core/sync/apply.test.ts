@@ -373,6 +373,31 @@ describe('applyPullActions — backup 选项与结果汇总', () => {
     expect(fs.readdirSync(path.join(h.paths.backupsDir, dateDirs[0] as string))).toHaveLength(1);
   });
 
+  it('opts.command=\'merge\'：备份目录名落到 <time>-merge（W9 的 additive 字段，默认仍是 -pull）', () => {
+    const h = setup();
+    write(path.join(h.agentRoot, 'settings.json'), 'OLD\n');
+
+    const result = applyPullActions(
+      h.paths,
+      h.config,
+      {
+        actions: [
+          { type: 'write', adapterId: 'pi', category: 'settings', relPath: 'settings.json', content: 'NEW\n' },
+        ],
+      },
+      { command: 'merge' },
+    );
+
+    const backupDir = result.backupDir as string;
+    expect(backupDir).toBeDefined();
+    // 目录名 = <HHmmss>-merge（与默认的 -pull 区分开）
+    expect(path.basename(backupDir)).toMatch(/^\d{6}-merge$/);
+    expect(path.basename(backupDir)).toContain('-merge');
+    // 备份内容 == 覆盖前内容
+    expect(fs.readFileSync(path.join(backupDir, 'pi/settings/settings.json'), 'utf8')).toBe('OLD\n');
+    expect(backupFilesOf(backupDir)).toEqual(['pi/settings/settings.json']);
+  });
+
   it('空 plan → 全空结果，零磁盘写入', () => {
     const h = setup();
     const result = applyPullActions(h.paths, h.config, { actions: [] });
