@@ -91,7 +91,8 @@ describe('runInit（打桩 scan + 真 store）', () => {
       adapters: Record<string, unknown>;
     };
     expect(config.version).toBe(1);
-    expect(Object.keys(config.adapters)).toEqual(['pi']);
+    // M3-P4-W9：KNOWN_ADAPTERS 注册 pi + herdr + opencode（注册顺序 = 声明顺序）
+    expect(Object.keys(config.adapters)).toEqual(['pi', 'herdr', 'opencode']);
   });
 
   it('已存在 homer.json → 拒绝覆盖（CliError）', async () => {

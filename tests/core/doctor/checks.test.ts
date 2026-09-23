@@ -30,6 +30,7 @@ import { writeSnapshotToStore } from '../../../src/core/store/store.js';
 import { saveState } from '../../../src/core/state.js';
 import {
   cleanupTmp,
+  cloneRepo,
   configureUser,
   gitOk,
   initBare,
@@ -384,6 +385,73 @@ describe('checkAge（⑥ age，注入 AgeCryptoPort）', () => {
     );
     expect(check.status).toBe('ok');
     expect(calls).toBe(1);
+  });
+
+  /* ---------------- P4-W9 缝隙修复：vault 取数口径 ---------------- */
+
+  it('工作区 vault 缺失但 @{upstream} 有密文 → ok（secret pull 不 ff 工作区，不能误报 fail）', async () => {
+    const bare = initBare('doctor-age-upstream-origin');
+    const home = cloneRepo(bare, 'doctor-age-upstream');
+    const paths = pathsFor(home);
+    const identity = generateIdentity();
+    writeIdentityFile(paths, identity);
+
+    // 先把 identity 的 recipient 写进 homer.json（clone 下来的仓库根即 home），
+    // 再用真实 port 加密出密文 → commit + push 到 origin（工作区一个字节都不留 vault）。
+    writeHomerJson(home, ageConfig({ recipients: [identity.recipient], files: { token: '~/token.txt' } }));
+    const crypto = createAgeCryptoPort();
+    await encryptSecretToFile(crypto, paths, 'token', Buffer.from('s3cr3t-value\n'), [identity.recipient]);
+    gitOk(home, ['add', '-A']);
+    gitOk(home, ['commit', '-m', 'vault']);
+    gitOk(home, ['push', '-u', 'origin', 'main']);
+
+    // 模拟「secret pull 刚成功但工作区未前移」：vault 只存在于 origin/main。
+    fs.rmSync(paths.secretsDir, { recursive: true, force: true });
+    expect(fs.existsSync(path.join(paths.secretsDir, 'token.age'))).toBe(false);
+
+    const check = await checkAge(paths, ageConfig({ recipients: [identity.recipient], files: { token: '~/token.txt' } }), crypto);
+    expect(check.status, JSON.stringify(check)).toBe('ok');
+    expect(check.message).toContain('均可解密');
+  });
+
+  it('工作区与 @{upstream} 都解不开 → fail（仍能准确报错）', async () => {
+    const bare = initBare('doctor-age-bothfail-origin');
+    const home = cloneRepo(bare, 'doctor-age-bothfail');
+    const paths = pathsFor(home);
+
+    // 用 identityA 加密，但本机装的是 identityB（从未被列为 recipient）。
+    const identityA = generateIdentity();
+    const identityB = generateIdentity();
+    writeIdentityFile(paths, identityB);
+    writeHomerJson(home, ageConfig({ recipients: [identityA.recipient], files: { token: '~/token.txt' } }));
+
+    const crypto = createAgeCryptoPort();
+    await encryptSecretToFile(crypto, paths, 'token', Buffer.from('s3cr3t-value\n'), [identityA.recipient]);
+    gitOk(home, ['add', '-A']);
+    gitOk(home, ['commit', '-m', 'vault']);
+    gitOk(home, ['push', '-u', 'origin', 'main']);
+
+    const check = await checkAge(paths, ageConfig({ recipients: [identityA.recipient], files: { token: '~/token.txt' } }), crypto);
+    expect(check.status).toBe('fail');
+    expect(check.message).toContain('无法解密');
+    expect(check.details?.join('\n')).toContain('token');
+  });
+
+  it('工作区 vault 存在且可解（无 upstream）→ ok，且不产生 upstream 回落文案', async () => {
+    const home = mkTmp('doctor-age-workspaceonly');
+    const paths = pathsFor(home);
+    const identity = generateIdentity();
+    writeIdentityFile(paths, identity);
+    const crypto = createAgeCryptoPort();
+    await encryptSecretToFile(crypto, paths, 'token', Buffer.from('s3cr3t-value\n'), [identity.recipient]);
+
+    const check = await checkAge(
+      paths,
+      ageConfig({ recipients: [identity.recipient], files: { token: '~/token.txt' } }),
+      crypto,
+    );
+    expect(check.status, JSON.stringify(check)).toBe('ok');
+    expect(check.message).toContain('均可解密');
   });
 });
 

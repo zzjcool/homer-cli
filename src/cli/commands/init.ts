@@ -15,6 +15,8 @@ import type { AdapterConfig, AdapterSnapshot, HomerConfig } from '../../core/typ
 import { saveConfig } from '../../core/config.js';
 import { writeSnapshotToStore } from '../../core/store/store.js';
 import { DEFAULT_PI_ADAPTER, PI_ADAPTER_ID, scanAdapter } from '../../adapters/pi/index.js';
+import { DEFAULT_HERDR_ADAPTER, HERDR_ADAPTER_ID } from '../../adapters/herdr/index.js';
+import { DEFAULT_OPENCODE_ADAPTER, OPENCODE_ADAPTER_ID } from '../../adapters/opencode/index.js';
 import {
   CliError,
   resolveHomerPaths,
@@ -39,6 +41,8 @@ export interface InitReport {
 /** M1 已知 adapter 注册表（后续 adapter 在此登记）。 */
 const KNOWN_ADAPTERS: Record<string, AdapterConfig> = {
   [PI_ADAPTER_ID]: DEFAULT_PI_ADAPTER,
+  [HERDR_ADAPTER_ID]: DEFAULT_HERDR_ADAPTER,
+  [OPENCODE_ADAPTER_ID]: DEFAULT_OPENCODE_ADAPTER,
 };
 
 export interface InitRunOptions {

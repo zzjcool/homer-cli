@@ -204,7 +204,8 @@ describe('M-A: homer init 对不可读 root 的处理（HOME 隔离）', () => {
     const fakeAgentRoot = useFakeHome();
     expect(fs.existsSync(fakeAgentRoot)).toBe(false);
 
-    const result = await cli(['init', '--home', home]);
+    // `--adapters pi`：本文件只验证 pi root 不可读的行为（三 adapter 默认注册见 tests/e2e/m3.test.ts）
+    const result = await cli(['init', '--home', home, '--adapters', 'pi']);
     expect(result.code).toBe(0);
     expect(result.out).toMatch(/⚠ adapter root 不可读: pi/);
   });
@@ -212,7 +213,7 @@ describe('M-A: homer init 对不可读 root 的处理（HOME 隔离）', () => {
   it('root 缺失 → init --json 的 errors 非空', async () => {
     useFakeHome();
 
-    const result = await cli(['init', '--json', '--home', home]);
+    const result = await cli(['init', '--json', '--home', home, '--adapters', 'pi']);
     const report = JSON.parse(result.out) as { errors: string[]; adapters: unknown[] };
     expect(report.errors).toHaveLength(1);
     expect(report.errors[0]).toMatch(/adapter root 不可读/);
@@ -224,7 +225,7 @@ describe('M-A: homer init 对不可读 root 的处理（HOME 隔离）', () => {
     fs.writeFileSync(path.join(fakeAgentRoot, 'settings.json'), '{"theme":"light"}', 'utf8');
     fs.writeFileSync(path.join(fakeAgentRoot, 'skills', 'a.md'), 'A\n', 'utf8');
 
-    const result = await cli(['init', '--json', '--home', home]);
+    const result = await cli(['init', '--json', '--home', home, '--adapters', 'pi']);
     const report = JSON.parse(result.out) as { errors: string[] };
     expect(report.errors).toEqual([]);
   });
@@ -238,7 +239,7 @@ describe('M-A: homer init 对不可读 root 的处理（HOME 隔离）', () => {
     fs.writeFileSync(path.join(fakeAgentRoot, 'skills', 'a.md'), 'A\n', 'utf8');
     fs.symlinkSync(outside, path.join(fakeAgentRoot, 'skills', 'escape'));
 
-    const result = await cli(['init', '--json', '--home', home]);
+    const result = await cli(['init', '--json', '--home', home, '--adapters', 'pi']);
     const report = JSON.parse(result.out) as { errors: string[] };
     expect(report.errors.length).toBeGreaterThan(0);
     expect(fs.readFileSync(path.join(home, 'store', 'pi', 'skills', 'a.md'), 'utf8')).toBe('A\n');

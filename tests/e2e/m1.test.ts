@@ -152,7 +152,9 @@ async function cli(args: string[]): Promise<{ code: number; out: string; err: st
 }
 
 async function initCli(): Promise<void> {
-  const result = await cli(['init', '--json']);
+  // M3-P4-W9 起 `init` 默认注册 pi + herdr + opencode（见 tests/e2e/m3.test.ts）。
+  // 本文件的断言全部针对 **pi adapter 的扫描语义**，故显式限定 `--adapters pi`，保持 7 分类口径。
+  const result = await cli(['init', '--json', '--adapters', 'pi']);
   expect(result.code).toBe(0);
   expect(result.err).toBe('');
 }
@@ -241,6 +243,7 @@ describe('e2e: homer init（临时 HOME + HOMER_HOME）', () => {
 
     const config = (parsed as { adapters: Record<string, { root: string; enabled: boolean; categories: Record<string, unknown> }> });
     expect((parsed as { version: number }).version).toBe(1);
+    // `--adapters pi` 限定（三 adapter 全注册由 tests/e2e/m3.test.ts 覆盖）
     expect(Object.keys(config.adapters)).toEqual(['pi']);
     expect(config.adapters['pi']?.root).toBe('~/.pi/agent');
     expect(config.adapters['pi']?.enabled).toBe(true);
@@ -485,7 +488,7 @@ describe('e2e: 缝合点回归（store 缺目录 + merge 分类新增文件）',
   it('pi root 不存在时 init 仍 exit 0，且报告/文本显式 ⚠ 提示（M-A）', async () => {
     rmSync(h.agentRoot, { recursive: true, force: true });
 
-    const init = await cli(['init', '--json']);
+    const init = await cli(['init', '--json', '--adapters', 'pi']);
     expect(init.code).toBe(0);
     const report = JSON.parse(init.out) as { homerHome: string; adapters: { categories: unknown[] }[]; errors: string[] };
     expect(report.homerHome).toBe(h.homerHome);
@@ -493,7 +496,7 @@ describe('e2e: 缝合点回归（store 缺目录 + merge 分类新增文件）',
     // M-A：不再静默——root 不可读必须在报告里可见
     expect(report.errors[0]).toMatch(/adapter root 不可读: pi/);
 
-    const initText = await cli(['init', '--force']);
+    const initText = await cli(['init', '--force', '--adapters', 'pi']);
     expect(initText.out).toMatch(/⚠ adapter root 不可读: pi/);
 
     // M-A：随后 status 必须报 ⚠（不产生假 push），计数全零
@@ -559,7 +562,7 @@ describe('e2e: CLI 进程入口（node --import tsx src/cli/index.ts）', () => 
   }
 
   it('init --json → 退出码 0 + stdout 合法 JSON；status --json → parseable', async () => {
-    const initOut = spawnCli(['init', '--json']);
+    const initOut = spawnCli(['init', '--json', '--adapters', 'pi']);
     const initReport = JSON.parse(initOut) as { homerHome: string; adapters: { id: string }[] };
     expect(initReport.homerHome).toBe(h.homerHome);
     expect(initReport.adapters[0]?.id).toBe('pi');

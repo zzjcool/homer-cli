@@ -37,12 +37,12 @@ import fs from 'node:fs';
 
 import { validateConfig } from '../config.js';
 import { isPlainObject } from '../entry-kind.js';
-import { gitExec, headCommit, isGitRepo, isStoreClean, upstreamRef } from '../git/index.js';
+import { gitExec, headCommit, isGitRepo, isStoreClean, readVaultFileAtCommit, upstreamRef } from '../git/index.js';
 import { loadState } from '../state.js';
 import { readSnapshotFromStore } from '../store/store.js';
 import { expandHome, type HomerPaths } from '../paths.js';
 import { REQUIRED_PLACEHOLDER } from '../sync/index.js';
-import { decryptSecretFromFile, identityFilePath, listSecrets, loadIdentity } from '../age/index.js';
+import { decryptSecretFromFile, identityFilePath, listSecrets, loadIdentity, secretRelativePath } from '../age/index.js';
 import type { AdapterSnapshot, HomerConfig } from '../types.js';
 import type { AgeCryptoPort } from '../age/index.js';
 
@@ -319,9 +319,23 @@ const RE_PUSH_HINT =
  *   1. `secrets.files` 与 `secrets.recipients` 都为空 → **ok**（用户根本没用密钥通道）；
  *   2. identity 缺失 → **fail**（无法解密任何东西，且 pull 会 `no-identity`）；
  *   3. `recipients` 为空 → **fail**（push 加密无目标，`encryptSecretToFile` 会拒绝）；
- *   4. 有 vault 文件 → 逐个 `decryptSecretFromFile`（真解密，不是存在性检查）：
- *      任一失败 → **fail**（典型原因：本机 identity 不是 recipient）；
- *   5. vault 文件缺失 → **warn**（配置里有这个密钥但远端/本地都还没有密文 → 尚未 push）。
+ *   4. 有 vault 密文 → 逐个试解密（真解密，不是存在性检查）：任一来源解出即算通过，
+ *      全部失败 → **fail**（典型原因：本机 identity 不是 recipient）；
+ *   5. 工作区与 upstream 都没有该密文 → **warn**（配置里有这个密钥但远端/本地都还没有 → 尚未 push）。
+ *
+ * ## vault 取数口径：工作区优先，回落 `@{upstream}`（P4-W9 缝隙修复）
+ *
+ * 只看**工作区** vault 会把一台完全可用的新机器误报为 fail。原因是一条跨模块接缝：
+ * `secret pull` 刻意**不 ff 整仓**（§1-D4：避免 store 工作区被默默推进），而 `homer pull` 在 store
+ * 无漂移时直接 `no-drift`、同样不前移 HEAD —— 于是「`secret pull` 刚成功、目标明文已 0600 归位，
+ * 但工作区 `secrets/` 仍是旧密文（甚至不存在，因为新设备的 identity 只能在 clone 之后生成，
+ * 故首次必然走「home → keygen → 旧机登记 → secret pull」顺序）」是**正常终态**。
+ * 判定为 fail 会与「刚刚成功解密」自相矛盾（§5 M3 Done 要求机器 B 的 doctor 无 fail）。
+ *
+ * 因此这里按**工作区优先、回落 `@{upstream}`** 取候选密文（与 `secret pull` 的实际取数口径同源）：
+ * 任一来源能解出即通过；两者都解不出才是真的 fail。
+ * 工作区存在时的错误文案与改动前**逐字相同**（上游失败追加为 ` / <ref>: …` 补充）。
+ * 上游读取是纯本地 ref（`git show`），不发网络，故 `--offline` 下行为一致。
  *
  * 只有「配置了密钥同步」时才检查 identity：没配 `secrets` 的机器不该被要求 keygen
  * （§3-P4 ⑦ 的真实环境冒烟就依赖这条：`homer doctor` 报 age 未配置 → ok）。
@@ -369,17 +383,51 @@ export async function checkAge(
   const failed: string[] = [];
   const missing: string[] = [];
   const vaultStatus = new Map(listSecrets(paths, config).map((entry) => [entry.name, entry.vaultFile]));
+  // 回落来源：`@{upstream}` 的短名（无 upstream / 非仓库 → undefined——回落不存在）。
+  // 只读本地 ref（`git show`），不发网络，故 `--offline` 下与在线行为一致。
+  const upstream = upstreamRef(paths.home);
 
   for (const name of names) {
-    if (vaultStatus.get(name) !== 'present') {
+    const workspacePresent = vaultStatus.get(name) === 'present';
+    // 工作区缺失时取 `@{upstream}` 候选密文（无 upstream → undefined）。
+    const upstreamBytes =
+      upstream === undefined ? undefined : readVaultFileAtCommit(paths.home, secretRelativePath(name), upstream);
+
+    if (!workspacePresent && upstreamBytes === undefined) {
       missing.push(`${name}（${name}.age 不存在）`);
       continue;
     }
-    try {
-      await decryptSecretFromFile(crypto, paths, name);
-    } catch (err) {
-      failed.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+
+    // 工作区优先（文案与改动前逐字相同）；工作区缺失**或解密失败**时回落 `@{upstream}`
+    // （P4-W9 缝隙修复：`secret pull` 从 upstream 读密文且不 ff 工作区，因此工作区里的
+    //  `secrets/` 可能是「存在但陈旧到本机解不开」的历史版本）。
+    let workspaceError: string | undefined;
+    let upstreamError: string | undefined;
+
+    if (workspacePresent) {
+      try {
+        await decryptSecretFromFile(crypto, paths, name);
+        continue;
+      } catch (err) {
+        workspaceError = err instanceof Error ? err.message : String(err);
+      }
     }
+
+    if (upstreamBytes !== undefined) {
+      try {
+        await crypto.decrypt(upstreamBytes, identity);
+        continue;
+      } catch (err) {
+        upstreamError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    const reason = workspaceError ?? upstreamError ?? '未知错误';
+    failed.push(
+      upstreamError === undefined || workspaceError === undefined
+        ? `${name}: ${reason}`
+        : `${name}: 工作区与 ${upstream} 均无法解密（${reason}）`,
+    );
   }
 
   if (failed.length > 0) {
