@@ -40,9 +40,14 @@ import type {
 export interface ApplyPullActionsOptions {
   /** 是否在覆盖 / 删除前备份已存在的本地文件（默认 `true`）。 */
   backup?: boolean;
+  /**
+   * 备份目录名里的命令分量（additive，默认 `'pull'`）：`<backupsDir>/<date>/<HHmmss>-<command>/`。
+   * `homer merge` 传 `'merge'`，使备份与 pull 的备份在目录名上可区分。
+   */
+  command?: string;
 }
 
-/** 备份目录名里的命令分量（applyPullActions 的冻结签名没有 command 参数，故固定为 `pull`）。 */
+/** 备份目录名里的命令分量默认值（保留既有 `<time>-pull` 布局，不破坏 M2-W2 已冻结的路径）。 */
 const BACKUP_COMMAND = 'pull';
 
 /** 动作 → adapter / category 配置；缺失 → undefined。 */
@@ -171,9 +176,11 @@ function resolveAction(config: HomerConfig, action: PullAction): ResolvedAction 
  *      「备份内容 == 覆盖前内容」这一不变式不成立。
  *   3. **应用**：按 plan 顺序 write / delete（conflict 只记录，保留本地）。
  *
- * 备份合并为一次调用（同一个 `<HHmmss>-pull` 目录），故 `result.backupDir` 唯一，
+ * 备份合并为一次调用（同一个 `<HHmmss>-<command>` 目录），故 `result.backupDir` 唯一，
  * 用户能在一处找回本轮所有被覆盖 / 删除的文件。需要备份的目标为空
  * （全新增 / 全 conflicts / `backup=false`）→ 不创建 `backups/`，`backupDir` 保持 undefined。
+ *
+ * `opts.command`（additive）决定目录名里的命令分量（默认 `'pull'`）；`homer merge` 传 `'merge'`。
  */
 export function applyPullActions(
   paths: HomerPaths,
@@ -182,6 +189,7 @@ export function applyPullActions(
   opts?: ApplyPullActionsOptions,
 ): ApplyResult {
   const backup = opts?.backup !== false; // 默认 true
+  const backupCommand = opts?.command ?? BACKUP_COMMAND;
 
   const result: ApplyResult = { written: [], deleted: [], conflicts: [] };
 
@@ -199,7 +207,7 @@ export function applyPullActions(
     }
     if (backupTargets.length > 0) {
       // 备份必须先落盘（阶段 3 之前），否则备份到的是新内容。
-      result.backupDir = backupFiles(paths, BACKUP_COMMAND, backupTargets).backupDir;
+      result.backupDir = backupFiles(paths, backupCommand, backupTargets).backupDir;
     }
   }
 
