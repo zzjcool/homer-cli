@@ -21,14 +21,19 @@
  * 对历史 commit 抛错只会让 base 读取在生产路径上不可用。
  */
 
+import { execFileSync } from 'node:child_process';
+
 import type { AdapterSnapshot, CategorySnapshot, HomerConfig, SnapshotFiles } from '../types.js';
 import type { HomerPaths } from '../paths.js';
 import { STORE_COMPLETE_MARKER } from '../store/store.js';
 import { entryKindFor } from '../entry-kind.js';
-import { gitExec } from './git.js';
+import { GIT_DEFAULT_TIMEOUT_MS, gitExec } from './git.js';
 
 /** commit 内 store 的路径前缀（相对仓库根，posix）。 */
 const STORE_PREFIX = 'store/';
+
+/** 大对象下 stdout 可能远超默认 1MB（`git show` 整文件 / ls-tree 全量）。 */
+const MAX_BUFFER = 64 * 1024 * 1024;
 
 /**
  * `git ls-tree -r --name-only -z <commitish> -- store/`。
@@ -53,6 +58,40 @@ function listStoreFiles(paths: HomerPaths, commitish: string): string[] {
 function readBlob(paths: HomerPaths, commitish: string, storeRel: string): string | undefined {
   const result = gitExec(paths.home, ['show', `${commitish}:${storeRel}`]);
   return result.ok ? result.stdout : undefined;
+}
+
+/**
+ * 读 `commitish:<relPath>` 的**二进制**内容（`git show`，docs/m3-plan.md §2.3 additive）。
+ *
+ * 用途：`homer secret pull` 从 `@{upstream}` 读 `secrets/<name>.age` 密文（§1-D4）。
+ * 放在 reader.ts 而非 git.ts：与 `readStoreSnapshotAtCommit` 同属「从 git 对象读内容」的读侧，
+ * 而 git.ts 是写侧 / 命令封装。
+ *
+ * 为什么不复用 `gitExec`：`gitExec` 用 `encoding: 'utf8'`，而 `secrets/*.age` 是 age 二进制密文，
+ * UTF-8 解码会把非法字节替换成 U+FFFD（不可逆）→ 解密必然失败。故这条读取单独走
+ * 无 encoding 的 `execFileSync`（返回 Buffer），是本模块唯一不经过 `gitExec` 的读取路径。
+ *
+ * 路径不存在（该 commit 没有这个文件，例如换设备时旧 commit）/ commit 不可解析 / 非仓库 /
+ * git 不可用 → `undefined`（与「vault 缺失」同构，由 §2.6 映射为 `missing-vault`）。
+ * 空文件返回**空 Buffer**（不是 undefined）——合法空 blob 与「不存在」语义不同。
+ */
+export function readVaultFileAtCommit(
+  home: string,
+  relPath: string,
+  commitish: string,
+): Buffer | undefined {
+  try {
+    const stdout = execFileSync('git', ['show', `${commitish}:${relPath}`], {
+      cwd: home,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: GIT_DEFAULT_TIMEOUT_MS,
+      maxBuffer: MAX_BUFFER,
+      windowsHide: true,
+    });
+    return Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout), 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 /**
