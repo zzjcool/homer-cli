@@ -33,8 +33,13 @@ const STORE_PATHSPEC = `${STORE_DIR_NAME}/`;
 /** 大快照下 stdout 可能远超默认 1MB（git show 整文件 / ls-tree 全量）。 */
 const MAX_BUFFER = 64 * 1024 * 1024;
 
-/** `.gitignore` 必须包含的行（D5：state.json 与 backups/ 不入库）。 */
-export const GITIGNORE_REQUIRED_LINES: readonly string[] = ['state.json', 'backups/'];
+/**
+ * `.gitignore` 必须包含的行（D5：state.json 与 backups/ 不入库；M3 §2.0-5：keys/ 亦不入库）。
+ *
+ * `keys/` = age 私钥目录（`<home>/keys/age.txt`，0600，docs/m3-plan.md D2）：
+ * 私钥永不入库、永不同步；公钥（recipient）才随 `homer.json` 走。
+ */
+export const GITIGNORE_REQUIRED_LINES: readonly string[] = ['state.json', 'backups/', 'keys/'];
 
 /** execFileSync 的 stdout/stderr 在异常分支里可能是 Buffer / null。 */
 function asText(value: unknown): string {

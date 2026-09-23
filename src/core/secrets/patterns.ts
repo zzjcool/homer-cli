@@ -1,5 +1,6 @@
 /**
- * 冻结的密钥正则清单（docs/m2-plan.md §2.2，12 条，**顺序即语义**）。
+ * 冻结的密钥正则清单（docs/m2-plan.md §2.2 的 12 条 + docs/m3-plan.md §2.0-4 追加第 13 条，
+ * 共 13 条，**顺序即语义**）。
  *
  * 「按序匹配，先命中先报」的落地解释（scan.ts）：
  *   逐行扫描，pattern 按本数组顺序尝试；同一行一旦有 pattern 命中即报告该条并停止
@@ -10,6 +11,13 @@
  *   1. 清单里的 `(?i)` 是文档写法；JS 不支持 inline flag，改为 RegExp 的 `i` 标志。
  *   2. 通用赋值里的 `/` 在字符类中写作 `\/`（JS 正则字面量的安全写法，语义不变）。
  *
+ * **第三条翻译（M3 §2.0-4，第 13 条 age 私钥）**：计划原文写作 `AGE-SECRET-KEY-[a-z0-9]{20,}`，
+ * 但真实 age 私钥的 bech32 主体是**大写**（实测：`AGE-SECRET-KEY-19WJMMZ92DNEPCVR2P4W63SEK...`，
+ * 见 docs/m3-scout-report.md §3.2）。字符类保持计划原样 `[a-z0-9]`，仅加 `i` 标志 → 实际覆盖
+ * `[A-Za-z0-9]`：既匹配真实大写私钥，也匹配计划里的小写写法（严格更宽，无收窄）。
+ * 反之（不加 `i`）第 13 条将永不命中真实私钥 —— 安全闸门形同虚设，与 §2.0-4 的语义
+ * （「age 私钥误入 store 拒推」）直接冲突。此翻译已上报 orchestrator 确认。
+ *
  * 经实测，12 条之间**无相互遮蔽**（`sk_live_` 用下划线，不满足第 2 条 openai 的 `sk-` 前缀），
  * 因此每条专用 pattern 都是其正例的唯一命中；「先命中先报」只影响同一行上多密钥时的报告数量。
  *
@@ -18,7 +26,7 @@
 
 import type { SecretPattern } from './types.js';
 
-/** 12 条冻结 pattern（顺序 = §2.2 清单顺序；「先命中先报」的口径见文件头注释）。 */
+/** 13 条冻结 pattern（顺序 = §2.2 清单顺序 + §2.0-4 追加的第 13 条；「先命中先报」的口径见文件头注释）。 */
 export const SECRET_PATTERNS: readonly SecretPattern[] = Object.freeze([
   {
     id: 'anthropic-api-key',
@@ -81,5 +89,13 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = Object.freeze([
     id: 'generic-secret-assignment',
     description: '保守通用密钥赋值（api_key/secret/token/password = "..."）',
     regex: /(api[_-]?key|secret|token|password)["']?\s*[:=]\s*["'][A-Za-z0-9+\/_-]{20,}["']/i,
+  },
+  {
+    // 追加（docs/m3-plan.md §2.0-4）：age 私钥（`AGE-SECRET-KEY-1...`）误入 store 即拒推。
+    // 私钥本应只存在于 `<home>/keys/age.txt`（0600，gitignored）；命中本条 = 严重事故信号。
+    // `i` 标志的必要性见文件头「第三条翻译」：真实 age 私钥主体是大写。
+    id: 'age-secret-key',
+    description: 'age X25519 私钥（AGE-SECRET-KEY-）',
+    regex: /AGE-SECRET-KEY-[a-z0-9]{20,}/i,
   },
 ]);

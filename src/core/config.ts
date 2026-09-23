@@ -4,6 +4,9 @@ import path from 'node:path';
 import type { HomerConfig } from './types.js';
 import { isPlainObject } from './entry-kind.js';
 import type { HomerPaths } from './paths.js';
+// 纯校验函数从 age/types.ts 取（docs/m3-plan.md §2.0-3）：那两个函数在 P0 就是纯校验实现，
+// 不依赖 age-encryption，因此 config 校验不会拖入密码学依赖。
+import { recipientIsValid, secretNameValid } from './age/types.js';
 
 export type ConfigResult =
   | { ok: true; config: HomerConfig }
@@ -76,6 +79,8 @@ function validateAdapter(raw: unknown, where: string, errors: string[]): void {
 
   checkOptionalBoolean(raw['enabled'], `${where}.enabled`, errors);
   checkOptionalStringArray(raw['ignore'], `${where}.ignore`, errors);
+  // additive（docs/m3-plan.md §2.0-1 / §2.0-3）：symlink 逃逸 allowlist，glob 数组，缺省合法。
+  checkOptionalStringArray(raw['allowEscape'], `${where}.allowEscape`, errors);
 }
 
 /**
@@ -96,8 +101,15 @@ function validateBackup(raw: unknown, errors: string[]): void {
 }
 
 /**
- * `secrets` 段（docs/m2-plan.md §2.0-3）：可缺省；给出时必须是对象，
- * `ignorePaths` 若给出必须是字符串数组。
+ * `secrets` 段（docs/m2-plan.md §2.0-3 + docs/m3-plan.md §2.0-3）：可缺省；给出时必须是对象。
+ *
+ * 校验项：
+ *   - `ignorePaths`：字符串数组（M2）；
+ *   - `recipients`（M3）：字符串数组，每项必须是合法 age recipient —— 非法值会让
+ *     `secret push` 在加密阶段才报错，故在配置阶段拦下；
+ *   - `files`（M3）：`{ <secret 名>: <目标路径> }`，name 须过 `secretNameValid`
+ *     （决定 vault 文件名，扁平无子目录防逃逸），值必须以 `~` / `/` 开头
+ *     （拒绝相对路径：目标路径的解释与 cwd 无关，只认绝对路径或 `~` 展开）。
  */
 function validateSecrets(raw: unknown, errors: string[]): void {
   if (raw === undefined) return;
@@ -106,6 +118,37 @@ function validateSecrets(raw: unknown, errors: string[]): void {
     return;
   }
   checkOptionalStringArray(raw['ignorePaths'], 'secrets.ignorePaths', errors);
+
+  const recipients = raw['recipients'];
+  if (recipients !== undefined) {
+    checkStringArray(recipients, 'secrets.recipients', errors);
+    if (Array.isArray(recipients)) {
+      recipients.forEach((item, i) => {
+        if (typeof item !== 'string' || item.length === 0) return; // 上面已报，不重复
+        if (!recipientIsValid(item)) {
+          errors.push(`secrets.recipients[${i}] 不是合法的 age recipient（应为 age1 + 58 字符）`);
+        }
+      });
+    }
+  }
+
+  const files = raw['files'];
+  if (files !== undefined) {
+    if (!isPlainObject(files)) {
+      errors.push('secrets.files 必须是对象（secret 名 -> 目标路径）');
+    } else {
+      for (const [name, destination] of Object.entries(files)) {
+        if (!secretNameValid(name)) {
+          errors.push(`secrets.files 的键 "${name}" 不是合法的 secret 名（应形如 [A-Za-z0-9][A-Za-z0-9._-]*）`);
+        }
+        if (typeof destination !== 'string' || destination.length === 0) {
+          errors.push(`secrets.files.${name} 必须是非空字符串`);
+        } else if (!destination.startsWith('~') && !destination.startsWith('/')) {
+          errors.push(`secrets.files.${name} 必须以 '~' 或 '/' 开头（当前: ${JSON.stringify(destination)}）`);
+        }
+      }
+    }
+  }
 }
 
 /**

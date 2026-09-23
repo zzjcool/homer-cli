@@ -1,7 +1,21 @@
 import { parseArgs } from 'node:util';
 
-/** 支持的命令（M1 四个 + M2 新增 push/pull/merge，docs/m2-plan.md §2.8）。 */
-export const COMMANDS = ['init', 'status', 'diff', 'push', 'pull', 'merge', 'help'] as const;
+/**
+ * 支持的命令（M1 四个 + M2 新增 push/pull/merge + M3 新增 home/doctor/secret，
+ * docs/m2-plan.md §2.8 / docs/m3-plan.md §2.1）。
+ */
+export const COMMANDS = [
+  'init',
+  'status',
+  'diff',
+  'push',
+  'pull',
+  'merge',
+  'home',
+  'doctor',
+  'secret',
+  'help',
+] as const;
 export type Command = (typeof COMMANDS)[number];
 
 export interface ParsedArgs {
@@ -38,6 +52,9 @@ export const USAGE = `homer — dotfiles for humans and their AI agents
   push      密钥扫描后推送本地快照到 store 并提交（+ 推送远端）
   pull      拉取远端快照，备份后应用到工具目录
   merge     逐项裁决本地/远端冲突
+  home      新机器一键归位：clone 配置仓库 → 应用配置 → 解密密钥 → doctor
+  doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
+  secret    密钥投递：keygen | push | pull | list
 
 全局选项:
   -h, --help    显示本帮助
@@ -49,6 +66,10 @@ export const USAGE = `homer — dotfiles for humans and their AI agents
   homer push --yes
   homer pull --yes
   homer merge --accept-remote
+  homer home git@github.com:me/homer-config.git --yes
+  homer doctor --json
+  homer secret keygen
+  homer secret push --yes
 
 提示: 直接运行 TypeScript 源码可用 \`npx tsx src/cli/index.ts <command>\`。
 `;

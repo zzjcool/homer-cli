@@ -109,7 +109,7 @@ describe('isGitRepo', () => {
 });
 
 describe('ensureGitRepo — init + 幂等 .gitignore', () => {
-  it('首次运行：init + 写入两行必需项', () => {
+  it('首次运行：init + 写入全部必需项（M3 超 `keys/`）', () => {
     const home = mkTmp('ensure-first');
     ensureGitRepo(home);
 
@@ -121,6 +121,8 @@ describe('ensureGitRepo — init + 幂等 .gitignore', () => {
     }
     expect(gitignore).toContain('state.json');
     expect(gitignore).toContain('backups/');
+    // M3 §2.0-5：age 私钥目录 `keys/` 不入库（D2）。
+    expect(gitignore).toContain('keys/');
   });
 
   it('二次运行不重复追加（字节级不变）', () => {
@@ -135,6 +137,7 @@ describe('ensureGitRepo — init + 幂等 .gitignore', () => {
     expect(third).toBe(first);
     expect(third.split('\n').filter((line) => line === 'state.json')).toHaveLength(1);
     expect(third.split('\n').filter((line) => line === 'backups/')).toHaveLength(1);
+    expect(third.split('\n').filter((line) => line === 'keys/')).toHaveLength(1);
   });
 
   it('保留用户已有规则 + 只追加缺失项（缺换行结尾也补齐）', () => {
@@ -145,7 +148,8 @@ describe('ensureGitRepo — init + 幂等 .gitignore', () => {
     ensureGitRepo(home);
 
     const content = fs.readFileSync(path.join(home, '.gitignore'), 'utf8');
-    expect(content).toBe('state.json\n*.log\nbackups/\n');
+    // M3 §2.0-5：必需行新增 `keys/`（age 私钥目录不入库）。
+    expect(content).toBe('state.json\n*.log\nbackups/\nkeys/\n');
     expect(content.split('\n').filter((line) => line === 'state.json')).toHaveLength(1);
   });
 
@@ -154,6 +158,19 @@ describe('ensureGitRepo — init + 幂等 .gitignore', () => {
     expect(fs.existsSync(home)).toBe(false);
     ensureGitRepo(home);
     expect(isGitRepo(home)).toBe(true);
+  });
+
+  it('M3 §2.0-5：`keys/` 行真实生效（git check-ignore 命中 age.txt）', () => {
+    const home = mkTmp('ensure-keys-ignored');
+    ensureGitRepo(home);
+    fs.mkdirSync(path.join(home, 'keys'), { recursive: true });
+    writeFile(path.join(home, 'keys', 'age.txt'), 'AGE-nothing-real\n');
+
+    const ignored = gitExec(home, ['check-ignore', '-v', 'keys/age.txt']);
+    expect(ignored.ok).toBe(true);
+    // 私钥文件不出现在未跟踪清单里（唯一可能出现的其它项是 .gitignore 自身）。
+    const untracked = gitExec(home, ['status', '--porcelain']).stdout;
+    expect(untracked).not.toContain('keys/');
   });
 });
 

@@ -10,6 +10,20 @@ import { DIFF_USAGE, runDiff } from './commands/diff.js';
 import { PUSH_USAGE, renderPushReport, runPush } from './commands/push.js';
 import { PULL_USAGE, renderPullReport, runPull } from './commands/pull.js';
 import { MERGE_USAGE, renderMergeReport, runMerge } from './commands/merge.js';
+import { HOME_USAGE, renderHomeReport, runHome } from './commands/home.js';
+import { DOCTOR_USAGE, renderDoctorReport, runDoctor } from './commands/doctor.js';
+import {
+  SECRET_USAGE,
+  parseSecretSubcommand,
+  renderSecretKeygenReport,
+  renderSecretListReport,
+  renderSecretPullReport,
+  renderSecretPushReport,
+  runSecretKeygen,
+  runSecretList,
+  runSecretPull,
+  runSecretPush,
+} from './commands/secret.js';
 
 export interface CliIO {
   out: (line: string) => void;
@@ -96,6 +110,12 @@ async function dispatch(command: Command, rest: readonly string[], io: CliIO): P
       return await dispatchPull(rest, io);
     case 'merge':
       return await dispatchMerge(rest, io);
+    case 'home':
+      return await dispatchHome(rest, io);
+    case 'doctor':
+      return await dispatchDoctor(rest, io);
+    case 'secret':
+      return await dispatchSecret(rest, io);
     case 'help':
       io.out(USAGE);
       return 0;
@@ -270,6 +290,251 @@ async function main(): Promise<void> {
   process.exitCode = code;
 }
 
+// ---- M3 新命令（docs/m3-plan.md §2.1；此后 P1-P4 禁改本文件）----
+
+/** 首次对接模式取值（`--mode` 校验用；与 W5 的 `FirstContactMode` 同集合）。 */
+const FIRST_CONTACT_MODES = ['pull', 'merge', 'skip'] as const;
+
+type FirstContactModeArg = (typeof FIRST_CONTACT_MODES)[number];
+
+function isFirstContactMode(value: string): value is FirstContactModeArg {
+  return (FIRST_CONTACT_MODES as readonly string[]).includes(value);
+}
+
+/**
+ * `homer home <repo-url>`（§2.1 flag 表：`--home` `--mode pull|merge|skip` `--yes` `--json` `-h`）。
+ *
+ * `repo-url` 是**位置参数**（必填），故这里 `allowPositionals: true`——其余命令均不允许位置参数。
+ * 缺少或多余的位置参数 → 用法错误（与 strict 模式对选项的处理一致，不静默忽略）。
+ */
+async function dispatchHome(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: {
+        ...COMMON_OPTIONS,
+        mode: { type: 'string' },
+        yes: { type: 'boolean' },
+        json: { type: 'boolean' },
+      },
+      allowPositionals: true,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('home', parsed.message, HOME_USAGE, io);
+
+  const { home, help, mode, yes, json } = parsed.value.values;
+  if (help === true) {
+    io.out(HOME_USAGE);
+    return 0;
+  }
+
+  if (parsed.value.positionals.length !== 1) {
+    return usageError(
+      'home',
+      parsed.value.positionals.length === 0
+        ? '缺少 <repo-url> 位置参数'
+        : `多余的参数: ${parsed.value.positionals.slice(1).join(' ')}`,
+      HOME_USAGE,
+      io,
+    );
+  }
+  const repoUrl = parsed.value.positionals[0] as string;
+
+  if (mode !== undefined && !isFirstContactMode(mode)) {
+    return usageError(
+      'home',
+      `--mode 只能是 pull / merge / skip（当前: ${mode}）`,
+      HOME_USAGE,
+      io,
+    );
+  }
+
+  const report = await runHome({
+    homerHome: home,
+    repoUrl,
+    json,
+    yes,
+    mode: mode === undefined ? undefined : (mode as FirstContactModeArg),
+  });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderHomeReport(report));
+  return report.status === 'homed' ? 0 : 1;
+}
+
+/**
+ * `homer doctor`（§2.1 flag 表：`--home` `--offline` `--json` `-h`）。
+ *
+ * 退出码（§2.5 / D6）：无 `fail` → 0（**含仅 warn**）；有 fail → 1。
+ */
+async function dispatchDoctor(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: { ...COMMON_OPTIONS, offline: { type: 'boolean' }, json: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('doctor', parsed.message, DOCTOR_USAGE, io);
+
+  const { home, help, offline, json } = parsed.value.values;
+  if (help === true) {
+    io.out(DOCTOR_USAGE);
+    return 0;
+  }
+
+  const report = await runDoctor({ homerHome: home, json, offline });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderDoctorReport(report));
+  return report.ok ? 0 : 1;
+}
+
+/**
+ * `homer secret <keygen|push|pull|list>`（§2.1 / §2.6）。
+ *
+ * 子命令切分在 `secret.ts` 内（`parseSecretSubcommand`），本函数只按子命令解析各自的
+ * flag 表（§2.1），使「子命令集合」的真相只有一份。
+ *
+ * `homer secret`（无子命令）→ 打印用法 + exit 1（缺必需子命令，同 `homer` 无参数的口径）；
+ * `homer secret --help` → 用法 + exit 0；未知子命令 → usageError + exit 1。
+ */
+async function dispatchSecret(argv: readonly string[], io: CliIO): Promise<number> {
+  const first = argv[0];
+  if (first === undefined) {
+    io.err('homer secret: 缺少子命令（keygen | push | pull | list）');
+    io.err('');
+    io.err(SECRET_USAGE);
+    return 1;
+  }
+  if (first === '-h' || first === '--help') {
+    io.out(SECRET_USAGE);
+    return 0;
+  }
+
+  const split = parseSecretSubcommand(argv);
+  if (!split.ok) return usageError('secret', `未知子命令: ${split.unknown}`, SECRET_USAGE, io);
+  const sub = split.subcommand;
+  if (sub === undefined) {
+    io.err(SECRET_USAGE);
+    return 1;
+  }
+
+  switch (sub) {
+    case 'keygen':
+      return await dispatchSecretKeygen(split.rest, io);
+    case 'push':
+      return await dispatchSecretPush(split.rest, io);
+    case 'pull':
+      return await dispatchSecretPull(split.rest, io);
+    case 'list':
+      return dispatchSecretList(split.rest, io);
+  }
+}
+
+/** `--home` `--json` `-h`。 */
+async function dispatchSecretKeygen(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: { ...COMMON_OPTIONS, json: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('secret', parsed.message, SECRET_USAGE, io);
+
+  const { home, help, json } = parsed.value.values;
+  if (help === true) {
+    io.out(SECRET_USAGE);
+    return 0;
+  }
+
+  const report = await runSecretKeygen({ homerHome: home, json });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderSecretKeygenReport(report));
+  // §2.6：成功 → 0；identity 已存在 → 1（实现抛 CliError）。
+  return report.ok ? 0 : 1;
+}
+
+/** `--home` `--yes` `--no-push` `--json` `-h`。 */
+async function dispatchSecretPush(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: {
+        ...COMMON_OPTIONS,
+        json: { type: 'boolean' },
+        yes: { type: 'boolean' },
+        'no-push': { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('secret', parsed.message, SECRET_USAGE, io);
+
+  const { home, help, json, yes, 'no-push': noPush } = parsed.value.values;
+  if (help === true) {
+    io.out(SECRET_USAGE);
+    return 0;
+  }
+
+  const report = await runSecretPush({ homerHome: home, json, yes, noPush });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderSecretPushReport(report));
+  // §2.6：pushed / no-secrets → 0；其余 → 1。
+  return report.status === 'pushed' || report.status === 'no-secrets' ? 0 : 1;
+}
+
+/** `--home` `--yes` `--json` `-h`。 */
+async function dispatchSecretPull(argv: readonly string[], io: CliIO): Promise<number> {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: { ...COMMON_OPTIONS, json: { type: 'boolean' }, yes: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('secret', parsed.message, SECRET_USAGE, io);
+
+  const { home, help, json, yes } = parsed.value.values;
+  if (help === true) {
+    io.out(SECRET_USAGE);
+    return 0;
+  }
+
+  const report = await runSecretPull({ homerHome: home, json, yes });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderSecretPullReport(report));
+  // §2.6：applied / no-secrets → 0；其余 → 1。
+  return report.status === 'applied' || report.status === 'no-secrets' ? 0 : 1;
+}
+
+/** `--home` `--json` `-h`。list 恒 exit 0（§2.6）。 */
+function dispatchSecretList(argv: readonly string[], io: CliIO): number {
+  const parsed = safeParse(() =>
+    parseArgs({
+      args: [...argv],
+      options: { ...COMMON_OPTIONS, json: { type: 'boolean' } },
+      allowPositionals: false,
+      strict: true,
+    }),
+  );
+  if (!parsed.ok) return usageError('secret', parsed.message, SECRET_USAGE, io);
+
+  const { home, help, json } = parsed.value.values;
+  if (help === true) {
+    io.out(SECRET_USAGE);
+    return 0;
+  }
+
+  const report = runSecretList({ homerHome: home, json });
+  if (json === true) io.out(JSON.stringify(report, null, 2));
+  else io.out(renderSecretListReport(report));
+  return 0;
+}
 // bin/homer.js 以 `import('../dist/cli/index.js')` 薄壳形式加载本模块，
 // 因此入口副作用必须发生在 import 时。测试导入 run() 时跳过（vitest 会设 VITEST）。
 if (!process.env.VITEST) {

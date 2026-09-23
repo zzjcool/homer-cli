@@ -13,6 +13,12 @@ export interface AdapterConfig {
   enabled?: boolean;
   categories: Record<string, CategoryConfig>;
   ignore?: string[];            // adapter 级忽略，相对 root 的路径 glob
+  /**
+   * symlink 逃逸 allowlist（docs/m3-plan.md §2.0-1 / D7，可选）：
+   * 相对 adapter root 的 glob（`matchesIgnore` 语义）。命中 = 允许该 symlink 逃逸 root 并跟随；
+   * 缺省 = 维持 M1 安全边界（跳过 + ScanError）。显式 opt-in，不做全局放开。
+   */
+  allowEscape?: string[];
 }
 
 /** 备份保留策略（docs/m2-plan.md §2.0-1；可选，缺省保留最近 7 个日期目录）。 */
@@ -20,9 +26,13 @@ export interface BackupConfig {
   keep?: number;                // 保留最近 N 个日期目录，默认 7
 }
 
-/** 密钥扫描豁免（docs/m2-plan.md §2.0-1；可选）。 */
+/** 密钥同步配置（docs/m2-plan.md §2.0-1 + docs/m3-plan.md §2.0-1；可选）。 */
 export interface SecretsConfig {
   ignorePaths?: string[];       // store 相对路径 glob（matchesIgnore 语义）
+  /** age X25519 recipients（age1...），secret push 的加密目标。 */
+  recipients?: string[];
+  /** secret 名 -> 目标路径（必须 '~' 或 '/' 开头；'~' 用 expandHome 展开）。name 须过 secretNameValid。 */
+  files?: Record<string, string>;
 }
 
 export interface HomerConfig {

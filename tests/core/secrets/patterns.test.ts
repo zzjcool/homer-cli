@@ -1,7 +1,7 @@
 /**
  * 冻结 patterns 清单的测试（docs/m2-plan.md §2.2 / §3-P1-W1）。
  *
- * 覆盖：清单条数/顺序/id 稳定性、12 条各 ≥1 正例 + ≥2 反例、以及验收点名的三处
+ * 覆盖：清单条数/顺序/id 稳定性、13 条各 ≥1 正例 + ≥2 反例、以及验收点名的三处
  * 不误报场景（`sk-ant-` 不报 openai、`__REQUIRED__` 不命中、短 token / `${...}` 不命中）。
  *
  * 断言口径分三层，避免把「跨 pattern 命中」误判成误报：
@@ -54,6 +54,12 @@ const STRIPE_PK = shape('pk_', 'live_', BODY.slice(0, 20));
 const PEM_RSA = shape('-----BEGIN ', 'RSA PRIVATE KEY-----');
 const PEM_OPENSSH = shape('-----BEGIN ', 'OPENSSH PRIVATE KEY-----');
 const GENERIC_ASSIGNMENT = shape('"api_key": "', BODY.slice(0, 24), '"');
+/**
+ * 第 13 条（M3 §2.0-4）：age 私钥。主体用**大写**（与真实 `generateIdentity()` 输出一致，
+ * 见 docs/m3-scout-report.md §3.2）；另附一条计划原文的小写写法。
+ */
+const AGE_SECRET_KEY = shape('AGE-SECRET-KEY-1', '9WJMMZ92DNEPCVR2P4W63SEK0Y4CF4SQN78F0CTQQXFKMV');
+const AGE_SECRET_KEY_LOWER = shape('age-secret-key-', BODY.slice(0, 30).toLowerCase());
 
 /* ---- 命中判定辅助 ---- */
 
@@ -87,7 +93,7 @@ function expectClean(candidate: string): void {
 
 /* ---- 逐条 fixture ---- */
 
-/** 12 条 pattern 各自的正例（≥1）。 */
+/** 13 条 pattern 各自的正例（≥1）。 */
 const POSITIVES: Record<string, string[]> = {
   'anthropic-api-key': [ANTHROPIC],
   'openai-api-key': [OPENAI_PROJ, OPENAI_BARE],
@@ -101,9 +107,10 @@ const POSITIVES: Record<string, string[]> = {
   'stripe-live-key': [STRIPE_RK, STRIPE_SK],
   'private-key-block': [PEM_RSA, PEM_OPENSSH],
   'generic-secret-assignment': [GENERIC_ASSIGNMENT],
+  'age-secret-key': [AGE_SECRET_KEY, AGE_SECRET_KEY_LOWER],
 };
 
-/** 12 条 pattern 各自的反例（≥2）：不得命中**该条**（可能被别的 pattern 命中，见文件头）。 */
+/** 13 条 pattern 各自的反例（≥2）：不得命中**该条**（可能被别的 pattern 命中，见文件头）。 */
 const NEGATIVES: Record<string, string[]> = {
   'anthropic-api-key': [OPENAI_PROJ, 'sk-ant-short', 'anthropic-key-placeholder'],
   'openai-api-key': [ANTHROPIC, 'sk-short', 'sk-'],
@@ -121,11 +128,16 @@ const NEGATIVES: Record<string, string[]> = {
     '"api_key": "${ANTHROPIC_API_KEY}"',
     '"token": "short"',
   ],
+  'age-secret-key': [
+    shape('AGE-SECRET-KEY-', 'short'),
+    shape('AGE-SECRET-', 'KEYZ-', BODY),
+    'AGE-PUBLIC-KEY-1abcdefghij0123456789',
+  ],
 };
 
 describe('SECRET_PATTERNS — 清单结构与顺序', () => {
-  it('恰好 12 条，id 唯一且非空', () => {
-    expect(SECRET_PATTERNS).toHaveLength(12);
+  it('恰好 13 条，id 唯一且非空', () => {
+    expect(SECRET_PATTERNS).toHaveLength(13);
     const ids = SECRET_PATTERNS.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const pattern of SECRET_PATTERNS) {
@@ -135,7 +147,7 @@ describe('SECRET_PATTERNS — 清单结构与顺序', () => {
     }
   });
 
-  it('顺序 = §2.2 冻结清单顺序（anthropic → openai → … → 通用赋值兜底）', () => {
+  it('顺序 = §2.2 冻结清单顺序 + §2.0-4 追加（anthropic → … → 通用赋值兜底 → age 私钥）', () => {
     expect(SECRET_PATTERNS.map((p) => p.id)).toEqual([
       'anthropic-api-key',
       'openai-api-key',
@@ -149,6 +161,7 @@ describe('SECRET_PATTERNS — 清单结构与顺序', () => {
       'stripe-live-key',
       'private-key-block',
       'generic-secret-assignment',
+      'age-secret-key',
     ]);
   });
 
@@ -160,7 +173,7 @@ describe('SECRET_PATTERNS — 清单结构与顺序', () => {
   });
 });
 
-describe('SECRET_PATTERNS — 12 条各 ≥1 正例', () => {
+describe('SECRET_PATTERNS — 13 条各 ≥1 正例', () => {
   for (const pattern of SECRET_PATTERNS) {
     it(`${pattern.id} 命中正例`, () => {
       for (const candidate of POSITIVES[pattern.id] ?? []) {
@@ -182,7 +195,7 @@ describe('SECRET_PATTERNS — 12 条各 ≥1 正例', () => {
   });
 });
 
-describe('SECRET_PATTERNS — 12 条各 ≥2 反例', () => {
+describe('SECRET_PATTERNS — 13 条各 ≥2 反例', () => {
   for (const pattern of SECRET_PATTERNS) {
     it(`${pattern.id} 的反例不命中自身`, () => {
       for (const candidate of NEGATIVES[pattern.id] ?? []) {
@@ -233,6 +246,11 @@ describe('SECRET_PATTERNS — 验收点名的误报场景', () => {
     ]) {
       expectClean(candidate);
     }
+  });
+
+  it('age 私钥命中（大写，真实形态）且不被其它 pattern 抢走', () => {
+    expect(hitIds(AGE_SECRET_KEY)).toEqual(['age-secret-key']);
+    expectHit(AGE_SECRET_KEY_LOWER, 'age-secret-key');
   });
 
   it('通用赋值保守：无引号包裹的裸值不命中', () => {

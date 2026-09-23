@@ -8,6 +8,8 @@ import path from 'node:path';
  *   <home>/store/       adapter 分类快照
  *   <home>/state.json   本地同步状态（不入库）
  *   <home>/backups/     应用远端变更前的备份（不入库，见 docs/m2-plan.md §2.0-2）
+ *   <home>/secrets/     age 密文 vault（**入库**，一密钥一 <name>.age，见 docs/m3-plan.md §2.0-2 / D3）
+ *   <home>/keys/        本机 age 私钥（`age.txt`，0600；**不入库**，见 docs/m3-plan.md §2.0-2 / D2）
  */
 export interface HomerPaths {
   home: string;
@@ -15,6 +17,8 @@ export interface HomerPaths {
   configFile: string;
   stateFile: string;
   backupsDir: string;
+  secretsDir: string;
+  keysDir: string;
 }
 
 /**
@@ -49,5 +53,7 @@ export function getHomerPaths(env: { HOMER_HOME?: string | undefined } = process
     configFile: path.join(home, 'homer.json'),
     stateFile: path.join(home, 'state.json'),
     backupsDir: path.join(home, 'backups'),
+    secretsDir: path.join(home, 'secrets'),
+    keysDir: path.join(home, 'keys'),
   };
 }
