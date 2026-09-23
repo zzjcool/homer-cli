@@ -633,6 +633,138 @@ describe('W6 · secret pull', () => {
     expect(fs.readFileSync(destA, 'utf8')).toBe('KEEP-ME\n');
   });
 
+  it('备份落在 0700 目录树、密钥备份文件 0600（对抗式 review M1：D2「密钥明文只在 0600 下」）', async () => {
+    const { env, destA } = pushEnv('pull-backupper');
+    expect((await runSecretPush({ homerHome: env.home, yes: true }, { age: crypto })).status).toBe('pushed');
+    writePlaintext(destA, 'OLD-KEY-BODY\n');
+    fs.chmodSync(destA, 0o644); // 故意放宽：收紧必须来自 homer
+
+    const report = await runSecretPull({ homerHome: env.home, yes: true }, { age: crypto });
+    expect(report.status).toBe('applied');
+    expect(report.backupDir).toBeDefined();
+
+    const backupFile = path.join(report.backupDir!, 'secret', 'a-secret');
+    expect(fs.readFileSync(backupFile, 'utf8')).toBe('OLD-KEY-BODY\n');
+    expect(mode(backupFile)).toBe(0o600);
+    expect(mode(env.paths.backupsDir)).toBe(0o700);
+    expect(mode(path.dirname(report.backupDir!))).toBe(0o700);
+    expect(mode(report.backupDir!)).toBe(0o700);
+  });
+
+  it('M2 · fetch 失败 + 工作区密文 ≠ 本地 remote-tracking ref → status=error exit 1，零写入', async () => {
+    const { env, destA } = pushEnv('pull-rollback');
+    expect((await runSecretPush({ homerHome: env.home, yes: true }, { age: crypto })).status).toBe('pushed');
+    // 关键场景（review PoC）：upstream V2 已推送，但工作区被 reset 回 V1（无 vault 的旧 commit）。
+    gitOk(env.home, ['reset', '--hard', 'HEAD~1']);
+    // 工作区里放一份“旧版密文”（模拟本机残留的陈旧 vault）。
+    const staleVault = await crypto.encrypt(Buffer.from('SECRET-V1-STALE\n'), [generateIdentity().recipient]);
+    fs.mkdirSync(env.paths.secretsDir, { recursive: true });
+    fs.writeFileSync(secretFilePath(env.paths, 'a-secret'), staleVault);
+    expect(gitOk(env.home, ['rev-parse', 'origin/main']).trim()).toBeDefined();
+
+    const destBefore = fs.readFileSync(destA);
+    const report = await runSecretPull(
+      { homerHome: env.home, yes: true },
+      { age: crypto, git: { gitFetch: () => ({ ok: false, stdout: '', stderr: 'Could not resolve host' }) } },
+    );
+
+    expect(report.status).toBe('error');
+    expect(report.ok).toBe(false);
+    expect(report.pulled).toEqual([]);
+    expect(report.errors.join('\n')).toContain('拒绝写旧值');
+    expect(report.errors.join('\n')).toContain('origin/main');
+    expect(report.warnings.join('\n')).toContain('git fetch 失败');
+    // 零写入：目标未被回滚到 V1。
+    expect(fs.readFileSync(destA).equals(destBefore)).toBe(true);
+    expect(report.backupDir).toBeUndefined();
+
+    // 退出码映射（§2.6）：`error` → 1。走注入端口（真 fetch 在本机可成功，不会触发本分支）。
+    const code = await runSecretPull({ homerHome: env.home, yes: true }, {
+      age: crypto,
+      git: { gitFetch: () => ({ ok: false, stdout: '', stderr: 'Could not resolve host' }) },
+    });
+    expect(code.status).toBe('error');
+  });
+
+  it('M2 · fetch 失败 + 工作区密文 == 本地 ref（无分叉）→ 正常 applied（不误报）', async () => {
+    const { env, destA } = pushEnv('pull-nodiverge');
+    expect((await runSecretPush({ homerHome: env.home, yes: true }, { age: crypto })).status).toBe('pushed');
+    writePlaintext(destA, 'STALE\n');
+
+    const report = await runSecretPull(
+      { homerHome: env.home, yes: true },
+      { age: crypto, git: { gitFetch: () => ({ ok: false, stdout: '', stderr: 'Could not resolve host' }) } },
+    );
+    // 工作区 == HEAD == origin/main（刚 push）→ 无回滚风险，照常 applied。
+    expect(report.status).toBe('applied');
+    expect(fs.readFileSync(destA, 'utf8')).toBe(PLAINTEXT);
+  });
+
+  it('M2 · fetch 失败且无本地 tracking ref → 回落但 warning 明示回滚，--yes 下直接 error', async () => {
+    const { env, destA } = pushEnv('pull-unverifiable');
+    expect((await runSecretPush({ homerHome: env.home, yes: true, noPush: true }, { age: crypto })).status).toBe('pushed');
+    writePlaintext(destA, 'STALE\n');
+    const destBefore = fs.readFileSync(destA);
+
+    // 本地无 origin/main ref：读不到 → 无法比对（传 `refExists: () => false` 精确模拟，
+    // 不依赖 `git update-ref -d` 的副作用）。
+    const deps = {
+      age: crypto,
+      git: {
+        gitFetch: () => ({ ok: false, stdout: '', stderr: 'Could not resolve host' }),
+        refExists: () => false,
+      },
+    };
+
+    // `--yes`：回滚是高危操作 → 直接 error，零写入。
+    const yesReport = await runSecretPull({ homerHome: env.home, yes: true }, deps);
+    expect(yesReport.status).toBe('error');
+    expect(yesReport.warnings.join('\n')).toContain('将回滚到本地旧版密文');
+    expect(yesReport.errors.join('\n')).toContain('--yes');
+    expect(fs.readFileSync(destA, 'utf8')).toBe('STALE\n');
+
+    // 非 `--yes`：确认预览里带回滚警告；用户拒绝 → aborted（仍零写入）。
+    const ui = fakeUi(false);
+    const aborted = await runSecretPull({ homerHome: env.home }, { ...deps, ui });
+    expect(aborted.status).toBe('aborted');
+    expect(ui.confirms[0]).toContain('回滚到');
+    expect(fs.readFileSync(destA).equals(destBefore)).toBe(true);
+
+    // 非 `--yes` + 用户同意 → 回落生效（明示过的回滚）。
+    const accepted = await runSecretPull({ homerHome: env.home }, { ...deps, ui: fakeUi(true) });
+    expect(accepted.status).toBe('applied');
+    expect(fs.readFileSync(destA, 'utf8')).toBe(PLAINTEXT);
+  });
+
+  it('M3 · 取数双源对称：upstream ref 有 commit 但**无 vault**，工作区有 → applied（不再误报 missing-vault）', async () => {
+    const { env, destA } = pushEnv('pull-dualsource');
+    // 只做本地 commit（密文只在工作区，从未入库）。
+    expect((await runSecretPush({ homerHome: env.home, yes: true, noPush: true }, { age: crypto })).status).toBe('pushed');
+    expect(fs.existsSync(secretFilePath(env.paths, 'a-secret'))).toBe(true);
+    writePlaintext(destA, 'STALE\n');
+
+    // fetch 成功 + upstream 可解析，但 upstream 的 commit 里没有 `secrets/`（工作区与 upstream 相同内容）。
+    const report = await runSecretPull({ homerHome: env.home, yes: true }, { age: crypto });
+
+    expect(report.status).toBe('applied');
+    expect(report.pulled).toEqual(['a-secret', 'b-secret']);
+    expect(fs.readFileSync(destA, 'utf8')).toBe(PLAINTEXT);
+  });
+
+  it('M3 · 双源都不存在 → 仍 missing-vault（不把“回落到工作区”当成“总能找到”）', async () => {
+    const env = makeEnv('pull-dualmissing');
+    commitBaseline(env, 'baseline');
+    writeIdentityFile(env.paths, generateIdentity());
+    const dest = writePlaintext(path.join(env.root, 't.env'), 'ORIGINAL\n');
+    writeHomerConfig(env.home, { recipients: [generateIdentity().recipient], files: { ghost: dest } });
+
+    const report = await runSecretPull({ homerHome: env.home, yes: true }, { age: crypto });
+    expect(report.status).toBe('missing-vault');
+    expect(report.errors.join('\n')).toContain('secrets/ghost.age');
+    expect(report.errors.join('\n')).toContain('工作区与 origin/main');
+    expect(fs.readFileSync(dest, 'utf8')).toBe('ORIGINAL\n');
+  });
+
   it('渲染：文本含状态 + 计数 + 备份目录', async () => {
     const { env, destA } = pushEnv('pull-render');
     expect((await runSecretPush({ homerHome: env.home, yes: true }, { age: crypto })).status).toBe('pushed');

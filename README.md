@@ -44,7 +44,8 @@ homer doctor                 # 八项体检：config/repo/store-clean/remote/ada
 - herdr：只同步 `config.toml`（mirror）；session/sock/log/release-notes 属运行时状态，忽略
 - opencode：`opencode.json` + `package.json`（merge）、`package-lock.json` / `bun.lock`（mirror）；`node_modules/` 忽略
 - **symlink 逃逸 allowlist**：adapter 的 `allowEscape: ['skills/agent-browser']` 显式放行 root 外的链接
-  （默认仍是安全边界：跳过 + 记告警）
+  （默认仍是安全边界：跳过 + 记告警）；**裸通配（`*` / `*/` / `**` / `**/`）被配置校验拒绝**，
+  必须写具体路径（否则等于放行一切逃逸，见下方「安全备案」）
 
 #### 密钥投递（age 加密，明文从不进 git）
 
@@ -99,9 +100,27 @@ homer secret list                    # 列出配置的密钥与 vault 文件状�
    → 换设备两步后密钥明文 == A 明文且 0600 → `doctor --json` 无 fail → `status` 零漂移 + `state == HEAD`
 3. **换设备**：C `keygen` → A 追加公钥 + 重加密 `secret push` → C `secret pull` 成功，且 B / A 仍可解
 4. **`__REQUIRED__` 残留**：`doctor` 的 `required` warn，details 精确到 `pi/models/models.json: apiKeys`
-5. **symlink 逃逸 allowlist**：allowEscape 命中后 root 外内容入 store，未命中仍按逃逸跳过
+5. **symlink 逃逸 allowlist**：allowEscape 命中后 root 外内容入 store，未命中仍按逃逸跳过；
+   裸通配模式在 `validateConfig` 阶段被拒（不把安全边界放大成「全部放行」）
 6. **install.sh 冒烟**：`sh -n` + 注入位契约 + W4 的 tarball 安装用例（隔离 prefix）
 7. **真实环境只读冒烟**：临时 `HOMER_HOME` 扫出三 adapter；`doctor --offline` 报 age 未配置 ok
+
+#### 安全备案（必读）
+
+- **仓库历史里存在一把已作废的 age 私钥**：M3 开发期间的一次冒烟测试在 `docs/m3-p0-report.md`
+  里粘过一把 bech32 合法的 age identity（`AGE-SECRET-KEY-19WJMMZ92…`）。工作区已在 `c6cec6f`
+  脱敏，但**该 commit 之前的历史仍可读到原文**（本仓库共 57 个 commit，重写历史代价大于收益，故不做）。
+  **声明**：该密钥专供一次性的密钥层冒烟，**从未被用作任何真实 vault 的 recipient**，也从未被
+  任何真实 `~/.homer` 引用；现**正式作废**，请勿使用。若你（或在分发镜像上）发现它曾被用于加密
+  任何真实密钥，**请立即轮换那批密钥**（`homer secret keygen` 换 identity → 旧机登记新 recipient
+  → `homer secret push` → 各机 `homer secret pull`）。
+- **密钥备份权限**：`secret pull` / `homer home` 覆盖已存在的密钥目标前会先备份到
+  `~/.homer/backups/`；这条路径的目录树为 **0700**、备份文件为 **0600**（与目标密钥同权限，
+  不因备份而放宽）。普通配置备份（store 快照）保持默认权限（可读，便于人工核对）。
+- **repo URL 不接受 `-` 开头**：`homer home <repo-url>` 的 URL 会作为 `git clone -- <url>` 传入，
+  且入口直接拒绝以 `-` 开头的值（防 `--upload-pack=<cmd>` 形式的选项注入 → 任意命令执行）。
+- **`allowEscape` 不接受裸通配**：配置里写 `'*'` / `'*/'` / `'**'` / `'**/'` 会在 `validateConfig`
+  阶段报错（那等价于放行 root 下任意路径的 symlink 逃逸，安全边界失效）；请写具体路径。
 
 ### M2 已实现（安全往返：本地 ⇄ store ⇄ git 远端）
 

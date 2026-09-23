@@ -316,3 +316,114 @@ describe('backupFiles — HOMER_HOME 隔离', () => {
     expect(paths.backupsDir).toBe(path.join(paths.home, 'backups'));
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* 对抗式 review M1：备份目录树权限收紧（opts.mode）                      */
+/* ------------------------------------------------------------------ */
+
+describe('backupFiles — opts.mode 权限收紧（对抗式 review M1）', () => {
+  /** 递归收集备份目录树里所有条目的 mode（目录与文件分开）。 */
+  function modes(root: string): { dirs: number[]; files: number[] } {
+    const dirs: number[] = [];
+    const files: number[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const abs = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          dirs.push(fs.statSync(abs).mode & 0o777);
+          walk(abs);
+          continue;
+        }
+        files.push(fs.statSync(abs).mode & 0o777);
+      }
+    };
+    walk(root);
+    return { dirs, files };
+  }
+
+  it('不传 opts.mode → 行为与改动前逐字相同（不改变任何权限）', () => {
+    const paths = tmpPaths();
+    const source = path.join(paths.home, 'src.json');
+    write(source, 'S\n');
+    const result = backupFiles(paths, 'pull', [{ sourceAbs: source, label: 'pi/settings/settings.json' }]);
+
+    // 这里只断言「与系统默认一致」而非固定数值：umask 因环境而异（additive 的语义就是不改）。
+    const expectedDir = 0o777 & ~process.umask();
+    expect(fs.statSync(result.backupDir).mode & 0o777).toBe(expectedDir);
+  });
+
+  it('mode { dir: 0o700, file: 0o600 } → 目录链与备份文件全部收紧', () => {
+    const paths = tmpPaths();
+    const source = path.join(paths.home, '.secrets', 'a.env');
+    write(source, 'SECRET-V1\n');
+    // 源文件本身故意放宽到 0644：收紧必须来自 backupFiles，而非「复制了源权限」。
+    fs.chmodSync(source, 0o644);
+
+    const result = backupFiles(
+      paths,
+      'secret',
+      [{ sourceAbs: source, label: 'secret/a-secret' }],
+      { mode: { dir: 0o700, file: 0o600 } },
+    );
+
+    // 目录链：backupsDir / 日期目录 / 时间目录 全部 0700。
+    expect(fs.statSync(paths.backupsDir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(path.dirname(result.backupDir)).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(result.backupDir).mode & 0o777).toBe(0o700);
+
+    const backup = path.join(result.backupDir, 'secret', 'a-secret');
+    expect(fs.readFileSync(backup, 'utf8')).toBe('SECRET-V1\n');
+    expect(fs.statSync(backup).mode & 0o777).toBe(0o600);
+
+    const { dirs, files } = modes(result.backupDir);
+    expect(new Set(dirs)).toEqual(new Set([0o700]));
+    expect(new Set(files)).toEqual(new Set([0o600]));
+  });
+
+  it('目录型源 + mode → 递归出的子目录与文件同样收紧', () => {
+    const paths = tmpPaths();
+    const dir = path.join(paths.home, 'skills');
+    write(path.join(dir, 'alpha', 'SKILL.md'), '# alpha\n');
+    fs.chmodSync(dir, 0o755);
+    fs.chmodSync(path.join(dir, 'alpha'), 0o755);
+
+    const result = backupFiles(
+      paths,
+      'secret',
+      [{ sourceAbs: dir, label: 'secret/bundle' }],
+      { mode: { dir: 0o700, file: 0o600 } },
+    );
+
+    const { dirs, files } = modes(result.backupDir);
+    expect(dirs.length).toBeGreaterThan(0);
+    expect(new Set(dirs)).toEqual(new Set([0o700]));
+    expect(new Set(files)).toEqual(new Set([0o600]));
+    // 源目录自身的权限不被改动（只收紧备份副本）。
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o755);
+  });
+
+  it('全 skipped（无文件）时目录仍存在且已收紧（不因“无备份”就留宽松目录）', () => {
+    const paths = tmpPaths();
+    const result = backupFiles(paths, 'secret', [], { mode: { dir: 0o700, file: 0o600 } });
+    expect(fs.existsSync(result.backupDir)).toBe(true);
+    expect(fs.statSync(result.backupDir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(paths.backupsDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('只给 dir（不给 file）→ 目录收紧、文件权限不动', () => {
+    const paths = tmpPaths();
+    const source = path.join(paths.home, 'src.json');
+    write(source, 'S\n');
+    fs.chmodSync(source, 0o644);
+
+    const result = backupFiles(
+      paths,
+      'pull',
+      [{ sourceAbs: source, label: 'pi/settings/settings.json' }],
+      { mode: { dir: 0o700 } },
+    );
+    const backup = path.join(result.backupDir, 'pi', 'settings', 'settings.json');
+    expect(fs.statSync(result.backupDir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(backup).mode & 0o777).toBe(0o644);
+  });
+});

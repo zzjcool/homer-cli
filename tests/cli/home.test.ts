@@ -1049,3 +1049,210 @@ describe('W8 · 渲染与预览', () => {
     expect(fs.existsSync(identityFilePath(pathsB))).toBe(true);
   });
 });
+
+/* ================================================================== */
+/* F. 对抗式 review 修复回归（C1 / minor 2 / M1）                        */
+/* ================================================================== */
+
+describe('M3 review · C1 clone 选项注入', () => {
+  /** 与 `defaultClone` 同款的 PoC payload：`--upload-pack` = 任意命令执行。 */
+  function uploadPackPayload(marker: string): string {
+    return `--upload-pack=touch ${marker}; git-upload-pack`;
+  }
+
+  it('runHome 入口拒绝以 "-" 开头的 repoUrl，且**不调用 clone**（注入位也看不到调用）', async () => {
+    const fx = await setupOrigin({ secrets: false });
+    const homeB = path.join(fx.root, 'B', 'homer');
+    const marker = path.join(fx.root, 'PWNED-entry');
+    let cloneCalls = 0;
+
+    for (const repoUrl of ['-ofoo', uploadPackPayload(marker), '--upload-pack=sh']) {
+      const thrown = await captureThrown(() =>
+        withFakeHome(fx.fakeHomeB, () =>
+          runHome(
+            { homerHome: homeB, repoUrl, mode: 'merge', yes: true },
+            {
+              clone: async () => {
+                cloneCalls += 1;
+              },
+            },
+          ),
+        ),
+      );
+      expect(thrown, repoUrl).toBeInstanceOf(CliError);
+      expect((thrown as CliError).message).toContain('非法 repo URL');
+    }
+
+    expect(cloneCalls).toBe(0);
+    expect(fs.existsSync(marker)).toBe(false);
+    // 目标目录也未被创建（守卫在任何写操作之前）。
+    expect(fs.existsSync(homeB)).toBe(false);
+  });
+
+  it('CLI 路径（`homer home -- <payload>`）也是拒绝：exit 1 + 无命令执行 + 无 clone 痕迹', async () => {
+    const fx = await setupOrigin({ secrets: false });
+    const homeB = path.join(fx.root, 'B', 'homer');
+    const marker = path.join(fx.root, 'PWNED-cli');
+
+    const cap = capture();
+    const code = await withFakeHome(fx.fakeHomeB, () =>
+      run(['home', '--home', homeB, '--mode', 'merge', '--yes', '--', uploadPackPayload(marker)], cap.io),
+    );
+
+    expect(code).toBe(1);
+    expect(cap.err.join('\n')).toContain('非法 repo URL');
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(fs.existsSync(homeB)).toBe(false);
+  });
+
+  it('生产 clone argv 含 `--` 分隔符（PATH shim 记录真实 execFile 参数）', async () => {
+    const fx = await setupOrigin({ secrets: false });
+    const homeB = path.join(fx.root, 'B', 'homer');
+
+    // PATH shim：记录 argv 后透传真 git（`/usr/bin/git`）。
+    const shimDir = path.join(fx.root, 'shim');
+    const shimLog = path.join(fx.root, 'argv.log');
+    fs.mkdirSync(shimDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(shimDir, 'git'),
+      `#!/bin/sh\n{ printf '%s\\n' "$@"; } >> "${shimLog}"\nprintf '=== argv-end ===\\n' >> "${shimLog}"\nexec /usr/bin/git "$@"\n`,
+      { mode: 0o755 },
+    );
+
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath ?? ''}`;
+    try {
+      const report = await withFakeHome(fx.fakeHomeB, () =>
+        runHome({ homerHome: homeB, repoUrl: fx.origin, mode: 'skip', yes: true }),
+      );
+      expect(report.status).toBe('homed');
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+    }
+
+    const argv = fs.readFileSync(shimLog, 'utf8').split('=== argv-end ===')[0]!.trim().split('\n');
+    expect(argv[0]).toBe('clone');
+    expect(argv[1]).toBe('--');
+    expect(argv[2]).toBe(fx.origin);
+    expect(argv[3]).toBe(homeB);
+    // 分隔符必须在 URL 之前（这才是 C1 的修复点）。
+    expect(argv.indexOf('--')).toBeLessThan(argv.indexOf(fx.origin));
+  });
+});
+
+describe('M3 review · minor 2 clone 后 TOCTOU 复验', () => {
+  /** 装一个 PATH shim：`git clone` 透传真 git，但在完成后往目标目录塞一个 stray 文件。 */
+  function installRacyCloneShim(fx: Fixture): { restore: () => void } {
+    const shimDir = path.join(fx.root, 'racy-shim');
+    fs.mkdirSync(shimDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(shimDir, 'git'),
+      '#!/bin/sh\nif [ "$1" = "clone" ]; then\n' +
+        '  /usr/bin/git "$@" || exit $?\n' +
+        '  dest=""\n  for a in "$@"; do dest="$a"; done\n' +
+        '  touch "$dest/injected-by-other-process"\n  exit 0\nfi\n' +
+        'exec /usr/bin/git "$@"\n',
+      { mode: 0o755 },
+    );
+
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}:${originalPath ?? ''}`;
+    return {
+      restore: () => {
+        if (originalPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = originalPath;
+      },
+    };
+  }
+
+  it('内置 clone 路径：clone 期间被塞入仓库之外的条目 → CliError（不进入 loadConfig / 零应用）', async () => {
+    const fx = await setupOrigin({ secrets: false });
+    const homeB = path.join(fx.root, 'B', 'homer');
+    const shim = installRacyCloneShim(fx);
+
+    let thrown: unknown;
+    try {
+      thrown = await captureThrown(() =>
+        withFakeHome(fx.fakeHomeB, () =>
+          runHome({ homerHome: homeB, repoUrl: fx.origin, mode: 'merge', yes: true }),
+        ),
+      );
+    } finally {
+      shim.restore();
+    }
+
+    expect(thrown).toBeInstanceOf(CliError);
+    expect((thrown as CliError).message).toContain('仓库之外的条目');
+    expect((thrown as CliError).hint).toContain('injected-by-other-process');
+    // 零应用：state 未写（未走到步骤 8）。
+    expect(fs.existsSync(getHomerPaths({ HOMER_HOME: homeB }).stateFile)).toBe(false);
+  });
+
+  it('内置 clone 路径：干净的 clone 不被误判（工作树内容不算 stray）', async () => {
+    const fx = await setupOrigin({ secrets: false });
+    const homeB = path.join(fx.root, 'B', 'homer');
+
+    // 不注入 deps.clone → 跑真 `git clone --` + 复验。
+    const report = await withFakeHome(fx.fakeHomeB, () =>
+      runHome({ homerHome: homeB, repoUrl: fx.origin, mode: 'pull', yes: true }),
+    );
+    expect(report.status).toBe('homed');
+    expect(report.ok).toBe(true);
+
+    // 工作树内容（homer.json / store/）确实落盘了（不是“除 .git 外为空”的字面检查）。
+    expect(fs.existsSync(path.join(homeB, 'homer.json'))).toBe(true);
+    expect(fs.existsSync(path.join(homeB, '.git'))).toBe(true);
+  });
+});
+
+describe('M3 review · M1 密钥备份权限收紧', () => {
+  it('密钥目标已存在 → 备份目录 0700、备份文件 0600（D2：密钥明文只在 0600 下）', async () => {
+    const fx = await setupOrigin();
+    const homeB = path.join(fx.root, 'B', 'homer');
+    const pathsB = getHomerPaths({ HOMER_HOME: homeB });
+    const dest = path.join(fx.fakeHomeB, '.secrets', 'a.env');
+    writeAbs(dest, 'OLD-SECRET-BODY\n');
+    fs.chmodSync(dest, 0o644); // 故意放宽：收紧必须来自 homer，而非“复制了源权限”
+
+    const report = await withFakeHome(fx.fakeHomeB, () =>
+      runHome(
+        { homerHome: homeB, repoUrl: fx.origin, mode: 'skip', yes: true },
+        { clone: cloneWithIdentity(fx.identityB), age: crypto },
+      ),
+    );
+    expect(report.status).toBe('homed');
+
+    const entry = backupEntries(pathsB).find((rel) => rel.endsWith('secret/a-secret'));
+    expect(entry).toBeDefined();
+    const backupFile = path.join(pathsB.backupsDir, entry!);
+    expect(fs.readFileSync(backupFile, 'utf8')).toBe('OLD-SECRET-BODY\n');
+
+    // 文件 0600；目录链（backupsDir → 日期 → 时间）全 0700。
+    expect(mode(backupFile)).toBe(0o600);
+    const dateDir = path.dirname(path.dirname(path.dirname(backupFile)));
+    const timeDir = path.dirname(path.dirname(backupFile));
+    expect(mode(pathsB.backupsDir)).toBe(0o700);
+    expect(mode(dateDir)).toBe(0o700);
+    expect(mode(timeDir)).toBe(0o700);
+  });
+
+  it('普通配置备份（applyPullActions）**不**收紧：行为与改动前一致', async () => {
+    const fx = await setupOrigin({ secrets: false });
+    const homeB = path.join(fx.root, 'B', 'homer');
+    const pathsB = getHomerPaths({ HOMER_HOME: homeB });
+
+    // pull 覆盖本地已有文件 → 产生配置备份（无 opts.mode）。
+    fs.writeFileSync(path.join(toolRootOf(fx.fakeHomeB), 'settings.json'), '{}\n');
+    const report = await withFakeHome(fx.fakeHomeB, () =>
+      runHome({ homerHome: homeB, repoUrl: fx.origin, mode: 'pull', yes: true }),
+    );
+    expect(report.status).toBe('homed');
+
+    const entries = backupEntries(pathsB);
+    expect(entries.length).toBeGreaterThan(0);
+    // 默认权限（受 umask 影响）而不是 0600：普通配置备份保持可读。
+    const expectedDir = 0o777 & ~process.umask();
+    expect(mode(pathsB.backupsDir)).toBe(expectedDir);
+  });
+});

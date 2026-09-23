@@ -18,8 +18,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { CliError } from '../errors.js';
-import type { HomerPaths } from '../paths.js';
+import { expandHome, type HomerPaths } from '../paths.js';
 import type { HomerConfig } from '../types.js';
+import { backupFiles } from '../backup/backup.js';
 import { identityFilePath, loadIdentity } from './keys.js';
 import { secretNameValid, type AgeCryptoPort } from './types.js';
 
@@ -113,6 +114,15 @@ export async function encryptSecretToFile(
   if (ciphertext.length === 0) {
     throw new CliError(`age 加密 ${name} 失败：产出空密文`);
   }
+  // 全文兜底（对抗式 review minor 1）：明文 ≤16 字节时采样为空、「不含片段」断言恒真，
+  // 一个 passthrough 的假加密层就能把明文原样写进 vault。密文 == 明文（全文相等）
+  // 在任何明文长度下都不能是合法加密结果，故这条断言无条件生效。
+  if (ciphertext.equals(plaintext) && plaintext.length > 0) {
+    throw new CliError(
+      `age 加密 ${name} 失败：密文与明文逐字节相同，拒绝写入 vault`,
+      '这是实现级事故（加密层未生效），明文绝不入库；请上报该问题，勿提交 secrets/',
+    );
+  }
   for (const sample of plaintextSamples(plaintext)) {
     if (ciphertext.includes(sample)) {
       throw new CliError(
@@ -181,6 +191,91 @@ export interface VaultEntryStatus {
   name: string;
   destination: string;
   vaultFile: 'present' | 'missing';
+}
+
+/* ------------------------------------------------------------------ */
+/* secrets.files 的口径（唯一实现点，对抗式 review minor 4）              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `secrets.files` 的 name 清单（字典序，报告稳定）。
+ *
+ * **唯一实现点**：`home.ts` 与 `secret.ts` 曾各自持有一份逐字相同的私有实现
+ * （对抗式 review minor 4：一处改文案 / 改排序另一处必漂移）。
+ */
+export function secretNames(config: HomerConfig): string[] {
+  return Object.keys(config.secrets?.files ?? {}).sort();
+}
+
+/**
+ * 配置里某 secret 的目标绝对路径（`~` 展开；config 已校验值以 `~` / `/` 开头）。
+ *
+ * 同 `secretNames`：从两个命令层的副本提升到此处，实现与错误文案只有一份。
+ */
+export function destinationOf(config: HomerConfig, name: string): string {
+  const raw = config.secrets?.files?.[name];
+  if (raw === undefined) {
+    throw new CliError(`homer.json 的 secrets.files 不含 ${JSON.stringify(name)}`);
+  }
+  return path.resolve(expandHome(raw));
+}
+
+/* ------------------------------------------------------------------ */
+/* 密钥目标写回（唯一实现点，对抗式 review minor 4）                       */
+/* ------------------------------------------------------------------ */
+
+/** 密钥备份的目录 / 文件权限（D2：密钥明文只存在于 0600 / 0700 下）。 */
+const SECRET_BACKUP_MODES = { dir: 0o700, file: 0o600 } as const;
+
+/** `writeSecretDestinations` 的结果：备份位置 + 实际写入的目标路径。 */
+export interface WriteSecretDestinationsResult {
+  /** 已存在目标被覆盖前的备份目录（本次无已存在目标 → undefined）。 */
+  backupDir?: string;
+  /** 实际写入的目标路径（与入参 `names` 同序）。 */
+  written: string[];
+}
+
+/**
+ * 把已解密的明文写回 `secrets.files` 的目标路径（对抗式 review minor 4 的共享实现点）。
+ *
+ * 步骤（顺序是语义的一部分）：
+ *   1. 已存在的目标先备份（label = `secret/<name>`）——备份内容必须是**覆盖前**的旧密钥明文，
+ *      故 `backupFiles` 的 `mode: { dir: 0o700, file: 0o600 }` 收紧张权限（对抗式 review M1：
+ *      D2 冻结「密钥明文只在 0600」下，备份副本落在 0755 目录是直接违反）；
+ *   2. 逐项 `mkdir -p` 父目录 + 写 0600 + 显式 `chmod`（`writeFileSync` 的 mode 只在创建时生效，
+ *      覆盖已存在的文件不会改权限）。
+ *
+ * `command` 进备份目录名（`home` / `secret`），两个命令层共用本函数、各自传自己的名字。
+ */
+export function writeSecretDestinations(
+  paths: HomerPaths,
+  config: HomerConfig,
+  nameToPlaintext: ReadonlyMap<string, Buffer>,
+  command: string,
+): WriteSecretDestinationsResult {
+  const names = [...nameToPlaintext.keys()];
+
+  let backupDir: string | undefined;
+  const existing = names.filter((name) => fs.existsSync(destinationOf(config, name)));
+  if (existing.length > 0) {
+    backupDir = backupFiles(
+      paths,
+      command,
+      existing.map((name) => ({ sourceAbs: destinationOf(config, name), label: `secret/${name}` })),
+      { mode: SECRET_BACKUP_MODES },
+    ).backupDir;
+  }
+
+  const written: string[] = [];
+  for (const name of names) {
+    const destination = destinationOf(config, name);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, nameToPlaintext.get(name)!, { mode: 0o600 });
+    fs.chmodSync(destination, 0o600);
+    written.push(destination);
+  }
+
+  return backupDir === undefined ? { written } : { backupDir, written };
 }
 
 /**

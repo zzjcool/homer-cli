@@ -9,8 +9,10 @@
  *
  * ## 十步流程（§2.7 冻结，逐条落地）
  *
- *   1. `resolveHomerPaths`；home 目录存在且非空 → CliError（提示手工处理或 `--home` 另指定）
- *   2. `deps.clone`（默认真 `git clone`，timeout 60s；失败 → CliError 含 stderr 摘要）
+ *   1. `resolveHomerPaths`；home 目录存在且非空 → CliError（提示手工处理或 `--home` 另指定）；
+ *      **repoUrl 以 '-' 开头 → CliError**（clone 选项注入的第一道闸门，见下方「安全」段）
+ *   2. `deps.clone`（默认真 `git clone --`，timeout 60s；失败 → CliError 含 stderr 摘要）；
+ *      clone **之后**再复验一次「除 `.git` / 仓库自身内容外为空」（TOCTOU 窗口，见 `assertNothingBeyondClone`）
  *   3. `loadConfig`（clone 下来的 homer.json）；缺失/非法 → CliError「该仓库不是 homer 配置中心」
  *   4. `scanAdapter` 逐 enabled adapter（本机现状；root 缺失按 M-A 守卫回落 = remote）
  *   5. remote = `readSnapshotFromStore`（clone 后工作区 == HEAD）
@@ -43,12 +45,29 @@
  * 与 secret 通道自己的安全语义冲突。故门槛条件取**并集**（有配置动作 **或** 有待归位密钥），
  * preview 同时列出两类计数；非 TTY 下 `confirm` 回落 `false` → `aborted`（不阻塞、不默认同意）。
  *
+ * **`--yes` 时一切确认豁免**（与 `secret pull --yes` 同语义）：本命令的 `--yes` 就是
+ * 「我知道这是破坏性写操作，在非交互场景里授权它」的显式开关（§2.7 步骤 6 也依赖它
+ * 在无 `--mode` 时落 `merge`）。走 `--yes` 时本函数**根本不创建 PromptPort**，因此
+ * 不存在「部分确认」这种中间态。非 `--yes` 且非 TTY → 上面说的 `aborted`。
+ *
  * ## Non-goal（M3 明确不做）
  *
  * home **不装依赖**（DESIGN §2.3 的「装依赖」延后：涉及各工具包管理器与网络副作用，
  * 风险大于收益；MVP 验收场景只需配置 + 密钥归位）。记录为 M4+ 候选。
  * 也**不**做 store 三路合并 / 逐文件冲突裁决 UI：merge 模式的冲突整体保留本地（§1-D5），
  * 随后自然表现为 push 漂移，由 `homer status` 可见、`homer merge` / `homer push` 收敛。
+ *
+ * ## 安全：clone 选项注入（对抗式 review C1）
+ *
+ * `repoUrl` 是**不受信输入**（用户粘贴的地址）：裸 `execFile` 虽然不经 shell，但若 URL 前没有
+ * `--` 分隔符，以 `-` 开头的值会被 git 当 option 解析，`--upload-pack=<cmd>` 可以变成
+ * 在受害者机器上的任意命令执行。防御分两层：
+ *   1. `defaultClone` 的 argv 固定为 `['clone', '--', repoUrl, destDir]`（与 `git.ts` 其余
+ *      调用一致地使用 `--`）；
+ *   2. `assertCloneableRepoUrl` 在入口拒绝 `startsWith('-')` 的 URL（纵深防御：即使将来
+ *      有人改回裸 argv，也比依赖 git 的解析规则更稳）。
+ * `deps.clone` 注入位绕过 `defaultClone`，但**不**绕过第 2 层的 URL 校验（测试断言的反而是
+ * 生产路径的入口闸门）。
  */
 
 import { execFile } from 'node:child_process';
@@ -59,16 +78,19 @@ import process from 'node:process';
 import { scanAdapter } from '../../adapters/pi/index.js';
 import {
   createAgeCryptoPort,
+  destinationOf,
   identityFilePath,
   loadIdentity,
   secretFilePath,
+  secretNames,
   secretRelativePath,
+  writeSecretDestinations,
 } from '../../core/age/index.js';
 import type { AgeCryptoPort } from '../../core/age/types.js';
-import { backupFiles, type BackupTarget } from '../../core/backup/backup.js';
 import { loadConfig } from '../../core/config.js';
-import { CliError } from '../../core/errors.js';
-import { expandHome, type HomerPaths } from '../../core/paths.js';
+import { CliError, cliErrorLines } from '../../core/errors.js';
+import { gitExec } from '../../core/git/index.js';
+import type { HomerPaths } from '../../core/paths.js';
 import { isRootUnreadable, scanWarningMessages } from '../../core/scan-guard.js';
 import { saveState } from '../../core/state.js';
 import { readSnapshotFromStore } from '../../core/store/store.js';
@@ -169,11 +191,6 @@ function isConflict(action: PullAction): action is PullConflictAction {
   return action.type === 'conflict';
 }
 
-/** `CliError` → 报告 `errors` 数组（message + 可选 hint）。 */
-function errorLines(err: CliError): string[] {
-  return err.hint === undefined ? [err.message] : [err.message, err.hint];
-}
-
 /* ------------------------------------------------------------------ */
 /* 步骤 1：目标目录                                                     */
 /* ------------------------------------------------------------------ */
@@ -184,6 +201,8 @@ function errorLines(err: CliError): string[] {
  * 由 `git clone` 自己创建 `home`（父目录需存在，见 `defaultClone`）——若 `home` 里已有内容，
  * clone 会失败，且用户可能把 `--home` 指到自己的真实 `~/.pi` 之类目录上：宁可在**任何写操作之前**
  * 用一条明确的 CliError 拦下，也不要让 git 的半途失败留下混合目录。
+ *
+ * clone 之后的重验（TOCTOU）是另一条不变量，见 `assertNothingBeyondClone`。
  */
 function assertTargetIsEmpty(home: string): void {
   let stat: fs.Stats;
@@ -220,13 +239,33 @@ function cloneFailureSummary(err: unknown, stderr?: string): string {
   return firstLine.length > 300 ? `${firstLine.slice(0, 300)}…` : firstLine;
 }
 
-/** 缺省 clone：`execFile('git', ['clone', url, dest], timeout 60s)`（§2.7 步骤 2 逐字落地）。 */
+/**
+ * repo URL 的形态守卫（对抗式 review C1 的第二道保险，见 `defaultClone`）。
+ *
+ * `git clone` 的 argv 里 URL 之前必须有 `--` 分隔符（否则以 `-` 开头的 URL 会被 git 当
+ * option 解析，例如 `--upload-pack=<cmd>` = 在受害者机器上执行任意命令）；这里再拒绝
+ * 以 `-` 开头的 URL：`--` 已经足够，但“看起来像 flag 的 repo URL”无论怎么解释都不是
+ * 用户意图，在入口就把它挡下比依靠 git 的解析规则更稳（纵深防御）。
+ */
+function assertCloneableRepoUrl(repoUrl: string): void {
+  if (repoUrl.startsWith('-')) {
+    throw new CliError(
+      `非法 repo URL: ${JSON.stringify(repoUrl)}`,
+      'repo URL 不得以 "-" 开头（那会被 git 当成选项，例如 `--upload-pack`）。请给出 `https://…` / `git@host:…` / 本地路径。',
+    );
+  }
+}
+
+/**
+ * 缺省 clone：`execFile('git', ['clone', '--', url, dest], timeout 60s)`
+ * （§2.7 步骤 2；`--` 分隔符见对抗式 review C1）。
+ */
 function defaultClone(repoUrl: string, destDir: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     fs.mkdirSync(path.dirname(destDir), { recursive: true });
     execFile(
       'git',
-      ['clone', repoUrl, destDir],
+      ['clone', '--', repoUrl, destDir],
       { cwd: path.dirname(destDir), timeout: CLONE_TIMEOUT_MS, encoding: 'utf8', windowsHide: true },
       (err: Error | null, _stdout: string, stderr: string) => {
         if (err === null) {
@@ -243,6 +282,44 @@ function defaultClone(repoUrl: string, destDir: string): Promise<void> {
       },
     );
   });
+}
+
+/**
+ * clone 后、`loadConfig` 前的不变量复验（对抗式 review minor 2 的 TOCTOU 窗口）。
+ *
+ * 窗口：`assertTargetIsEmpty`（readdirSync）与 `git clone` 的**内部**空目录检查之间非原子，
+ * 同机其它进程可在窗口内写入目标目录。git 自己的空目录检查会在其检查点之前就拦住（clone 失败），
+ * 但**在 git 检查之后、clone 完成之前**写入的条目会在 clone 成功后被我们当成“仓库内容”继续使用。
+ *
+ * 因此复验的不变量取**“除 `.git` 与仓库自身内容外为空”**（而不是字面意义上的“除 `.git` 外为空”：
+ * 一次合法的 clone 必定把工作树（`homer.json` / `store/` / `README` …）也落进目标目录，
+ * 只看 `.git` 会把每一次正常 clone 都误判为失败）。判定用 git 自己的视角：
+ * `git status --porcelain --ignored` 非空 = 目录里存在**不属于这个仓库**的条目。
+ *
+ * 只在**内置 clone**路径上跑（`deps.clone === undefined`）：本检查验证的是“内置 clone 的产物”，
+ * 注入的 clone 是个端口，其产物契约不由 homer 定义（`home.test.ts` 的替身会故意额外写
+ * `keys/age.txt`：那是“本机已 keygen”的模拟，属合法终态）。
+ */
+function assertNothingBeyondClone(home: string): void {
+  const result = gitExec(home, ['status', '--porcelain', '--ignored', '--untracked-files=all']);
+  // git 不可用 / 非仓库：clone 本身已会失败，这里不新增失败面。
+  if (!result.ok) return;
+
+  const stray = result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  if (stray.length === 0) return;
+
+  const shown = stray.slice(0, PREVIEW_MAX_ACTIONS);
+  throw new CliError(
+    `clone 后的工作区含仓库之外的条目（${stray.length} 项，可能有其它进程在 clone 期间写入了该目录）`,
+    [
+      ...shown,
+      ...(stray.length > shown.length ? [`… 其余 ${stray.length - shown.length} 项省略`] : []),
+      `homer 拒绝在来源不明的目录上继续；请移走这些条目后重试（或换一个 --home）。目录: ${home}`,
+    ].join('\n'),
+  );
 }
 
 /**
@@ -417,20 +494,6 @@ export function buildFirstContactPreview(
 /* 步骤 9：密钥归位                                                      */
 /* ------------------------------------------------------------------ */
 
-/** `secrets.files` 的 name 清单（字典序，报告稳定）。 */
-function secretNamesOf(config: HomerConfig): string[] {
-  return Object.keys(config.secrets?.files ?? {}).sort();
-}
-
-/** 配置里某 secret 的目标绝对路径（`~` 展开；config 已校验值以 `~` / `/` 开头）。 */
-function destinationOf(config: HomerConfig, name: string): string {
-  const raw = config.secrets?.files?.[name];
-  if (raw === undefined) {
-    throw new CliError(`homer.json 的 secrets.files 不含 ${JSON.stringify(name)}`);
-  }
-  return path.resolve(expandHome(raw));
-}
-
 /** 缺 identity 时的两步补齐提示（§2.7 步骤 9 冻结措辞）。 */
 const SECRET_KEYGEN_HINT =
   '两步补齐：① 本机 `homer secret keygen`；② 在旧机把输出的 recipient 加入 homer.json 的 secrets.recipients 后 `homer secret push`；③ 回本机 `homer secret pull`。';
@@ -452,7 +515,7 @@ async function placeSecretsInto(
   secrets: HomeReport['secrets'],
   warnings: string[],
 ): Promise<void> {
-  const names = secretNamesOf(config);
+  const names = secretNames(config);
   if (names.length === 0) return;
 
   const identity = loadIdentity(paths);
@@ -501,25 +564,11 @@ async function placeSecretsInto(
     return;
   }
 
-  // 3. 备份已存在的目标（先于写盘，保证「备份内容 == 覆盖前」）
-  const existing = names.filter((name) => fs.existsSync(destinationOf(config, name)));
-  if (existing.length > 0) {
-    const targets: BackupTarget[] = existing.map((name) => ({
-      sourceAbs: destinationOf(config, name),
-      label: `secret/${name}`,
-    }));
-    backupFiles(paths, 'home', targets);
-  }
-
-  // 4. 写目标（父目录 mkdir -p，0600）
-  for (const name of names) {
-    const destination = destinationOf(config, name);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, plaintexts.get(name)!, { mode: 0o600 });
-    // writeFileSync 的 mode 只在创建时生效（覆盖已存在文件不会改权限）→ 显式 chmod。
-    fs.chmodSync(destination, 0o600);
-    secrets.pulled.push(name);
-  }
+  // 3-4. 备份已存在的目标 + 写目标 0600（共享实现：`core/age/vault.ts` 的
+  //      `writeSecretDestinations`，与 `secret pull` 同一份代码；备份目录树 0700/0600 收紧）
+  //      备份位置不进 HomeReport（§2.7 的 secrets 形状只有 pulled/skipped/errors）。
+  writeSecretDestinations(paths, config, plaintexts, 'home');
+  secrets.pulled.push(...names);
 }
 
 /* ------------------------------------------------------------------ */
@@ -542,7 +591,14 @@ export async function runHome(opts: HomeOptions, deps?: HomeDeps): Promise<HomeR
   assertTargetIsEmpty(paths.home);
 
   // ---- 2. clone -----------------------------------------------------------
+  assertCloneableRepoUrl(opts.repoUrl);
   await cloneRepo(opts.repoUrl, paths.home, deps);
+
+  // ---- 2b. 复验（TOCTOU 竞态窗口，对抗式 review minor 2）------------------
+  // assertTargetIsEmpty 与真 clone 之间非原子：同机其它进程可在窗口内塞入条目。
+  // 复验用「除 .git 与仓库自身内容外为空」（git status --ignored），
+  // 故只对内置 clone 的运行产物生效（见 assertNothingBeyondClone 的注释）。
+  if (deps?.clone === undefined) assertNothingBeyondClone(paths.home);
 
   // ---- 3. config ----------------------------------------------------------
   const config = requireHomerConfig(paths);
@@ -557,11 +613,11 @@ export async function runHome(opts: HomeOptions, deps?: HomeDeps): Promise<HomeR
   const plan = planFirstContact(config, local, remote, mode);
 
   // ---- 7. 预览 + 确认（唯一同意门槛；--yes 时完全不创建 port）-------------
-  const secretNames = secretNamesOf(config);
-  if (opts.yes !== true && (plan.actions.length > 0 || secretNames.length > 0)) {
+  const secretNamesList = secretNames(config);
+  if (opts.yes !== true && (plan.actions.length > 0 || secretNamesList.length > 0)) {
     const injected = deps?.ui;
     const port = injected ?? createDefaultPromptPort();
-    const approved = await port.confirm(buildFirstContactPreview(config, plan, secretNames), false);
+    const approved = await port.confirm(buildFirstContactPreview(config, plan, secretNamesList), false);
     if (!approved) {
       // 区分「非交互降级自动拒绝」与「TTY 下用户真的说了不」。
       if (injected === undefined && process.stdout.isTTY !== true) {
@@ -619,7 +675,7 @@ export async function runHome(opts: HomeOptions, deps?: HomeDeps): Promise<HomeR
         secrets,
         doctor,
         warnings,
-        errors: errorLines(err),
+        errors: cliErrorLines(err),
       };
     }
     throw err;

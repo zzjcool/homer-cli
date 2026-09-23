@@ -34,6 +34,44 @@ function checkOptionalBoolean(value: unknown, where: string, errors: string[]): 
   if (typeof value !== 'boolean') errors.push(`${where} 必须是布尔值`);
 }
 
+/**
+ * 裸 glob（「语义放大器」）模式集（对抗式 review minor 5）。
+ *
+ * `allowEscape` 的匹配语义是 `matchesIgnore`（`*` 不跨 `/`、尾 `/` = 目录前缀、`**` = `*`），
+ * 因此这几个模式在去掉前导 `./` / `/` 后**等价于「放行任意一层（或任意层）路径」**：
+ * 裸星 = 任意直接子项、星 + 尾斜线 = 任意直接子目录、双星与双星 + 尾斜线 = 同上
+ * （`*` 本就不跨 `/`）。它们是显式 opt-in 的逃逸闸门，一旦写成裸通配就等于把**整棵 adapter
+ * root 的逃逸链接**全部放行（安全边界失效），几乎不可能是有意为之——在配置阶段就拒绝，
+ * 让用户改成具体路径（如 `skills/agent-browser`）。
+ */
+const BARE_ALLOW_ESCAPE_PATTERNS: ReadonlySet<string> = new Set(['*', '*/', '**', '**/']);
+
+/** 去掉前导 `./` / `/`（与 glob 实现 `ignore.ts` 的 normalize 同口径，只用于这一项判定）。 */
+function normalizeGlob(pattern: string): string {
+  let out = pattern;
+  while (out.startsWith('./')) out = out.slice(2);
+  while (out.startsWith('/')) out = out.slice(1);
+  return out;
+}
+
+/**
+ * `adapters.*.allowEscape` 的校验（additive，docs/m3-plan.md §2.0-3 / D7）：
+ * 非空字符串数组，且不得含裸通配模式（见 `BARE_ALLOW_ESCAPE_PATTERNS`）。
+ */
+function checkAllowEscape(value: unknown, where: string, errors: string[]): void {
+  checkOptionalStringArray(value, where, errors);
+  if (!Array.isArray(value)) return;
+  value.forEach((item, i) => {
+    if (typeof item !== 'string' || item.length === 0) return; // 上面已报，不重复
+    if (BARE_ALLOW_ESCAPE_PATTERNS.has(normalizeGlob(item))) {
+      errors.push(
+        `${where}[${i}] 是裸通配模式（${JSON.stringify(item)}）：它会放行 root 下任意路径的逃逸链接，` +
+          '安全边界失效；请改成具体路径（如 "skills/agent-browser" 或带尾 "/" 的具体目录前缀）',
+      );
+    }
+  });
+}
+
 function validateCategory(raw: unknown, where: string, errors: string[]): void {
   if (!isPlainObject(raw)) {
     errors.push(`${where} 必须是对象`);
@@ -80,7 +118,8 @@ function validateAdapter(raw: unknown, where: string, errors: string[]): void {
   checkOptionalBoolean(raw['enabled'], `${where}.enabled`, errors);
   checkOptionalStringArray(raw['ignore'], `${where}.ignore`, errors);
   // additive（docs/m3-plan.md §2.0-1 / §2.0-3）：symlink 逃逸 allowlist，glob 数组，缺省合法。
-  checkOptionalStringArray(raw['allowEscape'], `${where}.allowEscape`, errors);
+  // 裸通配（`*` / `*/` / `**` / `**/`）在配置阶段拒绝（对抗式 review minor 5）。
+  checkAllowEscape(raw['allowEscape'], `${where}.allowEscape`, errors);
 }
 
 /**

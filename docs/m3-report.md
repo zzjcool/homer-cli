@@ -353,3 +353,69 @@ $ homer doctor --json | jq ... # 仍然 fail
 
    > 注：W9 仓库内并未引入任何新私钥——`tests/e2e/m3.test.ts` 的 identity 全部在临时目录
    > 运行时 `secret keygen` 生成，且 bare origin 的 `git grep AGE-SECRET-KEY` 断言为空（已自动化）。
+
+---
+
+## 8. 对抗式 review 修复记录（M3 post-review）
+
+> 触发：M3 交付后的三路对抗式 review（correctness / simplicity / coverage，全新 context）。
+> 基线：`master=0f5b8a2`，**1166 tests 绿**。修复分支 `m3-review-fixes`。
+> 纪律：不改冻结接口（additive 除外）；每条修复带回归测试；`npm run typecheck && npm test` 全绿。
+
+修复前基线（review 实测，非转述）：`npm test` = 53 files / **1166 passed | 1 skipped**；
+`tsc --noEmit` 干净。review 的 critical 一条、major 四条、minor 六条按下表处置。
+
+### 8.1 CRITICAL
+
+| # | 问题 | 修复 | 回归测试 |
+|---|---|---|---|
+| **C1** | `home.ts` 的 `defaultClone` 用 `execFile('git', ['clone', repoUrl, dest])`，**URL 前没有 `--`**。以 `-` 开头的 URL 被 git 当 option，`--upload-pack=<cmd>` → 任意命令执行（reviewer 已 PoC 实证）。`git.ts` 其余调用一致使用 `--`，唯此漏 | ① argv 改 `['clone', '--', repoUrl, dest]`；② 入口 `assertCloneableRepoUrl` 拒绝 `repoUrl.startsWith('-')`（纵深防御，注入位也绕不过） | `tests/cli/home.test.ts` M3 review 套件 3 例：入口拒绝 `-ofoo` / `--upload-pack=…` 且 **clone 调用数为 0、无命令执行**；CLI 全链路 exit 1 + 无 PWN 文件；**PATH shim 记录真实 execFile argv** 断言 `['clone','--',origin,dest]` |
+
+### 8.2 MAJOR
+
+| # | 问题 | 修复 | 回归测试 |
+|---|---|---|---|
+| **M1** | 密钥备份落在 0755 目录树，同机其他用户可读（直接违反 D2「密钥明文只在 0600 下」） | `backupFiles` 新增 additive `opts?: { mode?: { dir?, file? } }`（缺省行为逐字不变）；`vault.ts` 新增共享实现 `writeSecretDestinations`，`secret pull` / `home` 步骤 9 都走它并传 `{ dir: 0o700, file: 0o600 }`（目录链 + 递归内容显式 chmod） | `backup.test.ts` 5 例（不可信源权限 0644 仍收紧、目录型源递归、全 skipped、只给 dir 时 file 不动）；`home.test.ts` 2 例（密钥备份 0600/目录 0700；**普通配置备份保持默认权限**）；`secret.test.ts` 1 例 |
+| **M2** | `secret pull` 在 fetch 失败时静默把密钥回滚到工作区旧密文（reviewer PoC：upstream V2 / 工作区 V1 → applied 写回 V1） | fetch 失败且**存在 upstream 配置**时：① 本地 remote-tracking ref 可用且工作区密文与之**不一致** → `status='error'` exit 1，错误明示「拒绝写旧值」；② 无本地 tracking ref（无法比对）→ 回落仍可行但 warning 升级为「将回滚到本地旧版密文」，且 **`--yes` 下直接 error**（密钥回滚高危），非 `--yes` 时确认预览带回滚警告 | `secret.test.ts` 3 例：分叉 → error + 零写入（`reset --hard` 构造真实分叉）；无分叉 → 正常 applied（不误报）；无法比对 → `--yes` error / 非 `--yes` 确认含警告 + 拒绝即 aborted + 同意则 applied |
+| **M3** | `secret pull` 取数口径与 `doctor` 不对称（W9 只修了 doctor 的双源，secret pull 仍单源：upstream 可解析就**只**读 upstream） | `pullPipeline` 步骤 2 改双源对称：逐项 **upstream 可读优先 upstream、缺失/不可读回落工作区**（与 `checkAge` 同口径）；`missing-vault` 只在**双源都缺**时报 | `secret.test.ts` 2 例：upstream 有 commit 但**无 vault**、工作区有 → applied（旧口径会误报 missing-vault）；双源都缺 → 仍 missing-vault |
+| **M4** | git 历史（`b7ea2a6` 等，HEAD 已由 `c6cec6f` 脱敏）里仍可读到一把 bech32 合法的 age 私钥 | **不重写已推送历史**（57 commits，代价 > 收益；该 key 为一次性冒烟产物、从未用于真实 vault）。改为在 `README.md` 追加「安全备案」段：该 key **作废声明** + 若曾用于任何真实 vault 立即轮换的操作步骤 | 文档级（`README.md` 新增段落）；密钥永不入库的自动化断言（bare origin `git grep AGE-SECRET-KEY` 为空）既有且仍绿 |
+
+### 8.3 MINOR（5 条全修）
+
+| # | 问题 | 修复 | 回归测试 |
+|---|---|---|---|
+| 1 | vault 密文自检对 ≤16 字节明文整体失效（采样为空 → 断言恒真，passthrough 假加密层可把明文原样写盘） | `encryptSecretToFile` 增加**全文兜底**：`ciphertext.equals(plaintext) && plaintext.length > 0` → `CliError`（无条件生效，与采样断言并行） | `vault.test.ts` 3 例：10 字节明文 + passthrough → CliError 且不写盘；真加密不误报；空明文由「产出空密文」先拦 |
+| 2 | `assertTargetIsEmpty` 与 `git clone` 之间的 TOCTOU 窗口 | clone 后、`loadConfig` 前新增 `assertNothingBeyondClone`：用 `git status --porcelain --ignored -uall` 复验「除 `.git` 与仓库自身内容外为空」（**不是**字面「除 `.git` 外为空」——合法 clone 必定落工作树）。仅内置 clone 路径生效（注入 clone 的产物契约不由 homer 定义） | `home.test.ts` 2 例：PATH shim 在 clone 后塞入 stray → CliError + 零 state；干净 clone 不误判（工作树内容不算 stray） |
+| 3 | `home.ts` 文件头确认门槛段未声明 `--yes` 豁免 | 文件头补「**`--yes` 时一切确认豁免**（与 `secret pull --yes` 同语义）」段 + 说明 `--yes` 根本不创建 port | `tests/cli/review-minors-m3.test.ts`：文件头含该段 + 实现的门槛条件整体挂在 `opts.yes !== true` 下 |
+| 4 | `destinationOf` / `secretNames(Of)` / `errorLines` / 密钥目标写回块在两个命令层逐字重复 | `secretNames` / `destinationOf` / `writeSecretDestinations`（+ `BackupFileModes`）提升到 `src/core/age/vault.ts` 并出门面；`cliErrorLines` 提升到 `src/core/errors.ts`（与 `CliError` 同层）；两命令层删副本改 import | `review-minors-m3.test.ts`：机械证据（两文件不含私有声明 / 就地排序 / 就地缺失文案）+ 语义快照 + 门面同一函数引用 |
+| 5 | `allowEscape` 裸 `*` / `**/` / `*/` 无护栏（语义放大器：等于放行一切逃逸） | `validateConfig` 新增 `checkAllowEscape`：拒绝裸 `*` / `*/` / `**` / `**/`（含前导 `./`、`/` 变体），错误信息含 `裸通配模式` 与改写建议；README 明示 | `config.test.ts` 3 例（8 种裸模式全报错、`extensions/*` 等具体前缀 glob 不误拦、`saveConfig` 拒绝落盘）+ README 口径 |
+
+### 8.4 已知限制（显式搁置，非本次修复范围）
+
+1. **e2e 共享世界结构**：`tests/e2e/m3.test.ts` 各 `describe` 组共享 `beforeAll` 的 `world`，`it`
+   之间存在顺序依赖（与 `tests/e2e/m2.test.ts` 同款叙事结构）。不影响断言正确性，仅影响定位失败的成本；
+   若未来变 flaky，把 ③⑤ 组的证据改为各自 `it` 内就地重取。
+2. **真实默认路径 keygen 0600**：`~/.homer/keys/age.txt` 的 0600 只在假 `HOMER_HOME` 下有自动化断言；
+   真实默认路径下自动测会污染真实 HOME，**维持人工核验项**（默认路径解析本身有 `tests/adapters/paths.test.ts` 覆盖）。
+3. **vault 读取注入位不对称**：`HomeDeps` 有 `clone`/`ui`/`age`/`git`，但没有 vault 读取注入位；
+   测试只能靠真实临时 HOME 造 vault 文件。判定为**可维护性**问题（非缺陷），M4+ 可选。
+4. **`file://` URL 放行**：`homer home` 接受 `file://` / 本地路径指向的任意 git 仓库。
+   C1 修复后（`clone -- <url>` + 拒绝 `-` 开头）clone 本地仓库本身不执行外部代码，故**可接受**。
+
+### 8.5 本次修复的验证输出
+
+```
+$ npm run typecheck
+> tsc --noEmit
+（干净，0 error）
+
+$ npm test
+> vitest run
+
+ Test Files  54 passed (54)
+      Tests  1202 passed | 1 skipped (1203)
+   Duration  27.6s
+```
+
+（基线 1166 -> 1202，新增/扩充 36 例回归；`1 skipped` 为 `cipher.test.ts` 末尾的 age CLI 互操作用例，
+本机无 `age` 可执行文件时按设计跳过，与基线一致。）

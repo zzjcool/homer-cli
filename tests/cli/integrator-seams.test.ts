@@ -72,6 +72,9 @@ describe('P4-W10 git-port：resolveGitPort / hasPushTarget', () => {
     expect(typeof resolved.commitStoreIfNeeded).toBe('function');
     expect(typeof resolved.requireFastForwardable).toBe('function');
     expect(typeof resolved.hasPushTarget).toBe('function');
+    // additive（M3 对抗式 review M2）：secret pull 的 fetch 失败判定需要这两项。
+    expect(typeof resolved.refExists).toBe('function');
+    expect(typeof resolved.configuredUpstream).toBe('function');
 
     const overridden = resolveGitPort({ hasUpstream: () => true, isGitRepo: () => false });
     expect(overridden.hasUpstream('')).toBe(true);

@@ -287,6 +287,50 @@ describe('W1 · 原子写 + 密文自检（§1-D4 / §3-P1-W1 验收 5）', () =
     );
   });
 
+  it('密文自检全文兜底：≤16 字节明文 + passthrough 假加密层 → CliError 且不写盘（对抗式 review minor 1）', async () => {
+    const paths = tmpPaths();
+    // 10 字节明文：片段采样为空（旧实现的断言因此完全失效）。
+    const plaintext = Buffer.from('SHORT-KEY!');
+
+    const passthrough: AgeCryptoPort = {
+      encrypt: (p) => Promise.resolve(Buffer.from(p)),
+      decrypt: (c) => Promise.resolve(Buffer.from(c)),
+    };
+
+    await expect(
+      encryptSecretToFile(passthrough, paths, 'short', plaintext, ['age1' + 'q'.repeat(58)]),
+    ).rejects.toThrow(CliError);
+    await expect(
+      encryptSecretToFile(passthrough, paths, 'short', plaintext, ['age1' + 'q'.repeat(58)]),
+    ).rejects.toThrow(/密文与明文逐字节相同/);
+
+    expect(fs.existsSync(paths.secretsDir)).toBe(false);
+    expect(fs.existsSync(secretFilePath(paths, 'short'))).toBe(false);
+  });
+
+  it('全文兜底不误报：≤16 字节明文经真加密正常写入', async () => {
+    const paths = tmpPaths();
+    const identity = generateIdentity();
+    writeIdentityFile(paths, identity);
+    const plaintext = Buffer.from('SHORT-KEY!');
+
+    await encryptSecretToFile(createAgeCryptoPort(), paths, 'short-ok', plaintext, [identity.recipient]);
+    expect(fs.readFileSync(secretFilePath(paths, 'short-ok')).equals(plaintext)).toBe(false);
+    expect(await decryptSecretFromFile(createAgeCryptoPort(), paths, 'short-ok')).toEqual(plaintext);
+  });
+
+  it('空明文 + passthrough：不因“空 == 空”触发兜底断言（长度 > 0 才比较）', async () => {
+    const paths = tmpPaths();
+    const passthrough: AgeCryptoPort = {
+      encrypt: () => Promise.resolve(Buffer.alloc(0)),
+      decrypt: (c) => Promise.resolve(Buffer.from(c)),
+    };
+    // 空密文由「产出空密文」那条断言拦截（先于全文比较），错误文案应是前者。
+    await expect(
+      encryptSecretToFile(passthrough, paths, 'empty', Buffer.alloc(0), ['age1' + 'q'.repeat(58)]),
+    ).rejects.toThrow(/产出空密文/);
+  });
+
   it('真实现下密文永远不含明文（多种明文形态 × 多 recipient）', async () => {
     const paths = tmpPaths();
     const crypto = createAgeCryptoPort();

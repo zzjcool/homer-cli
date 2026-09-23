@@ -159,9 +159,45 @@ export function upstreamRef(home: string): string | undefined {
   return ref === '' ? undefined : ref;
 }
 
+/**
+ * 当前分支**配置**里的 upstream 短名（additive，M3 对抗式 review M2）。
+ *
+ * 与 `upstreamRef` 的关键区别：本函数读的是 `branch.<name>.{remote,merge}` **配置**，
+ * 即使对应的 remote-tracking ref 在本地不存在（刚 fetch 失败 / 被 gc 掉）也能返回名字；
+ * 而 `upstreamRef` 走 `@{upstream}` 解析，ref 缺失就报错 → undefined。
+ *
+ * 用途：`secret pull` 在 `git fetch` 失败时需要判断「是否有 upstream 配置可比对」——
+ * 后者不能依赖 ref 是否存在（那恰恰是待判定的东西）。非仓库 / 无分支 / 无配置 → undefined。
+ */
+export function configuredUpstream(home: string): string | undefined {
+  const branch = gitExec(home, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (!branch.ok) return undefined;
+  const name = branch.stdout.trim();
+  if (name === '') return undefined;
+
+  const result = gitExec(home, ['for-each-ref', '--format=%(upstream:short)', `refs/heads/${name}`]);
+  if (!result.ok) return undefined;
+  const ref = result.stdout.trim();
+  return ref === '' ? undefined : ref;
+}
+
 /** `git fetch`（不指定 remote/refspec，按 upstream 语义由 git 自行决定）。 */
 export function gitFetch(home: string): GitExecResult {
   return gitExec(home, ['fetch']);
+}
+
+/**
+ * 本地 ref 是否可解析（`git rev-parse --verify --quiet <ref>`；additive，M3 对抗式 review M2）。
+ *
+ * 用途：`secret pull` 在 `git fetch` 失败时判断「本地 remote-tracking ref 是否可用」——
+ * `upstreamRef()` 读的是 **配置**（`branch.<name>.merge`），即使 `refs/remotes/…` 不存在
+ * 也能返回 `origin/main`；而能否真正 `git show` 出密文取决于该 ref 是否在本地存在。
+ * 两者语义不同，故需要这个独立判定。
+ * 不 throw（与 `gitExec` 同款：git 不可用 / 非仓库 / ref 不存在 → false）。
+ */
+export function refExists(home: string, ref: string): boolean {
+  if (ref === '') return false;
+  return gitExec(home, ['rev-parse', '--verify', '--quiet', ref]).ok;
 }
 
 /** `git push`；无 upstream 时 git 会以 ok:false 失败，由调用方降级为 warning。 */

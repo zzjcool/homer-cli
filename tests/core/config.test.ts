@@ -176,6 +176,45 @@ describe('validateConfig — adapters.*.allowEscape（P1-W3）', () => {
     expect(result.config.adapters['pi']?.allowEscape).toEqual([]);
   });
 
+  it('裸通配模式（* / ** / */ / **/，含前导 ./ 与 / 变体）→ 报错（对抗式 review minor 5）', () => {
+    for (const bare of ['*', '**', '*/', '**/', './*', '/*', './/*', '/**/']) {
+      const result = validateConfig(withAllowEscape([bare]));
+      expect(result.ok, JSON.stringify(bare)).toBe(false);
+      if (result.ok) continue;
+      const text = result.errors.join('\n');
+      expect(text, JSON.stringify(bare)).toContain('adapters.pi.allowEscape');
+      expect(text, JSON.stringify(bare)).toContain('裸通配模式');
+    }
+  });
+
+  it('带具体路径的 glob 不误拦（含 `extensions/*` 这类“前缀 + 星”形态）', () => {
+    for (const ok of [
+      ['skills/agent-browser'],
+      ['extensions/*'],
+      ['skills/*/inner'],
+      ['a*/'],
+      ['skills/agent-browser/'],
+    ]) {
+      const result = validateConfig(withAllowEscape(ok));
+      expect(result.ok, JSON.stringify(ok)).toBe(true);
+      if (result.ok) expect(result.config.adapters['pi']?.allowEscape).toEqual(ok);
+    }
+  });
+
+  it('裸通配也拦其它 adapter，且 saveConfig 拒绝落盘', () => {
+    const config = validConfig() as unknown as Record<string, unknown>;
+    const adapters = config['adapters'] as Record<string, Record<string, unknown>>;
+    adapters['herdr'] = { root: '~/.config/herdr', allowEscape: ['**/'], categories: {} };
+    const result = validateConfig(config);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join('\n')).toContain('adapters.herdr.allowEscape');
+
+    const paths = tmpPaths();
+    fs.mkdirSync(paths.home, { recursive: true });
+    expect(() => saveConfig(paths, withAllowEscape(['*']) as HomerConfig)).toThrow(/裸通配模式/);
+    expect(fs.existsSync(paths.configFile)).toBe(false);
+  });
+
   it('非 string[]（字符串 / 对象 / 数字 / null）→ 报错且信息含 allowEscape', () => {
     for (const value of ['skills/agent-browser', { 0: 'x' }, 42, null]) {
       const result = validateConfig(withAllowEscape(value));

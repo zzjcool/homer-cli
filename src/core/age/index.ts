@@ -37,9 +37,12 @@ export {
 // ---- vault（vault.ts，W1）----
 export {
   decryptSecretFromFile,
+  destinationOf,
   encryptSecretToFile,
   listSecrets,
   secretFilePath,
+  secretNames,
   secretRelativePath,
+  writeSecretDestinations,
 } from './vault.js';
-export type { VaultEntryStatus } from './vault.js';
+export type { VaultEntryStatus, WriteSecretDestinationsResult } from './vault.js';

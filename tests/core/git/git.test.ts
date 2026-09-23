@@ -17,6 +17,8 @@ import {
   gitFetch,
   gitPush,
   hasUpstream,
+  configuredUpstream,
+  refExists,
   headCommit,
   isAncestorOf,
   isGitRepo,
@@ -297,6 +299,50 @@ describe('upstream / fetch / push', () => {
     expect(gitFetch(clone).ok).toBe(true);
     expect(gitPush(clone).ok).toBe(true); // 无新 commit 的 push 仍成功
     expect(shaOf(clone)).toBe(shaOf(bare));
+  });
+});
+
+describe('refExists / configuredUpstream（M3 对抗式 review M2 的判定基础）', () => {
+  it('refExists：存在的 ref → true；不存在 / 空串 / 非仓库 → false（不抛）', () => {
+    const bare = initBare('refexists-bare');
+    const local = cloneRepo(bare, 'refexists-local');
+    writeFile(path.join(local, 'store', 'pi', 'x.txt'), 'v1\n');
+    commitAllStore(local, 'c1');
+    gitOk(local, ['push', '-u', 'origin', 'main']);
+    gitFetch(local);
+
+    expect(refExists(local, 'origin/main')).toBe(true);
+    expect(refExists(local, 'HEAD')).toBe(true);
+    expect(refExists(local, 'origin/does-not-exist')).toBe(false);
+    expect(refExists(local, '')).toBe(false);
+    expect(refExists(mkTmp('refexists-notrepo'), 'HEAD')).toBe(false);
+  });
+
+  it('configuredUpstream：读**配置**（ref 缺失也能返回名字）—— 这是 M2 无法比对判定的关键', () => {
+    const bare = initBare('cfgup-bare');
+    const local = cloneRepo(bare, 'cfgup-local');
+    writeFile(path.join(local, 'store', 'pi', 'x.txt'), 'v1\n');
+    commitAllStore(local, 'c1');
+    gitOk(local, ['push', '-u', 'origin', 'main']);
+    gitFetch(local);
+
+    expect(configuredUpstream(local)).toBe('origin/main');
+    expect(upstreamRef(local)).toBe('origin/main');
+
+    // 删掉 remote-tracking ref：`upstreamRef` 变 undefined，但**配置**里仍有 upstream。
+    gitOk(local, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    expect(upstreamRef(local)).toBeUndefined();
+    expect(configuredUpstream(local)).toBe('origin/main');
+    // refExists 反映的是 ref 真相（与配置无关）。
+    expect(refExists(local, 'origin/main')).toBe(false);
+  });
+
+  it('configuredUpstream：无 upstream / 非仓库 → undefined（不抛）', () => {
+    const repo = initRepo('cfgup-none');
+    writeFile(path.join(repo, 'store', 'pi', 'x.txt'), 'x\n');
+    commitAllStore(repo, 'c1');
+    expect(configuredUpstream(repo)).toBeUndefined();
+    expect(configuredUpstream(mkTmp('cfgup-notrepo'))).toBeUndefined();
   });
 });
 

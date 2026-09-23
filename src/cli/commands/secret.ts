@@ -35,27 +35,28 @@
  */
 
 import fs from 'node:fs';
-import path from 'node:path';
 import process from 'node:process';
 
 import {
   createAgeCryptoPort,
+  destinationOf,
   encryptSecretToFile,
   generateIdentity,
   identityFilePath,
   loadIdentity,
   listSecrets,
   secretFilePath,
+  secretNames,
   secretRelativePath,
   writeIdentityFile,
+  writeSecretDestinations,
 } from '../../core/age/index.js';
 import type { AgeCryptoPort } from '../../core/age/types.js';
 import type { VaultEntryStatus } from '../../core/age/vault.js';
-import { backupFiles, type BackupTarget } from '../../core/backup/backup.js';
 import { loadConfig } from '../../core/config.js';
-import { CliError } from '../../core/errors.js';
+import { CliError, cliErrorLines } from '../../core/errors.js';
 import { commitPaths, gitExec, readVaultFileAtCommit } from '../../core/git/index.js';
-import { expandHome, type HomerPaths } from '../../core/paths.js';
+import type { HomerPaths } from '../../core/paths.js';
 import type { HomerConfig } from '../../core/types.js';
 import { resolveHomerPaths } from '../render.js';
 import { createDefaultPromptPort, type PromptPort } from '../ui.js';
@@ -132,19 +133,10 @@ export function parseSecretSubcommand(argv: readonly string[]): SecretSubcommand
 /** 非交互环境确认失败时的提示（§2.7 约定 2 的固定措辞，同 `push.ts`）。 */
 const NON_INTERACTIVE_HINT = '非交互环境，请加 --yes';
 
-/** `secrets.files` 的 name→目标路径映射，name 已按字典序排序（报告稳定可断言）。 */
-function secretNames(config: HomerConfig): string[] {
-  return Object.keys(config.secrets?.files ?? {}).sort();
-}
-
-/** 配置里某 secret 的目标绝对路径（`~` 展开；config 已校验值以 `~` / `/` 开头）。 */
-function destinationOf(config: HomerConfig, name: string): string {
-  const raw = config.secrets?.files?.[name];
-  if (raw === undefined) {
-    throw new CliError(`homer.json 的 secrets.files 不含 ${JSON.stringify(name)}`);
-  }
-  return path.resolve(expandHome(raw));
-}
+/**
+ * `secrets.files` 的 name → 目标路径口径在两个命令层已提升到 `core/age/vault.ts`
+ * （`secretNames` / `destinationOf`）——对抗式 review minor 4 的收口点，此处不再持副本。
+ */
 
 /** 缺 homer.json 的统一提示（与 `push.ts` / `status.ts` 同款）。 */
 function requireConfig(paths: HomerPaths): HomerConfig {
@@ -158,20 +150,10 @@ function requireConfig(paths: HomerPaths): HomerConfig {
   return config;
 }
 
-/** 把 CliError 收敛为 `errors` 数组（报告可解析，exit 1）。 */
-function errorLines(err: CliError): string[] {
-  return err.hint === undefined ? [err.message] : [err.message, err.hint];
-}
-
 /** `name → destination` 的确认清单文本。 */
 function confirmPreview(config: HomerConfig, names: readonly string[], verb: string): string {
   const lines = names.map((name) => `  ${name} → ${destinationOf(config, name)}`);
   return `${verb} ${names.length} 个密钥：\n${lines.join('\n')}\n继续？`;
-}
-
-/** 目标文件是否存在（用于备份目标收集）。 */
-function existingDestinations(config: HomerConfig, names: readonly string[]): string[] {
-  return names.filter((name) => fs.existsSync(destinationOf(config, name)));
 }
 
 /** `git status --porcelain -- secrets/` 非空 = 有未提交的 vault 改动。 */
@@ -252,7 +234,7 @@ export async function runSecretPush(opts: SecretPushOptions, deps?: SecretDeps):
   try {
     return await pushPipeline(opts, deps);
   } catch (err) {
-    if (err instanceof CliError) return makePushReport('error', { errors: errorLines(err) });
+    if (err instanceof CliError) return makePushReport('error', { errors: cliErrorLines(err) });
     throw err;
   }
 }
@@ -427,25 +409,30 @@ function makePullReport(
 }
 
 /**
- * 从 `@{upstream}`（fetch 后）读密文 → 解密 → 备份后写回目标（0600）。
+ * 从远端读密文 → 解密 → 备份后写回目标（0600）。
  *
- * 冻结语义（§2.6）：
- *   - `gitFetch` 失败 → warning + 回落读**工作区** vault；成功且 upstream 可解析 → 逐项
- *     `readVaultFileAtCommit(home, 'secrets/<name>.age', upstreamRef)`（**不 ff 整仓**）；
+ * 冻结语义（§2.6）+ 对抗式 review 修复（M1/M2/M3）：
+ *   - **取数双源对称**（M3，与 doctor `checkAge` 同口径）：逐项「upstream 可读优先 upstream，
+ *     缺失 / 不可读回落工作区」。fetch 成功但 `@{upstream}` 上没有该文件时不再误报
+ *     `missing-vault`（工作区有就归位）；fetch 失败时工作区与 upstream ref 任一可读即可。
+ *   - **fetch 失败不得静默回滚**（M2）：存在 upstream 配置时，若本地 remote-tracking ref
+ *     可用且工作区密文与之**不一致** → `status='error'` exit 1（不写任何目标）；
+ *     无本地 tracking ref（无法比对）→ 回落仍执行，但 warning 明示「将回滚到本地旧版密文」，
+ *     且 `--yes` 下直接 error（密钥回滚是高危操作）。
  *   - 任一 vault 缺失 → `missing-vault`（不写任何目标）；
  *   - 任一解密失败 → `undecryptable`（**不写任何目标**，全有或全无）；
- *   - 非 `--yes` → confirm；已存在的目标先 `backupFiles`（label = `secret/<name>`）再写。
+ *   - 非 `--yes` → confirm；已存在的目标先备份（目录 0700 / 文件 0600，见 M1）再写。
  */
 export async function runSecretPull(opts: SecretPullOptions, deps?: SecretDeps): Promise<SecretPullReport> {
   try {
     return await pullPipeline(opts, deps);
   } catch (err) {
-    if (err instanceof CliError) return makePullReport('error', { errors: errorLines(err) });
+    if (err instanceof CliError) return makePullReport('error', { errors: cliErrorLines(err) });
     throw err;
   }
 }
 
-/** 从工作区读 vault 密文（`readVaultFileAtCommit` 的回落口，fetch 失败 / 无 upstream 时用）。 */
+/** 从工作区读 vault 密文（`readVaultFileAtCommit` 的回落口）。 */
 function readWorkspaceVault(paths: HomerPaths, name: string): Buffer | undefined {
   try {
     return fs.readFileSync(secretFilePath(paths, name));
@@ -478,31 +465,73 @@ async function pullPipeline(opts: SecretPullOptions, deps?: SecretDeps): Promise
     });
   }
 
-  // ---- 1. fetch（失败降级为 warning + 读工作区）----------------------------
+  // ---- 1. fetch（失败降级为 warning + 双源回落）---------------------------
   const fetched = git.gitFetch(paths.home);
-  let upstream: string | undefined;
+  // `configuredUpstream` 读的是**配置**（fetch 失败时 `@{upstream}` 解析不可靠）；
+  // `upstreamRef` 读的是可解析的 ref（正常路径的真相；只读本地 ref，不发网络）。
+  const configured = git.configuredUpstream(paths.home);
+  const upstream = git.upstreamRef(paths.home);
+  const upstreamName = upstream ?? configured;
+  // 本地 remote-tracking ref 是否真的可读（`configured` 只说明配置里有）。
+  const upstreamReadable = upstream !== undefined && git.refExists(paths.home, upstream);
+  // 「fetch 失败但无法比对工作区与远端」= 高风险回滚场景（M2）。
+  let unverifiableRollback = false;
+
   if (!fetched.ok) {
     const reason = fetched.stderr.trim() === '' ? '未知错误' : fetched.stderr.trim();
-    warnings.push(`git fetch 失败（${reason}）：回落读取工作区 vault`);
-  } else {
-    upstream = git.upstreamRef(paths.home);
-    if (upstream === undefined) warnings.push('当前分支无 upstream：读取工作区 vault');
+    if (upstreamName === undefined) {
+      warnings.push(`git fetch 失败（${reason}）：当前分支无 upstream，回落读取工作区 vault`);
+    } else if (upstreamReadable) {
+      warnings.push(`git fetch 失败（${reason}）：回落读取工作区 vault（并与本地 ${upstream} 比对）`);
+    } else {
+      unverifiableRollback = true;
+      warnings.push(
+        `git fetch 失败（${reason}）且本地无 ${upstreamName} 可读引用，无法确认工作区密文是否为最新：将回滚到本地旧版密文`,
+      );
+    }
+  } else if (upstream === undefined) {
+    warnings.push('当前分支无 upstream：读取工作区 vault');
   }
 
-  // ---- 2. 读全部密文（全有或全无，先于任何写操作）--------------------------
+  // ---- 2. 读全部密文（双源对称：upstream 优先，缺失 / 不可读回落工作区）----
+  // 全有或全无：先于任何写操作。
   const ciphertexts = new Map<string, Buffer>();
   const missing: string[] = [];
+  const diverged: string[] = [];
+
   for (const name of names) {
     const rel = secretRelativePath(name);
-    const bytes = upstream !== undefined
-      ? readVaultFileAtCommit(paths.home, rel, upstream)
-      : readWorkspaceVault(paths, name);
+    const upstreamBytes = upstreamReadable
+      ? readVaultFileAtCommit(paths.home, rel, upstream!)
+      : undefined;
+    const workspaceBytes = readWorkspaceVault(paths, name);
+
+    // M2：fetch 失败且两端密文都可读、但不一致 → 拒绝写旧值（见下文早退）。
+    if (!fetched.ok && upstreamBytes !== undefined && workspaceBytes !== undefined) {
+      if (!upstreamBytes.equals(workspaceBytes)) diverged.push(`${rel}（工作区 ≠ ${upstream}）`);
+    }
+
+    const bytes = upstreamBytes ?? workspaceBytes;
     if (bytes === undefined) {
-      missing.push(`${rel}${upstream === undefined ? '（工作区）' : `（${upstream}）`}`);
+      missing.push(
+        `${rel}${upstreamReadable ? `（工作区与 ${upstream}）` : '（工作区）'}`,
+      );
       continue;
     }
     ciphertexts.set(name, bytes);
   }
+
+  if (diverged.length > 0) {
+    return makePullReport('error', {
+      warnings,
+      errors: [
+        `git fetch 失败且工作区密文与本地 ${upstream} 不一致（${diverged.length}/${names.length}）：拒绝写旧值`,
+        ...diverged,
+        '无法确认远端最新密文（工作区可能是旧版本）：请恢复网络后重跑 `homer secret pull`；确需使用本地版本请先 `homer secret push`（或用 `git pull` 手工对齐）。',
+      ],
+    });
+  }
+
   if (missing.length > 0) {
     return makePullReport('missing-vault', {
       warnings,
@@ -537,10 +566,24 @@ async function pullPipeline(opts: SecretPullOptions, deps?: SecretDeps): Promise
     });
   }
 
+  // ---- 3b. 无法比对时的回滚闸门（M2，密钥回滚 = 高危）----------------------
+  if (unverifiableRollback && opts.yes === true) {
+    return makePullReport('error', {
+      warnings,
+      errors: [
+        'git fetch 失败且无法比对本地与远端密文（无可用 remote-tracking 引用）：`--yes` 下拒绝回滚到旧版密文',
+        '请恢复网络后重跑 `homer secret pull`；若确认本地就是最新版，请先 `homer secret push` 把本地密文推到远端。',
+      ],
+    });
+  }
+
   // ---- 4. 交互确认（写任何目标之前）---------------------------------------
   if (opts.yes !== true) {
     const port = deps?.ui ?? createDefaultPromptPort();
-    const approved = await port.confirm(confirmPreview(config, names, '将归位'), false);
+    const rollback = unverifiableRollback
+      ? '\n⚠ 警告：fetch 失败且无法比对远端，本次将回滚到**本地旧版**密文（旧值可能已废弃）。'
+      : '';
+    const approved = await port.confirm(`${confirmPreview(config, names, '将归位')}${rollback}`, false);
     if (!approved) {
       if (deps?.ui === undefined && process.stdout.isTTY !== true) warnings.push(NON_INTERACTIVE_HINT);
       return makePullReport('aborted', {
@@ -550,27 +593,15 @@ async function pullPipeline(opts: SecretPullOptions, deps?: SecretDeps): Promise
     }
   }
 
-  // ---- 5. 备份已存在的目标（先于写盘，保证「备份内容 == 覆盖前」）-----------
-  let backupDir: string | undefined;
-  const existing = existingDestinations(config, names);
-  if (existing.length > 0) {
-    const targets: BackupTarget[] = existing.map((name) => ({
-      sourceAbs: destinationOf(config, name),
-      label: `secret/${name}`,
-    }));
-    backupDir = backupFiles(paths, 'secret', targets).backupDir;
-  }
+  // ---- 5-6. 备份已存在的目标 + 写目标 0600（M1：备份目录树 0700/0600）------
+  // 共享实现点：`core/age/vault.ts` 的 `writeSecretDestinations`（与 `home` 步骤 9 同一份）。
+  const placed = writeSecretDestinations(paths, config, plaintexts, 'secret');
 
-  // ---- 6. 写入目标（父目录 mkdir -p，0600）--------------------------------
-  for (const name of names) {
-    const destination = destinationOf(config, name);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, plaintexts.get(name)!, { mode: 0o600 });
-    // 已存在的文件不会被 writeFileSync 的 mode 改动（open(2) 的 mode 只在创建时生效）。
-    fs.chmodSync(destination, 0o600);
-  }
-
-  return makePullReport('applied', { pulled: [...names], backupDir, warnings });
+  return makePullReport('applied', {
+    pulled: [...names],
+    backupDir: placed.backupDir,
+    warnings,
+  });
 }
 
 /* ------------------------------------------------------------------ */

@@ -41,6 +41,29 @@ export interface BackupResult {
 /** 日期目录名（`YYYYMMDD`），只有这种名字的目录参与保留策略。 */
 const DATE_DIR_RE = /^\d{8}$/;
 
+/**
+ * 备份目录树的可选权限收紧（additive，对抗式 review M1）。
+ *
+ * `undefined` = 维持既有行为（系统默认权限，受 umask 影响）——普通配置备份（store 快照）
+ * 无需收紧，其可读性还有调试价值。
+ *
+ * 密钥通道（`secret pull` / `home` 步骤 9）**必须**传 `{ dir: 0o700, file: 0o600 }`：
+ * 被覆盖前的目标文件是**密钥明文**，D2 冻结「密钥明文只存在于 0600」——备份副本落在
+ * 0755 目录 / 0644 文件里等于让同机其他用户读到上一版私钥。
+ */
+export interface BackupFileModes {
+  /** 本函数创建的整个备份目录树（含 `backupsDir` 与日期 / 时间 / 标签父目录）的权限。 */
+  dir?: number;
+  /** 备份文件（含目录型源递归出的文件）的权限（copy 完成后显式 `chmod`）。 */
+  file?: number;
+}
+
+/** `backupFiles` 的可选参数（additive；缺省 = 与冻结签名逐字相同的行为）。 */
+export interface BackupFilesOptions {
+  /** 权限收紧（见 `BackupFileModes`）；缺省不改变任何权限。 */
+  mode?: BackupFileModes;
+}
+
 /** 默认保留最近 7 个日期目录（§2.0-1 `backup.keep` 缺省值）。 */
 export const DEFAULT_BACKUP_KEEP = 7;
 
@@ -68,15 +91,54 @@ function assertSafeSegment(segment: string, what: string): void {
   }
 }
 
+/** `chmod`，源在竞态下已被删（ENOENT）→ 跳过；其它错误照旧抛出（权限收紧失败必须让调用方知道）。 */
+function chmodIfPresent(abs: string, mode: number): void {
+  try {
+    fs.chmodSync(abs, mode);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+/**
+ * 对 `root` 及其下整棵树施加权限收紧。
+ *
+ * 必须显式 `chmod` 而不是只靠 `mkdirSync(..., { mode })`：`mkdir` 的 mode 会被 umask 削
+ * （只可能更严，故不会放宽），但 `fs.cpSync` 对目录型源会按源权限创建、对已存在的目录不改权限；
+ * 且 `backupsDir` / 日期目录可能是**更早的、默认权限的调用**留下的。显式 chmod 才是不变式。
+ */
+function applyModes(root: string, mode: BackupFileModes): void {
+  if (mode.dir !== undefined) chmodIfPresent(root, mode.dir);
+
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (mode.dir !== undefined) chmodIfPresent(abs, mode.dir);
+        stack.push(abs);
+        continue;
+      }
+      if (mode.file !== undefined) chmodIfPresent(abs, mode.file);
+    }
+  }
+}
+
 /**
  * 备份 `targets` 中已存在的源文件。
  * `command` 是产生备份的命令名（push/pull/merge），进目录名 `<HHmmss>-<command>`。
  * 同秒内重复调用会落到同一目录（互相覆盖）——计划未要求唯一化，调用方按命令粒度使用即可。
+ *
+ * `opts.mode`（additive，对抗式 review M1）收紧备份目录树权限：密钥通道传
+ * `{ dir: 0o700, file: 0o600 }`，普通配置备份不传（行为与改动前逐字相同）。
  */
 export function backupFiles(
   paths: HomerPaths,
   command: string,
   targets: readonly BackupTarget[],
+  opts?: BackupFilesOptions,
 ): BackupResult {
   assertSafeSegment(command, 'command');
   for (const target of targets) {
@@ -103,6 +165,16 @@ export function backupFiles(
     // recursive 同时覆盖目录型源（分类目录整体备份）与单文件源。
     fs.cpSync(target.sourceAbs, dest, { recursive: true });
     backedUp.push(target.label);
+  }
+
+  const mode = opts?.mode;
+  if (mode !== undefined) {
+    // 目录链：backupsDir → 日期目录 → 时间目录（含标签父目录与文件）
+    if (mode.dir !== undefined) {
+      chmodIfPresent(paths.backupsDir, mode.dir);
+      chmodIfPresent(path.dirname(backupDir), mode.dir);
+    }
+    applyModes(backupDir, mode);
   }
 
   return { backupDir, backedUp, skipped };

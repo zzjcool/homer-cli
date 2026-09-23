@@ -47,6 +47,15 @@ export interface GitPort {
   hasPushTarget?: (home: string) => boolean;
   /** upstream 短名（`origin/main`）；无 upstream → undefined。 */
   upstreamRef?: (home: string) => string | undefined;
+  /**
+   * 本地 ref 是否可解析（additive，M3 对抗式 review M2）：
+   * `configuredUpstream` 读的是**配置**，本项读的是 ref **是否在本地存在**。
+   * `secret pull` 用它区分「fetch 失败但有本地 remote-tracking ref 可比对」与
+   * 「fetch 失败且无法比对」。
+   */
+  refExists?: (home: string, ref: string) => boolean;
+  /** **配置**里的 upstream 短名（不要求 ref 在本地存在）；无配置 → undefined。 */
+  configuredUpstream?: (home: string) => string | undefined;
   /** `git fetch`（永不 throw，失败 → `{ok:false}`）。 */
   gitFetch?: (home: string) => GitExecResult;
   /** `git push`（永不 throw）。 */
@@ -81,6 +90,8 @@ export function resolveGitPort(port?: GitPort): ResolvedGitPort {
     hasUpstream: port?.hasUpstream ?? gitCore.hasUpstream,
     hasPushTarget: port?.hasPushTarget ?? defaultHasPushTarget,
     upstreamRef: port?.upstreamRef ?? gitCore.upstreamRef,
+    refExists: port?.refExists ?? gitCore.refExists,
+    configuredUpstream: port?.configuredUpstream ?? gitCore.configuredUpstream,
     gitFetch: port?.gitFetch ?? ((home: string) => gitCore.gitFetch(home)),
     gitPush: port?.gitPush ?? ((home: string) => gitCore.gitPush(home)),
     headCommit: port?.headCommit ?? gitCore.headCommit,
