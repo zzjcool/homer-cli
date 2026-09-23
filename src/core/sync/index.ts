@@ -22,6 +22,13 @@ export type {
 export { planPull, checkPushSafety, type PushCheck } from './plan.js';
 
 export {
+  planFirstContact,
+  emptyBaseSnapshots,
+  type FirstContactMode,
+  type FirstContactPlan,
+} from './first-sync.js';
+
+export {
   applyExcludeKeyPlaceholders,
   plantExcludedKeys,
   stripSnapshotExcludeKeys,
