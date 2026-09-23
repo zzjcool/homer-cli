@@ -39,6 +39,17 @@
  *    或处于 TTY 时走真正的逐项 `ui.select`（fallback = `local`，即「保留本地」——冻结语义里
  *    「无 skip，保留本地等价 accept-local」）。
  *
+ * ## 对抗式 review 修复（M2 review，见 docs/m2-report.md §7）
+ *
+ *   - **C1 密钥闸门**：写 store 前复用 push 同款扫描（`prepareStoreSnapshot` → `scanSnapshots` →
+ *     `filterIgnored`）。命中 → `status='error'` exit 1、store 不写入、不 commit、不推远端。
+ *     此时 ff 与 base 前移已发生，warning 如实说明。扫描针对重扫后的 local 快照（写 store 前），
+ *     不经过冲突内容（merge 分类冲突不带 `localContent`/`remoteContent`，W4 安全约定）。
+ *   - **M1 prune**：`applyPullActions` 成功后 `pruneBackups(paths, config.backup?.keep)`（与 pull 同款）。
+ *   - **M4 commit 失败**：`commitStoreIfNeeded` 失败 → `status='error'` exit 1，errors 说明三态
+ *     （工具目录已裁决 / store 已写 / commit 失败，base 已前移），提示修 git 身份后 `homer push`。
+ *   - **M6 push 失败**：维持 resolved / exit 0 + warning（W10 §6 已裁决）；重试路径是 `homer push`。
+ *
  * `--json` 输出（MergeReport）**只含 keyPaths / 路径 / 计数**，绝不含文件内容，故不会把密钥带出去。
  */
 
@@ -46,8 +57,11 @@ import process from 'node:process';
 
 import { loadConfig } from '../../core/config.js';
 import { CliError } from '../../core/errors.js';
+import { isRootUnreadable, scanWarningMessages } from '../../core/scan-guard.js';
 import { resolveHomerPaths, splitLines } from '../render.js';
 import { saveState } from '../../core/state.js';
+import { pruneBackups } from '../../core/backup/backup.js';
+import { filterIgnored, scanSnapshots } from '../../core/secrets/index.js';
 import { writeSnapshotToStore } from '../../core/store/store.js';
 import { scanAdapter } from '../../adapters/pi/index.js';
 import {
@@ -55,6 +69,10 @@ import {
   checkPushSafety,
   collectSyncSources,
   excludedKeysFor,
+  NOT_A_REPO_HINT,
+  NO_UPSTREAM_HINT,
+  NO_UPSTREAM_MESSAGE,
+  notAGitRepoMessage,
   planPull,
   plantExcludedKeys,
   prepareStoreSnapshot,
@@ -284,17 +302,11 @@ export async function runMerge(opts: MergeOptions, deps: MergeDeps = {}): Promis
 /** 冻结前置链：isGitRepo → hasUpstream → requireCleanStore → gitFetch → requireFastForwardable。 */
 function requireMergePreconditions(paths: HomerPaths, deps: MergeDeps, git: ResolvedGitPort): void {
   if (!git.isGitRepo(paths.home)) {
-    throw new CliError(
-      `工作区不是 git 仓库: ${paths.home}`,
-      'merge 需要 git 历史与 upstream；请先运行 `homer push` 建立。',
-    );
+    throw new CliError(notAGitRepoMessage(paths.home), NOT_A_REPO_HINT);
   }
 
   if (!git.hasUpstream(paths.home)) {
-    throw new CliError(
-      '未配置 git upstream，无法确定远端',
-      '请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。',
-    );
+    throw new CliError(NO_UPSTREAM_MESSAGE, NO_UPSTREAM_HINT);
   }
 
   git.requireCleanStore(paths);
@@ -356,68 +368,115 @@ function executeResolutions(input: ExecuteInput): MergeReport {
   const subPlan = buildResolutionPlan(plan, resolutions, config, sources, warnings);
   const applied = applyPullActions(paths, config, subPlan, { command: 'merge' });
 
-  // ---- 重扫 local → 安全校验（base = remote）→ 有 drift 走 push 管线 ----
-  const localAfter = rescanLocal(config, sources.remote, errors);
-  const safety = checkPushSafety(config, sources.remote, localAfter, sources.remote);
+  // 备份保留策略（§2.3 / 对抗式 review M1）：与「写操作」绑定，与 pull 的 `pruneBackups` 同款先例
+  // （pull.ts 在 applyPullActions 之后无条件裁剪）。走到这一步就说明本轮真的应用过，故即使
+  // 本轮无可备份文件（全新增 / 全冲突）也照常裁剪，避免 backups/ 无限增长。
+  pruneBackups(paths, config.backup?.keep);
 
-  let commit: string | undefined;
-  if (safety.status === 'ok' && safety.changedFiles.length > 0) {
-    for (const snapshot of prepareStoreSnapshot(localAfter, config)) {
-      writeSnapshotToStore(paths, snapshot);
-    }
-
-    commit = commitStoreIfNeededForMerge(paths, resolutions, warnings, git);
-    if (commit !== undefined) {
-      if (git.hasUpstream(paths.home)) {
-        const pushed = git.gitPush(paths.home);
-        if (!pushed.ok) {
-          warnings.push(
-            `git push 失败：本地合并提交已生成但未推送到远端（${firstLine(pushed.stderr)}）`,
-          );
-        }
-      }
-      saveMergeState(paths, commit);
-    }
-  } else if (safety.status !== 'ok') {
-    // 防御：base = remote 时不该出现 remote-ahead / conflicts（local 的任何差异都只是 push 方向）。
-    warnings.push(
-      `合并后重扫仍检测到远端未见的变更（${safety.status}），请运行 \`homer status\` 复核`,
-    );
-  }
-
-  return {
+  const resolved = (commit?: string): MergeReport => ({
     ok: true,
     status: 'resolved',
     resolutions: resolutions.map(toReportResolution),
     applied,
-    commit,
+    ...(commit === undefined ? {} : { commit }),
     warnings,
     errors,
-  };
+  });
+  const errored = (): MergeReport => ({
+    ok: false,
+    status: 'error',
+    resolutions: resolutions.map(toReportResolution),
+    applied,
+    warnings,
+    errors,
+  });
+
+  // ---- 重扫 local → 安全校验（base = remote）→ 有 drift 走 push 管线 ----
+  const localAfter = rescanLocal(config, sources.remote, errors);
+  const safety = checkPushSafety(config, sources.remote, localAfter, sources.remote);
+
+  if (safety.status !== 'ok') {
+    // 防御：base = remote 时不该出现 remote-ahead / conflicts（local 的任何差异都只是 push 方向）。
+    warnings.push(
+      `合并后重扫仍检测到远端未见的变更（${safety.status}），请运行 \`homer status\` 复核`,
+    );
+    return resolved();
+  }
+
+  if (safety.changedFiles.length === 0) return resolved();
+
+  // ---- 写 store 前的密钥闸门（对抗式 review C1）：与 push 完全同款 ----
+  // 扫的是**将要写入 store 的字节**（excludeKeys 已换成 `__REQUIRED__` 占位符），再过
+  // `filterIgnored(secrets.ignorePaths)` 豁免。原来这条闸门只在 push 里有，于是「push 被密钥拦下」
+  // 的文件仍能经 `merge --accept-local` 的 push 管线明文入库并推远端 —— 现在 merge 与 push 同门。
+  // 注意：此处不过冲突内容（merge 分类冲突不带 localContent/remoteContent，W4 安全约定），
+  // 扫的是重扫后的 local 快照。
+  const prepared = prepareStoreSnapshot(localAfter, config);
+  const findings = filterIgnored(scanSnapshots(prepared), config.secrets?.ignorePaths);
+  if (findings.length > 0) {
+    errors.push(
+      `合并结果含 ${findings.length} 处疑似密钥，已拒绝写入 store（未产生 commit、未推远端）`,
+    );
+    for (const finding of findings) {
+      errors.push(`${finding.path}:${finding.line} [${finding.patternId}] ${finding.description}`);
+    }
+    errors.push('请移除密钥，或在 homer.json 的 secrets.ignorePaths 中显式豁免该路径，然后重跑 `homer merge`。');
+    if (progress.ffDone) {
+      warnings.push(
+        progress.stateAdvanced
+          ? 'store 已快进到 upstream 且 base 已前进（远端变更已被看见），但合并结果未写入 store；工具目录裁决已生效，请移除密钥后重跑 `homer merge` 或 `homer push` 收敛'
+          : 'store 已快进到 upstream，但合并结果未写入 store；请移除密钥后重跑 `homer merge` 或 `homer push` 收敛',
+      );
+    }
+    return errored();
+  }
+
+  for (const snapshot of prepared) writeSnapshotToStore(paths, snapshot);
+
+  // ---- git commit（对抗式 review M4）：失败必须报 error，不能谎报 resolved ----
+  if (git.isStoreClean(paths.home)) {
+    // 重扫出的 drift 与实际 store 字节一致（保守情况）：交回 warning 而不当成 commit 失败。
+    warnings.push('重扫出的变更与 store 当前内容一致，无需新的提交');
+    return resolved();
+  }
+
+  const commit = git.commitStoreIfNeeded(paths, mergeCommitMessage(resolutions));
+  if (commit === undefined) {
+    // 三态如实说明：工具目录裁决已落盘 / store 已写入 / commit 失败（base 已前移到 upstream）。
+    errors.push(
+      `工具目录裁决已生效且 store 已写入（${paths.storeDir}），但未能生成 git commit（store 工作区仍脏）`,
+    );
+    errors.push(
+      '请检查 git 是否可用与 user.name / user.email 配置（`git -C <home> config user.email`），然后运行 `homer push` 完成提交与推送。',
+    );
+    if (progress.stateAdvanced) {
+      warnings.push('base 已前移到 upstream HEAD（远端变更已被看见），但本次合并提交未成立；请按上方提示处理后重跑 `homer push` 收敛');
+    }
+    return errored();
+  }
+
+  // ---- 推送远端（未配置 upstream → 仅本地 commit）----
+  if (git.hasUpstream(paths.home)) {
+    const pushed = git.gitPush(paths.home);
+    if (!pushed.ok) {
+      // M6（W10 §6 已裁决）：merge 的核心承诺「本地意图一致」已达成（commit + state 前进），
+      // 维持 resolved / exit 0 + warning；重试路径是 `homer push`（M3 已修好本地领先时的复推死锁）。
+      warnings.push(
+        `git push 失败：本地合并提交已生成但未推送到远端（${firstLine(pushed.stderr)}）；远端待重试，请运行 \`homer push\``,
+      );
+      saveMergeState(paths, commit);
+      return resolved(commit);
+    }
+  }
+
+  saveMergeState(paths, commit);
+  return resolved(commit);
 }
 
-/** store 提交（`undefined` 有两种含义，这里显式区分，避免把「本来就干净」误报成失败）。 */
-function commitStoreIfNeededForMerge(
-  paths: HomerPaths,
-  resolutions: readonly Resolution[],
-  warnings: string[],
-  git: ResolvedGitPort,
-): string | undefined {
-  if (git.isStoreClean(paths.home)) {
-    // 重扫出的 drift 与实际 store 字节不一致（保守情况）：交回 warning 而不当成 commit 失败。
-    warnings.push('重扫出的变更与 store 当前内容一致，无需新的提交');
-    return undefined;
-  }
-
+/** merge 提交信息（`git log --oneline` 可读；计数与 resolutions 一致）。 */
+function mergeCommitMessage(resolutions: readonly Resolution[]): string {
   const remote = resolutions.filter((item) => item.choice === REMOTE).length;
-  const message = `homer merge: resolve ${resolutions.length} conflict(s) (remote ${remote}, local ${resolutions.length - remote})`;
-  const commit = git.commitStoreIfNeeded(paths, message);
-  if (commit === undefined) {
-    warnings.push(
-      'store 已更新但未能生成 git commit（检查仓库的 user.name / user.email）；请手动提交或重跑 `homer push`',
-    );
-  }
-  return commit;
+  return `homer merge: resolve ${resolutions.length} conflict(s) (remote ${remote}, local ${resolutions.length - remote})`;
 }
 
 /** state 原子写（base 前进 / 最终 HEAD 两处共用）。 */
@@ -560,6 +619,7 @@ function lookupEntry(
  *
  * 与 `collectSyncSources` 的 local 采集同口径（base.ts 的 collectLocal）：root 不可读
  * （空分类 + 有错）→ `local := remote`（M-A 守卫，防全量假删除），原因记入 `errors`。
+ * 判定与措辞都走 `core/scan-guard.ts` 的唯一实现点（对抗式 review minor 1）。
  */
 function rescanLocal(
   config: HomerConfig,
@@ -572,13 +632,10 @@ function rescanLocal(
     if (adapterConfig.enabled === false) continue;
 
     const outcome = scanAdapter(adapterId, adapterConfig);
-    const rootUnreadable = outcome.snapshot.categories.length === 0 && outcome.errors.length > 0;
-    const prefix = rootUnreadable ? 'adapter root 不可读' : '扫描告警';
-    for (const error of outcome.errors) {
-      errors.push(`${prefix}: ${adapterId} (${error.path}: ${error.message})`);
-    }
+    // root 级失败判定 + 措辞（唯一实现点：core/scan-guard.ts，与 base.ts / render.ts 共用）。
+    errors.push(...scanWarningMessages(adapterId, outcome));
 
-    if (rootUnreadable) {
+    if (isRootUnreadable(outcome)) {
       const fallbackSnapshot = fallback.find((snapshot) => snapshot.adapterId === adapterId);
       if (fallbackSnapshot !== undefined) {
         local.push(fallbackSnapshot);

@@ -16,6 +16,10 @@
  *      `errors` 给一句话结论，逐条 `path:line [pattern] 脱敏摘录` 由 renderPushReport 从 `secrets` 打印
  *   5. `checkPushSafety`：`remote-ahead` → exit 1（提示 `homer pull`）；
  *      `conflicts` → exit 1（提示 `homer merge`）
+ *   5b.（对抗式 review M3）**本地严格领先 upstream** 且 store 与 HEAD 一致时，上一步的
+ *      `remote-ahead` 是 fetch 陈旧导致的假阳性（上次 push 失败留下的「本地 commit 已成立、
+ *      远端还在旧 commit」状态）→ 跳过拦截，用 base 当 remote 重算；若已无新漂移则直接复推。
+ *      这修掉「push → pull → merge 三处互踢、唯一出路手工 git push」的死锁。
  *   6. `changedFiles` 空 → `no-drift` exit 0（**先于**交互确认：无变更不必打扰用户）
  *   7. 非 `--yes` → port.confirm 预览（变更文件数汇总）；拒绝 → `aborted` exit 1
  *   8. `writeSnapshotToStore(prepareStoreSnapshot(local))`（逐 adapter）
@@ -45,6 +49,7 @@ import process from 'node:process';
 
 import { loadConfig } from '../../core/config.js';
 import { CliError } from '../../core/errors.js';
+import { isAncestorOf, gitExec } from '../../core/git/index.js';
 import { filterIgnored, scanSnapshots } from '../../core/secrets/index.js';
 import { loadState, saveState } from '../../core/state.js';
 import { writeSnapshotToStore } from '../../core/store/store.js';
@@ -55,7 +60,7 @@ import type { SyncSources } from '../../core/sync/types.js';
 import type { PromptPort } from '../ui.js';
 import { createDefaultPromptPort } from '../ui.js';
 import { resolveHomerPaths } from '../render.js';
-import { resolveGitPort, type GitPort } from './git-port.js';
+import { resolveGitPort, type GitPort, type ResolvedGitPort } from './git-port.js';
 
 export interface PushOptions { homerHome?: string; json?: boolean; yes?: boolean; noPush?: boolean; }
 export interface PushDeps { ui?: PromptPort; sources?: SyncSources; git?: GitPort; }
@@ -170,7 +175,25 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
   }
 
   // ---- 3. 落盘前的安全判定 -------------------------------------------------
-  const check = checkPushSafety(config, sources.base, sources.local, sources.remote);
+  let check = checkPushSafety(config, sources.base, sources.local, sources.remote);
+
+  // ---- 3b. 本地严格领先 upstream（对抗式 review M3：push 失败后死锁的自救支）----
+  // 上次 `git push` 失败时，本地 commit 已成立、state 已前进到该 HEAD；远端却仍停在旧 commit。
+  // 于是 base = state = 本地 HEAD 而 remote（fetch 到的 @{upstream}）= 旧 commit。
+  // `computeDrift` 会把「远端缺我们刚提交的内容」读成远端的删除 → 假 remote-ahead，
+  // 提示 `homer pull`；而 pull / merge 又因 base 已在本地 HEAD 而报 no-drift / no-conflicts
+  // → 三处互相推诿，唯一出路是手工 `git push`。
+  //
+  // 判据：`@{upstream}` 是 HEAD 的**严格**祖先（不是相等）且 store 工作区与 HEAD 一致。
+  // 此时远端相对 base 的「变更」全是历史倒退，不是本地未见的远端变更；用 base 当 remote 重算，
+  // 恢复「只提交 + 推送本地意图」的常规语义。
+  const localAhead = isLocalStrictlyAheadOfUpstream(paths.home, git);
+  if (check.status === 'remote-ahead' && localAhead) {
+    warnings.push(
+      '本地严格领先 upstream（上次推送未成功），remote-ahead 是 fetch 陈旧导致的假阳性；已跳过拦截，直接重试推送',
+    );
+    check = checkPushSafety(config, sources.base, sources.local, sources.base);
+  }
 
   if (check.status === 'remote-ahead') {
     for (const file of check.remoteAheadFiles) warnings.push(`远端变更: ${fileRef(file)}`);
@@ -205,6 +228,11 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
   //     §3-P4 ①「init → push --yes → origin 有 commit」、§5「state.lastSyncCommit == git rev-parse HEAD」）。
   const needsBaseline = git.headCommit(paths.home) !== undefined && !git.isStoreClean(paths.home);
   if (changedFiles.length === 0 && !needsBaseline) {
+    // 本地领先 but 无新漂移：上一次 commit 已经成立，只差把已有 HEAD 推上去（M3 的复推路径）。
+    if (localAhead && opts.noPush !== true) {
+      const retry = retryRemotePush(paths.home, git, warnings);
+      if (retry !== undefined) return makeReport(retry.status, retry.report);
+    }
     return makeReport('no-drift', { warnings });
   }
   if (changedFiles.length === 0) {
@@ -292,6 +320,62 @@ async function pushPipeline(opts: PushOptions, deps?: PushDeps): Promise<PushRep
 
   report.pushedToRemote = true;
   return report;
+}
+
+/**
+ * `@{upstream}` 是否是 HEAD 的**严格**祖先（本地有尚未推送的 commit，且远端未分叉）。
+ *
+ * 严格：`remote === HEAD` 时返回 false（已同步，不需要复推路径）。
+ * 无 upstream / 无 HEAD / 二者不可比 → false（保守：与改动前行为逐字相同）。
+ */
+function isLocalStrictlyAheadOfUpstream(home: string, git: ResolvedGitPort): boolean {
+  const ref = git.upstreamRef(home);
+  if (ref === undefined) return false;
+
+  const head = git.headCommit(home);
+  if (head === undefined) return false;
+
+  // store 工作区必须与 HEAD 一致，否则 base（store 工作区）不可信，「已提交」的假设不成立。
+  if (!git.isStoreClean(home)) return false;
+
+  // @{upstream} 指向的 SHA 必须与 HEAD 不同，且是 HEAD 的祖先。
+  const resolved = gitExec(home, ['rev-parse', '--verify', `${ref}^{commit}`]);
+  if (!resolved.ok) return false;
+  const upstream = resolved.stdout.trim();
+  if (upstream === '' || upstream === head) return false;
+
+  return isAncestorOf(home, upstream, head);
+}
+
+/**
+ * M3 复推：本地已领先 upstream 但没有新漂移时，把已有 HEAD 直接推上去。
+ * 成功 → `pushed`（pushedToRemote=true）；失败 → `error`（本地提交与 state 保留，与 push 同类失败对齐）。
+ */
+function retryRemotePush(
+  home: string,
+  git: ResolvedGitPort,
+  warnings: string[],
+): { status: 'pushed' | 'error'; report: Partial<PushReport> } | undefined {
+  if (!git.hasPushTarget(home)) return undefined;
+
+  const head = git.headCommit(home);
+  if (head === undefined) return undefined;
+
+  const pushed = git.gitPush(home);
+  if (!pushed.ok) {
+    const reason = pushed.stderr.trim() === '' ? '未知错误' : pushed.stderr.trim();
+    return {
+      status: 'error',
+      report: {
+        commit: head,
+        warnings,
+        errors: [`本地 commit 已成立（${head.slice(0, 7)}），重试推送远端仍失败: ${reason}`],
+      },
+    };
+  }
+
+  warnings.push('本地提交已推送到远端（上次推送失败的补推送）');
+  return { status: 'pushed', report: { commit: head, pushedToRemote: true, warnings } };
 }
 
 /** 冲突项的一句话描述（reason + 冲突键点）。 */

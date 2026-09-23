@@ -371,6 +371,54 @@ describe('e2e M2 ② 密钥拒推：命中 → exit 1 / 报告 path:line / origi
 });
 
 /* ------------------------------------------------------------------ */
+/* ②b 对抗式 review C1：merge 不得绕过密钥闸门（真实的进程级证据）      */
+/* ------------------------------------------------------------------ */
+
+describe('e2e M2 ②b merge 复用密钥闸门：push 被拦的密钥文件不得经 merge 明文入库', () => {
+  it('B 本地植入 sk-ant-* 并制造冲突 → push exit 1；merge --accept-local 也 exit 1，origin 无明文', () => {
+    const { origin, A, B } = setupRepo();
+
+    // A 先改 settings 推送，让 B pull 时产生冲突。
+    writeAgent(A, 'settings.json', `${JSON.stringify({ theme: 'dark', keep: 1 }, null, 2)}\n`);
+    expect(homerJsonOk<{ status: string }>(A, ['push', '--yes', '--json']).status).toBe('pushed');
+
+    // B 把密钥写进 settings（merge 分类，值会进 store）并改为自己的意图 → 保留本地。
+    writeAgent(
+      B,
+      'settings.json',
+      `${JSON.stringify({ theme: 'local', keep: 1, apiKey: FAKE_ANTHROPIC_TOKEN })}\n`,
+    );
+
+    // push 先被拦（闸门本身有效）。
+    const pushResult = homer(B, ['push', '--yes', '--json']);
+    expect(pushResult.code).toBe(1);
+    expect((JSON.parse(pushResult.out) as { status: string }).status).toBe('secrets-rejected');
+
+    // merge --accept-local：修复前会绕过扫描，把密钥明文写进 store 并推到 origin。
+    const mergeResult = homer(B, ['merge', '--accept-local', '--json']);
+    expect(mergeResult.code).toBe(1);
+    const mergeReport = JSON.parse(mergeResult.out) as {
+      status: string;
+      commit?: string;
+      errors: string[];
+    };
+    expect(mergeReport.status).toBe('error');
+    expect(mergeReport.commit).toBeUndefined();
+    expect(mergeReport.errors.join('\n')).toContain('疑似密钥');
+
+    // store 里绝无明文（settings 仍是 push 被拦时的旧值）。
+    const storeSettings = fs.readFileSync(path.join(B.home, 'store/pi/settings/settings.json'), 'utf8');
+    expect(storeSettings).not.toContain(FAKE_ANTHROPIC_TOKEN);
+    // store 工作区干净（未写入密钥字节）。
+    expect(gitTry(B.home, ['status', '--porcelain', '--', 'store/']).out.trim()).toBe('');
+
+    // origin 里绝无该明文（真实 bare 仓库的 git grep）。
+    const originGrep = gitTry(origin, ['grep', '-h', '-e', FAKE_ANTHROPIC_TOKEN, 'HEAD']);
+    expect(originGrep.out).not.toContain(FAKE_ANTHROPIC_TOKEN);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* ③ pull 应用                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -629,6 +677,53 @@ describe('e2e M2 ⑧ retention：构造 10 个日期目录 → 任一写操作�
     expect(remaining).toHaveLength(3);
     expect(remaining.slice(0, 2)).toEqual(['20200104', '20200105']);
     expect(fs.existsSync(path.join(backupsDir, '20200101'))).toBe(false);
+  });
+
+  // 对抗式 review minor 4：组⑧ 原本只验证 pull 路径的 prune；merge 也做备份，但有很长一段时间
+  // 漏掉了 prune（M1）。这里补 merge 路径的 prune 触发断言，使「任一写操作」名副其实。
+  it('merge 路径也触发 prune（备份后保留最近 7 个日期目录）', () => {
+    const { A, B } = setupRepo();
+
+    // A 改 alpha 推送 → B pull 后本地已是 A 版本；再让 A / B 双方改同一文件制造冲突。
+    writeAgent(A, 'skills/alpha/SKILL.md', '# alpha from A\n');
+    expect(homerJsonOk<{ status: string }>(A, ['push', '--yes', '--json']).status).toBe('pushed');
+    // B 先 pull 拿到 A 的版本（不产生备份目录，因为 B 未改 alpha 的旧版）
+    expect(homerJsonOk(B, ['pull', '--yes', '--json']).status).toBe('applied');
+
+    // 构造 10 个历史日期目录（在 pull 之后构造，避免被 pull 的 prune 提前删掉）。
+    const backupsDir = path.join(B.home, 'backups');
+    // 清掉前面 pull 留下的今日备份目录，使 prune 的保留窗口只由本测试构造。
+    if (fs.existsSync(backupsDir)) fs.rmSync(backupsDir, { recursive: true, force: true });
+    const historical = Array.from({ length: 10 }, (_, i) => `202001${String(i + 1).padStart(2, '0')}`);
+    for (const day of historical) {
+      writeAbs(path.join(backupsDir, day, '000000-pull', 'pi/skills/old.md'), `keep ${day}\n`);
+    }
+    expect(fs.readdirSync(backupsDir).sort()).toEqual(historical);
+
+    // A 与 B 同时改同一 mirror 文件 → B pull 冲突；B merge --accept-remote 走备份 → prune。
+    writeAgent(A, 'skills/alpha/SKILL.md', '# alpha A2\n');
+    expect(homerJsonOk<{ status: string }>(A, ['push', '--yes', '--json']).status).toBe('pushed');
+    writeAgent(B, 'skills/alpha/SKILL.md', '# alpha B2\n');
+    expect(homer(B, ['pull', '--yes']).code).toBe(1);
+
+    const merged = homerJsonOk<{ status: string; applied: { backupDir?: string } }>(B, [
+      'merge', '--accept-remote', '--json',
+    ]);
+    expect(merged.status).toBe('resolved');
+    expect(merged.applied.backupDir).toBeDefined();
+    expect(path.basename(merged.applied.backupDir as string)).toMatch(/^\d{6}-merge$/);
+    expect(readAgent(B, 'skills/alpha/SKILL.md')).toBe('# alpha A2\n');
+
+    // prune 到 7：最旧 4 个历史日期目录被删，本次备份的「今天」保留。
+    const remaining = fs.readdirSync(backupsDir).sort();
+    expect(remaining).toHaveLength(7);
+    expect(remaining.slice(0, 6)).toEqual([
+      '20200105', '20200106', '20200107', '20200108', '20200109', '20200110',
+    ]);
+    expect(remaining[6]).toMatch(/^\d{8}$/);
+    for (const removed of ['20200101', '20200102', '20200103', '20200104']) {
+      expect(fs.existsSync(path.join(backupsDir, removed)), `${removed} 应被 merge 的 prune 删掉`).toBe(false);
+    }
   });
 });
 

@@ -42,4 +42,8 @@ export {
   commitStoreIfNeeded,
   requireCleanStore,
   requireFastForwardable,
+  NOT_A_REPO_HINT,
+  NO_UPSTREAM_HINT,
+  NO_UPSTREAM_MESSAGE,
+  notAGitRepoMessage,
 } from './pipeline.js';

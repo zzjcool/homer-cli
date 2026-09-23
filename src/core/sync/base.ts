@@ -31,6 +31,7 @@ import { gitExec, isGitRepo, readStoreSnapshotAtCommit, upstreamRef } from '../g
 import { loadState } from '../state.js';
 import { readSnapshotFromStore } from '../store/store.js';
 import { scanAdapter } from '../../adapters/pi/index.js';
+import { isRootUnreadable, scanWarningMessages } from '../scan-guard.js';
 import type { HomerPaths } from '../paths.js';
 import type { AdapterSnapshot, HomerConfig } from '../types.js';
 import type { SyncSources } from './types.js';
@@ -88,9 +89,8 @@ function collectBase(paths: HomerPaths, config: HomerConfig, warnings: string[])
 /**
  * local 采集：逐 adapter 实时扫描；root 不可读 → 沿用 base 快照（M-A 守卫）。
  *
- * 错误文本与 `homer status` 的 `sourceErrorMessages` **同一格式**（`⚠` 前缀由渲染层加）：
- *   - root 级失败（空分类 + 有错）→ `adapter root 不可读: <id> (<path>: <msg>)`，逐错一条；
- *   - 其余扫描告警 → `扫描告警: <id> (<path>: <msg>)`。
+ * 错误文本由 `core/scan-guard.ts` 统一生成（`adapter root 不可读` / `扫描告警`），
+ * 与 `homer status` 的 `sourceErrorMessages` 同一形状：`<prefix>: <id> (<path>: <msg>)`。
  * 就地实现而非 import `cli/render.js`：`core` 不得反向依赖 `cli`（同 CliError 拆到 core/errors.ts 的理由）。
  */
 function collectLocal(
@@ -105,15 +105,11 @@ function collectLocal(
 
     const outcome = scanAdapter(adapterId, adapterConfig);
 
-    // root 级失败判定（与 cli/render.ts 的 isRootUnreadable 同口径）：
+    // root 级失败判定（唯一实现点：core/scan-guard.ts 的 isRootUnreadable）：
     // 空分类 + 有错 = 整个 root 读不到（不存在 / 不是目录）。
-    const rootUnreadable = outcome.snapshot.categories.length === 0 && outcome.errors.length > 0;
-    const prefix = rootUnreadable ? 'adapter root 不可读' : '扫描告警';
-    for (const error of outcome.errors) {
-      errors.push(`${prefix}: ${adapterId} (${error.path}: ${error.message})`);
-    }
+    errors.push(...scanWarningMessages(adapterId, outcome));
 
-    if (rootUnreadable) {
+    if (isRootUnreadable(outcome)) {
       const baseSnapshot = base.find((snapshot) => snapshot.adapterId === adapterId);
       // base 里必然有该 adapter（两路 base 都严格对齐 config）——防御性兜底：
       // 万一没有，宁可交回空快照也不能凭空造一个（那会变成假 pull-delete，由 errors 提示命令层拦截）。

@@ -23,6 +23,31 @@ import { CliError } from '../errors.js';
 import type { HomerPaths } from '../paths.js';
 import type { AdapterSnapshot, HomerConfig } from '../types.js';
 
+/* ------------------------------------------------------------------ */
+/* 前置检查的共享措辞（对抗式 review 修复 minor 2）                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 前置检查失败时的 `CliError` 文本**唯一来源**。
+ *
+ * 这些句子曾在 `pipeline.ts` / `commands/pull.ts` / `commands/merge.ts` 各写一份，
+ * 任何一处改动都可能让「同一个前置失败」在不同命令里给出不同提示。统一收敛到这里，
+ * 三个调用方（pipeline 的 requireCleanStore / requireFastForwardable、pull、merge）共用。
+ * 纯文本常量，无行为依赖。
+ */
+export const NOT_A_REPO_HINT = '请先运行 `homer push` 建立 git 历史与 remote。';
+
+export const NO_UPSTREAM_HINT =
+  '请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。';
+
+/** `未配置 git upstream，无法确定远端`（三处逐字相同的主消息）。 */
+export const NO_UPSTREAM_MESSAGE = '未配置 git upstream，无法确定远端';
+
+/** `工作区不是 git 仓库: <home>`（带路径，主消息由函数生成，避免拼写漂移）。 */
+export function notAGitRepoMessage(home: string): string {
+  return `工作区不是 git 仓库: ${home}`;
+}
+
 /**
  * 写 store 前的快照准备：把 `excludeKeys` 列出的顶层键值替换为 `__REQUIRED__` 占位符。
  *
@@ -62,10 +87,7 @@ export function commitStoreIfNeeded(paths: HomerPaths, message: string): string 
  */
 export function requireCleanStore(paths: HomerPaths): void {
   if (!isGitRepo(paths.home)) {
-    throw new CliError(
-      `工作区不是 git 仓库: ${paths.home}`,
-      '请先运行 `homer push` 建立 git 历史与 remote。',
-    );
+    throw new CliError(notAGitRepoMessage(paths.home), NOT_A_REPO_HINT);
   }
   if (!isStoreClean(paths.home)) {
     throw new CliError(
@@ -96,18 +118,12 @@ function upstreamCommit(paths: HomerPaths): string | undefined {
  */
 export function requireFastForwardable(paths: HomerPaths): void {
   if (!isGitRepo(paths.home)) {
-    throw new CliError(
-      `工作区不是 git 仓库: ${paths.home}`,
-      '请先运行 `homer push` 建立 git 历史与 remote。',
-    );
+    throw new CliError(notAGitRepoMessage(paths.home), NOT_A_REPO_HINT);
   }
 
   const ref = upstreamRef(paths.home);
   if (ref === undefined) {
-    throw new CliError(
-      '未配置 git upstream，无法确定远端',
-      '请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。',
-    );
+    throw new CliError(NO_UPSTREAM_MESSAGE, NO_UPSTREAM_HINT);
   }
 
   const remote = upstreamCommit(paths);

@@ -45,6 +45,12 @@ import { resolveGitPort, type GitPort } from './git-port.js';
 import { applyPullActions } from '../../core/sync/apply.js';
 import { planPull } from '../../core/sync/plan.js';
 import { collectSyncSources } from '../../core/sync/base.js';
+import {
+  NOT_A_REPO_HINT,
+  NO_UPSTREAM_HINT,
+  NO_UPSTREAM_MESSAGE,
+  notAGitRepoMessage,
+} from '../../core/sync/pipeline.js';
 import type {
   ApplyResult,
   PullAction,
@@ -112,10 +118,8 @@ function emptyApplyResult(): ApplyResult {
   return { written: [], deleted: [], conflicts: [] };
 }
 
-/** 若上游 `home` 不是 git 仓库根的提示（与 pipeline 的措辞保持一致）。 */
-const NOT_A_REPO_HINT = '请先运行 `homer push` 建立 git 历史与 remote。';
-const NO_UPSTREAM_HINT =
-  '请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。';
+// 前置检查的提示文本从 `core/sync/pipeline.ts` 取同一份（对抗式 review minor 2：
+// 这些句子曾在 pipeline / pull / merge 各写一份，任何一处改动都会让同一前置失败提示不一致）。
 
 function isConflict(action: PullAction): action is PullConflictAction {
   return action.type === 'conflict';
@@ -258,10 +262,10 @@ export async function runPull(opts: PullOptions, deps?: PullDeps): Promise<PullR
 
   // ---- 前置检查（§2.8 冻结顺序：全部先于任何写操作）----
   if (!git.isGitRepo(paths.home)) {
-    throw new CliError(`工作区不是 git 仓库: ${paths.home}`, NOT_A_REPO_HINT);
+    throw new CliError(notAGitRepoMessage(paths.home), NOT_A_REPO_HINT);
   }
   if (!git.hasUpstream(paths.home)) {
-    throw new CliError('未配置 git upstream，无法确定远端', NO_UPSTREAM_HINT);
+    throw new CliError(NO_UPSTREAM_MESSAGE, NO_UPSTREAM_HINT);
   }
   git.requireCleanStore(paths);
 

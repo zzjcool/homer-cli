@@ -33,6 +33,20 @@ homer diff    # 文本级差异（merge 键级 / mirror 行级，⚡ 冲突标�
 - 密钥扫描 ≥10 类 API key/token 正则，push 前强制扫描；`homer.json` 的 `secrets.ignorePaths` 可精确豁免
 - state.json / backups/ 由 `~/.homer/.gitignore` 排除，不入库
 
+#### 密钥扫描口径（冻结的保守口径，已知边界）
+
+扫描的是**将要写入 store 的字节**（`excludeKeys` 已换成 `__REQUIRED__` 占位符之后），命中即拒推（exit 1）。
+`homer merge` 的写 store 路径与 push 共用同一道闸门（不会绕过）。两条刻意的边界：
+
+- **未引号的赋值不在拦截范围**：兜底的通用 `KEY=value` 风格只拦截**带引号**的值
+  （`api_key: "..."` / `secret='...'`）。`API_KEY=abc...` 这类不带引号的写法不命中，
+  因为无引号版本在 shell / YAML / Markdown 里的误报率过高（会把普通句子当成密钥）。
+  带具体前缀的 12 类 pattern（`sk-ant-` / `ghp_` / `AKIA` / `AIza` …）不受此限制，仍会命中。
+- **同行多密钥先命中先报**：每行按 pattern 顺序匹配，**首个命中即报告并停止该行**。
+  因此一行里同时写 `sk-ant-...` 与 `ghp_...` 只报第一个；其余密钥的移除由下次重扫（改完再 push）兜底。
+
+两者都是**冻结的保守口径**（宁可漏报也不误报普通文本），M2 不改正则；若需更强覆盖，M3 的 `secret` 子命令会提供显式扫描入口。
+
 ### M1 已实现
 
 ```bash

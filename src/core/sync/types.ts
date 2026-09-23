@@ -32,10 +32,20 @@ export interface ApplyResult {
 
 /* ---- 三方原料 ---- */
 
+/**
+ * base 的来源（`'git'` = 来自 git 历史里的 `lastSyncCommit`；`'store'` = 回落 store 工作区）。
+ *
+ * **M2 仅填充不消费，消费归 M3**（对抗式 review rev-simplicity major）：三个描述性字段
+ * `mode` / `baseCommit` / `remoteRef` 目前只在 `collectSyncSources` 里被写入、被测试断言，
+ * 命令层没有任何分支依赖它们。M2 保留它们是为了让 `homer status --json` 的消费者与 M3 的
+ * `doctor` / `--offline` 有现成的诊断面（降级判定已经在 base.ts 里真实发生）。M3 再做消费者，
+ * 不在此刻提前加无用的分支。
+ */
 export type SyncBaseMode = 'git' | 'store';
 export interface SyncSources {
-  mode: SyncBaseMode;
+  mode: SyncBaseMode;      // M2 仅填充不消费（诊断面），消费归 M3
   base: AdapterSnapshot[]; local: AdapterSnapshot[]; remote: AdapterSnapshot[];
-  baseCommit?: string; remoteRef?: string;    // mode='git' 时填
+  baseCommit?: string;     // mode='git' 时填；M2 仅填充不消费（诊断面），消费归 M3
+  remoteRef?: string;      // 仅填充不消费（诊断面），消费归 M3
   warnings: string[]; errors: string[];
 }

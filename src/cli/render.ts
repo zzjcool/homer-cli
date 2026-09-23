@@ -13,6 +13,7 @@
 
 import { getHomerPaths, type HomerPaths } from '../core/paths.js';
 import { CliError } from '../core/errors.js';
+import { isRootUnreadable, scanErrorPrefix } from '../core/scan-guard.js';
 import { stripExcludeKeys } from '../core/engine/index.js';
 import { gitExec, isGitRepo, isStoreClean, readStoreSnapshotAtCommit, upstreamRef } from '../core/git/index.js';
 import { readSnapshotFromStore } from '../core/store/store.js';
@@ -79,22 +80,15 @@ export function formatScanError(error: ScanError): string {
 /**
  * 采集错误 → 报告层字符串（`errors: string[]`，StatusReport / InitReport 的 additive 字段）。
  * 措辞区分根级失败（root 不可读）与其它扫描告警，避免对「root 明明可读」的场景误报。
+ * 前缀文案由 `core/scan-guard.ts` 统一提供（与 base.ts / merge.ts 同一份）。
  */
 export function sourceErrorMessages(errors: SnapshotSourceErrors): string[] {
   return errors.flatMap((entry) =>
     entry.errors.map((error) => {
-      const prefix = entry.rootUnreadable ? 'adapter root 不可读' : '扫描告警';
+      const prefix = scanErrorPrefix(entry.rootUnreadable);
       return `${prefix}: ${entry.adapterId} (${formatScanError(error)})`;
     }),
   );
-}
-
-/**
- * root 级失败判定：扫描结果空分类 + 有错 → 整个 root 不可读（不存在 / 不是目录）。
- * 用于 status 抑制「local 视作全空」造成的假 push。
- */
-function isRootUnreadable(outcome: { snapshot: AdapterSnapshot; errors: ScanError[] }): boolean {
-  return outcome.snapshot.categories.length === 0 && outcome.errors.length > 0;
 }
 
 /** 把单个 adapter 的 ScanOutcome 转为采集错误条目（无错时返回 undefined）。 */

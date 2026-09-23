@@ -11,11 +11,14 @@
  *   3. **merge 完成后**：`plantExcludedKeys` 把 local 原文件中的 excluded 键值植回 merged ——
  *      本地密钥永不被远端覆盖；local 缺该键 → 不植回（命令层据此记 warning「缺失必填项」）。
  *
- * 纯函数、零 fs。依赖面刻意收窄为 `types.ts`（纯类型）+ engine 的 `stripExcludeKeys`：
- * 连 `entry-kind.ts` 也不 import（`isJsonObject` 就地实现），保证 W4 只碰 plan §3-P1-W4 授权的依赖。
+ * 纯函数、零 fs。依赖面：`types.js`（纯类型）+ engine 的 `stripExcludeKeys` + `core/entry-kind.ts` 的
+ * `isPlainObject`（对抗式 review minor 3：`isJsonObject` 曾在 entry-kind 与本文件各写一份，
+ * 二者一旦漂移，「判定用的对象」与「剥离掉的键」就会不同源；此处改为共享实现 + 旧名别名，
+ * 既有消费者（plan.ts / merge.ts）无需改动）。
  */
 
 import { stripExcludeKeys } from '../engine/index.js';
+import { isPlainObject } from '../entry-kind.js';
 import type { AdapterSnapshot, CategorySnapshot, HomerConfig, SnapshotEntry, SnapshotFiles } from '../types.js';
 
 /** excludeKeys 占位符字面量（DESIGN §2.2：参考 legout/pi-config 的 `__REQUIRED__` 方案）。 */
@@ -28,12 +31,11 @@ export function serializeJsonContent(value: unknown): string {
 
 /**
  * 非 null、非数组的对象（JSON 对象语义）。
- * 与 `core/entry-kind.ts` 的 `isPlainObject` 同义；此处就地实现是为了不扩大 W4 的依赖面
- * （plan §3-P1-W4 限定「只 import types / engine / sync-types」）。
+ *
+ * 唯一实现点是 `core/entry-kind.ts` 的 `isPlainObject`；本名保留为别名（既有 import 无需改动），
+ * 不再就地重写一份（对抗式 review minor 3：复制回潮）。
  */
-export function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+export const isJsonObject: (value: unknown) => value is Record<string, unknown> = isPlainObject;
 
 /** 可被 `JSON.parse` 接受的文本 → 值；失败 → `undefined`。 */
 export function parseJsonContent(content: string): unknown {

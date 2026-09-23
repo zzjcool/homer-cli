@@ -240,7 +240,146 @@ W9 报告 §5 列了 5 条，任务点名三条，逐条给裁决建议（附本
 
 ---
 
-## 7. 未决问题
+## 7. 对抗式 review 修复记录（M2 review 综合修复）
+
+M2 Done 后按 AGENTS.md 起了三路 fresh-context 对抗 review（正确性/回归 `rev-correctness`、
+测试覆盖 `rev-tests`、简洁性 `rev-simplicity`）。本节逐条记录修复项、裁定与回归证据。
+**不改任何冻结接口签名**（新增导出与 `GitPort` 可选成员为 additive）；
+全部改动在 `pi-subagent/m2-review-fixes` 分支，基线 master `079e394`（723 tests 绿）。
+
+### 7.1 CRITICAL
+
+#### C1 · merge 的 push 管线绕过密钥扫描（`rev-correctness` PoC 已实证）
+
+**问题**：`merge.ts` 的 `executeResolutions` 写 store 前没有 `scanSnapshots`。于是
+「`homer push` 因密钥被拦下的文件」仍可经 `homer merge --accept-local` 的 push 管线**明文入库并推远端**。
+
+**修复**：写 store 前复用 push 同款闸门 `prepareStoreSnapshot` → `scanSnapshots` → `filterIgnored`；
+命中 → `status='error'`、exit 1、store 不写入、不 commit、不推远端。此时 ff 与 base 前移**已发生**，
+warning 如实说明（「store 已快进到 upstream 且 base 已前进……但合并结果未写入 store」）。
+扫描针对**重扫后的 local 快照**（写 store 前），不经过冲突内容——merge 分类冲突不带
+`localContent`/`remoteContent`（W4 安全约定），闸门不依赖它。
+`--json` 只输出 `path:line [patternId] 描述`，不含摘录，密钥不进 `--json`。
+
+**回归**：
+- 单测 `tests/cli/merge.test.ts` §G「C1」：mirror 文件含 `sk-ant-*` → push 被拦（证明闸门有效）→
+  merge `--accept-local` 也 exit 1、store 未写、HEAD 未动、**bare `git grep` 无明文**；
+  同一场景去掉密钥仍 `resolved`（证明不是无差别拦截）。
+- e2e `tests/e2e/m2.test.ts` §②b：真实子进程 `homer push` exit 1 → `homer merge --accept-local`
+  exit 1、`status=error`、`commit` 缺失、store 无明文、`git status --porcelain -- store/` 干净、
+  bare `git grep` 无明文。
+- 变异验证：`if (false && findings.length > 0)` → 两条用例均红。
+
+### 7.2 MAJOR
+
+#### M1 · merge 不 prune 备份（两个 reviewer 独立发现）
+
+**修复**：`applyPullActions` 成功后补 `pruneBackups(paths, config.backup?.keep)`（`pull.ts:342` 同位先例）。
+放在 apply 之后、重扫之前，与「本轮真的应用过」绑定；即使本轮无可备份文件也照常裁剪。
+
+**回归**：`merge.test.ts` §G「M1」两例（`keep=3` 剩 3、默认 `keep=7` 剩 7）；
+**e2e 组⑧补 merge 路径断言**（minor 4）——构造 10 个历史日期目录后冲突 → `merge --accept-remote` →
+备份目录含 `-merge` 且 prune 至 7。变异（注释掉 `pruneBackups`）→ 两条都红。
+
+#### M2 · merge push 管线 gitPush 覆盖盲区
+
+**修复**：无代码改动（原实现已调 `gitPush`），补断言杀掉「gitPush 静默跳过」变异。
+
+**回归**：`merge.test.ts` 成功路径加 `gitOk(h.bare, ['rev-parse', 'main']) === report.commit`。
+变异（把 `git.gitPush` 换成假成功）→ 该断言红。
+
+#### M3 · push 远端失败后死锁（`rev-correctness` PoC 已实证）
+
+**问题**：上次 `git push` 失败后，本地 commit 已成立、state 已前进到本地 HEAD，远端仍停在旧 commit。
+于是 `base = state = 本地 HEAD` 而 `remote = fetch 到的旧 @{upstream}`，`computeDrift` 把「远端缺我们刚提交的内容」
+读成远端变更 → **假 `remote-ahead`**（提示 `homer pull`）；而 pull / merge 又因 base 已在本地 HEAD 而报
+`no-drift` / `no-conflicts` → 三处互相推踢，**唯一出路是手工 `git push`**。
+
+**修复**：在 `checkPushSafety` 结果上叠加「**本地严格领先 upstream**」分支——
+`@{upstream}` 是 HEAD 的严格祖先（不等）且 `isStoreClean`（store 工作区与 HEAD 一致）时：
+1. `remote-ahead` 判为 fetch 陈旧的假阳性 → 用 `base` 当 `remote` 重算 `checkPushSafety`；
+2. 若重算后无新漂移（`changedFiles` 空）→ 直接 `gitPush` 复推（`retryRemotePush`）。
+修复集中在 `push.ts`，不改 `GitPort` / `PushDeps` 形状（只新增内部辅助函数）。
+
+**回归**：`push.test.ts` §5「M3」三例——
+1. 首次 push 注入失败 → 二次 push（完全真实路径）**直接复推成功**、bare HEAD 前进、
+   warning 含「本地严格领先 upstream」；变异（`localAhead = false`）→ 该用例红；
+2. `--no-push` 下维持 `no-drift` 不推送；
+3. **真 `remote-ahead`（本地未领先）仍被拦住**（证明不是无差别放行）。
+另外 `merge.test.ts` §G「死锁闭环（M3+M6）」：merge 推送失败 → 按 warning 跑 `homer push` → 直接复推成功。
+
+#### M4 · merge 的 store commit 失败误报 resolved
+
+**问题**：`commitStoreIfNeededForMerge` 失败只进 warning，报告仍 `resolved` / exit 0 → 用户以为已同步。
+
+**修复**：commit 失败 → `status='error'` exit 1；`errors` 说明三态（**工具目录裁决已生效 / store 已写入 /
+commit 失败，base 已前移到 upstream HEAD**），提示检查 git 身份后 `homer push`；与 push 同类失败对齐。
+
+**回归**：`merge.test.ts` §G「M4」两例——
+1. 注入 `commitStoreIfNeeded: () => undefined`（store 写入真 fs、提交拿不到 SHA）→ `status=error`、
+   `commit` 缺失、`errors` 含「store 已写入 / commit / homer push / user.name」、warning 含「base 已前移」、
+   工具目录裁决确实生效、store 工作区确实脏；
+2. CLI 级真实身份缺失（`--unset user.email/name` + 隔离 `GIT_CONFIG_GLOBAL/SYSTEM`）→ exit 1。
+变异（恢复旧的「warning + resolved」）→ 两例均红。
+
+#### M5 · `SyncSources.mode` 等三字段零消费者（`rev-simplicity` major）
+
+**修复**：最小修法——`types.ts` 的 `mode` / `baseCommit` / `remoteRef` 字段注释标注
+「**M2 仅填充不消费，消费归 M3**」，并说明保留理由（诊断面：`status --json` 消费者 / M3 `doctor` / `--offline`）。
+**不**新增消费者，不动形状（冻结）。
+
+#### M6 · merge push 失败语义
+
+**裁定（维持 W10 §6 已裁决）**：**维持 `resolved` / exit 0 + warning**。
+理由：merge 的核心承诺是「本地意图一致」（`local == 意图真相`），push 失败时该承诺已达成
+（本地 commit 成立 + state 前进）；exit 1 会让脚本误以为 merge 失败而重跑（幂等 no-conflicts，反而掩盖真因）。
+warning 现在明确指向重试路径 `homer push`；而 M3 修复后「本地领先」状态下的 `homer push` 能直接复推,
+不再死锁。
+
+**回归**：`merge.test.ts` §G「M6」（注入 `gitPush` 失败 → `resolved` / warning 含 `homer push` /
+本地 commit 与 state 成立）+ §G「死锁闭环」（merge 失败 → `homer push` 复推成功）。
+
+### 7.3 MINOR
+
+| # | 问题 | 修复 | 回归 |
+|---|---|---|---|
+| 1 | root 回落守卫公式三份拷贝（`render.ts` / `base.ts` / `merge.ts`） | 新增 **`src/core/scan-guard.ts`**（`isRootUnreadable` + `scanErrorPrefix` + `scanProblemMessage` + `scanWarningMessages`），三处改 import；core 不依赖 cli（与 `core/errors.ts` 同因） | `tests/cli/review-minors.test.ts`：判定真值表 + 措辞 + **三处均不得就地重写公式**（源码断言）+ 均 import `scan-guard.js` |
+| 2 | `CliError` 前置消息文本分叉（`pipeline` / `pull` / `merge` 各一份） | 常量提升到 `core/sync/pipeline.ts`：`NOT_A_REPO_HINT` / `NO_UPSTREAM_MESSAGE` / `NO_UPSTREAM_HINT` / `notAGitRepoMessage(home)`，经 `core/sync/index.ts` 转出；pull / merge / pipeline 共用 | `review-minors.test.ts`：常量值快照 + **pull / merge 源码不得再内联提示句** |
+| 3 | `isJsonObject` 复制回潮（`excluded-keys.ts` 就地重写） | `excluded-keys.ts` 改 `import { isPlainObject } from '../entry-kind.js'`，`isJsonObject` 保留为**别名**（既有 import 零改动） | `review-minors.test.ts`：`isJsonObject === isPlainObject`（同引用）+ 语义快照 + 源码不得含 `!Array.isArray` |
+| 4 | e2e 组⑧措辞与触发偏差（只测 pull 路径） | 补 merge 路径 prune 触发断言（与 M1 合并处理） | `tests/e2e/m2.test.ts` §⑧ 新增「merge 路径也触发 prune」 |
+| 5 | README 密钥扫描口径未说明 | README 新增「密钥扫描口径（冻结的保守口径，已知边界）」段：**未引号赋值（`KEY=value`）不在拦截范围**、**同行多密钥先命中先报**，并注明 M2 不改正则 | `tests/cli/readme-secrets.test.ts`：把 README 的两条自称口径拿真实 `scanContent` **重放**（文档 → 行为单向绑定） |
+
+### 7.4 搁置（不修，记为已知限制）
+
+- **TOCTOU 窗口**（结构性；`pull` 已如实处理：检查均先于任何写操作）。
+- **write 备份顺序等价变异**（内容断言已杀掉非等价变异，剩下的是行为等价变异）。
+- **canonical JSON**（计划 Non-goals；见 §5-5）。
+- **`mode` 等字段的消费者**（M5 裁定的 M3 范围）。
+
+### 7.5 验证输出（原样）
+
+```
+$ npm run typecheck
+> homer-cli@0.0.0 typecheck
+> tsc --noEmit
+（无输出 = 通过）
+
+$ npm test
+> vitest run
+
+ Test Files  37 passed (37)
+      Tests  750 passed (750)
+   Start at  05:47:52
+   Duration  24.73s (tests 69%, transform 25%, import 6%)
+```
+
+基线 723 → **750**（+27）。新增测试文件 2 个（`tests/cli/review-minors.test.ts` 10 例、
+`tests/cli/readme-secrets.test.ts` 4 例），`merge.test.ts` +8（20 → 28）、`push.test.ts` +3（21 → 24）、
+`e2e/m2.test.ts` +2（13 → 15）。其余 32 个既有测试文件断言零改动。
+
+---
+
+## 8. 未决问题
 
 1. **无法自动创建 MR/PR**：环境无 `gh` / `glab` / `hub`，只有 `git`（SSH remote 可用）。
    分支已 push，GitHub 回显创建入口：

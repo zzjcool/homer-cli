@@ -682,9 +682,106 @@ describe('homer push（CLI 分发）：退出码与 --json', () => {
   });
 });
 
+/* ------------------------------------------------------------------
+/* 5. 对抗式 review M3：推送失败后的死锁自救（本地严格领先 upstream）      */
+/* ------------------------------------------------------------------ */
+
+describe('runPush：M3 本地领先 upstream → 跳过假 remote-ahead 并复推', () => {
+  it('推送失败后二次 push 直接复推成功（不再被 fit 陈旧的 remote-ahead 拦住）', async () => {
+    const root = path.join(mkTmp('agent'), 'agent');
+    const h = makeHome({ root, git: true, upstream: true });
+    seedStore(h, { commit: true });
+    seedAgentRoot(h);
+    const seedHead = gitOk(h.home, ['rev-parse', 'HEAD']).trim();
+
+    // 本地改一个文件（产生真实漂移）
+    write(path.join(root, 'settings.json'), `${JSON.stringify({ theme: 'dark', keep: 1 }, null, 2)}\n`);
+
+    // 第一次 push：注入「git push 失败」（store + commit + state 仍真实前进）
+    const first = await runPush(
+      { homerHome: h.home, yes: true },
+      { git: { gitPush: () => ({ ok: false, stdout: '', stderr: 'simulated push failure' }) } },
+    );
+    expect(first.status).toBe('error');
+    expect(first.pushedToRemote).toBe(false);
+
+    const headAfterFirst = gitOk(h.home, ['rev-parse', 'HEAD']).trim();
+    expect(headAfterFirst).not.toBe(seedHead);
+    // 远端没拿到新 commit（本地严格领先）
+    expect(gitOk(h.bare as string, ['rev-parse', 'HEAD']).trim()).toBe(seedHead);
+
+    // 第二次 push（不注入）：完全真实的采集 + git 端口。
+    // 修复前：base = state.lastSyncCommit = 本地新 HEAD，remote = 旧 @{upstream}，
+    // computeDrift 把「远端缺我们刚提交的内容」读成远端变更 → 假 remote-ahead → exit 1，
+    // 而 pull / merge 又都是 no-drift / no-conflicts → 三处互踢，唯一出路是手工 git push。
+    // 修复后：本地严格领先 → 跳过拦截、直接复推。
+    const second = await runPush({ homerHome: h.home, yes: true });
+
+    expect(second.status).toBe('pushed');
+    expect(second.pushedToRemote).toBe(true);
+    expect(second.commit).toBe(headAfterFirst);
+    // 远端现在真的拿到了那个 commit
+    expect(gitOk(h.bare as string, ['rev-parse', 'HEAD']).trim()).toBe(headAfterFirst);
+    // 诊断性 warning 让「为什么能过」可被机器 / 人读出来
+    expect(second.warnings.join(' ')).toContain('本地严格领先 upstream');
+  });
+
+  it('本地领先但 --no-push：维持 no-drift（不推送）', async () => {
+    const root = path.join(mkTmp('agent'), 'agent');
+    const h = makeHome({ root, git: true, upstream: true });
+    seedStore(h, { commit: true });
+    seedAgentRoot(h);
+    write(path.join(root, 'settings.json'), `${JSON.stringify({ theme: 'dark', keep: 1 }, null, 2)}\n`);
+
+    // 第一次 push：--no-push（本地 commit 成立、远端不动）
+    const first = await runPush({ homerHome: h.home, yes: true, noPush: true }, {});
+    expect(first.status).toBe('pushed');
+    expect(first.pushedToRemote).toBe(false);
+    const headAfterFirst = gitOk(h.home, ['rev-parse', 'HEAD']).trim();
+    expect(gitOk(h.bare as string, ['rev-parse', 'HEAD']).trim()).not.toBe(headAfterFirst);
+
+    // 第二次 push 仍带 --no-push：不推远端
+    const second = await runPush({ homerHome: h.home, yes: true, noPush: true });
+    expect(second.status).toBe('no-drift');
+    expect(second.pushedToRemote).toBe(false);
+    expect(gitOk(h.bare as string, ['rev-parse', 'HEAD']).trim()).not.toBe(headAfterFirst);
+  });
+
+  it('真 remote-ahead（本地未领先）仍被拦住（不是无差别放行）', async () => {
+    const root = path.join(mkTmp('agent'), 'agent');
+    const h = makeHome({ root, git: true, upstream: true });
+    seedStore(h, { commit: true });
+    seedAgentRoot(h);
+    const seedHead = gitOk(h.home, ['rev-parse', 'HEAD']).trim();
+
+    // 另一个 clone 往 bare 推一个新 commit（远端前进，本地未动）
+    const other = path.join(mkTmp('other'), 'clone');
+    gitOk(path.dirname(other), ['clone', h.bare as string, other]);
+    gitOk(other, ['config', 'user.email', 'homer-push@example.invalid']);
+    gitOk(other, ['config', 'user.name', 'Other']);
+    writeStore(other, 'pi/settings/settings.json', `${JSON.stringify({ theme: 'remote', keep: 1 }, null, 2)}\n`);
+    gitOk(other, ['add', '-A']);
+    gitOk(other, ['commit', '-m', 'remote advance']);
+    gitOk(other, ['push']);
+
+    // 本地未改任何东西 → 真 remote-ahead（HEAD 仍在 seed，未领先）
+    const report = await runPush({ homerHome: h.home, yes: true });
+    expect(report.status).toBe('remote-ahead');
+    expect(report.pushedToRemote).toBe(false);
+    expect(report.errors.join(' ')).toContain('homer pull');
+    // 本地 HEAD 未被推动
+    expect(gitOk(h.home, ['rev-parse', 'HEAD']).trim()).toBe(seedHead);
+  });
+});
+
 /* ------------------------------------------------------------------ */
 /* 小工具                                                              */
 /* ------------------------------------------------------------------ */
+
+/** 把文件写进临时仓库的 store 目录（目录不存在时先创建）。 */
+function writeStore(home: string, rel: string, content: string): void {
+  write(path.join(home, 'store', rel), content);
+}
 
 /** 构造「带 secret 的 JSON 原文」条目（kind='json'，内容就是给定的原始文本）。 */
 function rawJson(content: string): SnapshotEntry {

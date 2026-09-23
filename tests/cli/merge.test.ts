@@ -26,6 +26,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runMerge, renderMergeReport, type MergeReport } from '../../src/cli/commands/merge.js';
+import { runPush } from '../../src/cli/commands/push.js';
 import { run } from '../../src/cli/index.js';
 import { gitExec, isAncestorOf } from '../../src/core/git/index.js';
 import { getHomerPaths, type HomerPaths } from '../../src/core/paths.js';
@@ -101,6 +102,8 @@ interface HarnessOptions {
   local: Record<string, string>;
   /** 额外 category（如带 excludeKeys 的 models）配置。 */
   extraCategories?: Record<string, unknown>;
+  /** `backup.keep`（M1 回归：merge 写操作后 prune）。 */
+  backupKeep?: number;
   /** 不建 upstream（测前置检查）。 */
   noUpstream?: boolean;
   /** 不建 git 仓库（测前置检查）。 */
@@ -139,6 +142,7 @@ function makeHarness(opts: HarnessOptions): Harness {
   fs.mkdirSync(agentRoot, { recursive: true });
 
   const config = buildConfig(agentRoot, opts.extraCategories ?? {});
+  if (opts.backupKeep !== undefined) config.backup = { keep: opts.backupKeep };
   write(path.join(home, 'homer.json'), `${JSON.stringify(config, null, 2)}\n`);
   writeStoreFiles(home, opts.seed);
   writeToolFiles(agentRoot, opts.local);
@@ -444,6 +448,10 @@ describe('merge — --accept-local 批量裁决', () => {
     expect(commit).not.toBe(h.remoteCommit);
     expect(isAncestorOf(h.paths.home, h.remoteCommit, commit)).toBe(true);
     expect(gitOk(h.paths.home, ['rev-parse', 'HEAD']).trim()).toBe(commit);
+
+    // M2 回归：merge 的 push 管线真的把合并提交推到了远端
+    // （杀掉「gitPush 静默跳过」变异：只断言本地 commit 无法区分「推了」与「没推」）。
+    expect(gitOk(h.bare, ['rev-parse', 'main']).trim()).toBe(commit);
 
     // store 里现在记录的是本地版本的意图真相
     expect(fs.readFileSync(path.join(h.paths.storeDir, 'pi', 'skills', 'foo', 'SKILL.md'), 'utf8')).toBe('# foo local\n');
@@ -995,5 +1003,367 @@ describe('merge — CLI 集成（--json / 退出码 / 前置检查）', () => {
     const cli = await runCli(['merge', '--home', h.paths.home, '--accept-remote']);
     expect(cli.code).toBe(1);
     expect(cli.stderr).toContain('分叉');
+  });
+});
+
+/* ================================================================== */
+/* G. 对抗式 review 修复：C1 merge 密钥闸门 / M1 prune / M4 commit 失败 */
+/* ================================================================== */
+
+describe('merge — C1：push 管线复用密钥扫描闸门（不得绕过）', () => {
+  /** 与 e2e 同款分段拼装的假 token（源码里不出现完整字面量）。 */
+  const FAKE_TOKEN = ['sk', '-ant-', 'api03', '-', 'merge', '-', 'notareal', 'token', '-', '0123456789'].join('');
+
+  /**
+   * PoC（rev-correctness 已实证）：mirror 文件里含 sk-ant-* → push 被拦 →
+   * merge --accept-local 走同一条 push 管线却**没有**扫描 → 明文入库并推远端。
+   * 修复后 merge 必须在写 store 前过同一闸门：exit 1、store 不写入、不 commit、不推远端。
+   */
+  it('镜像文件含密钥：push 被拦；merge --accept-local 同样被拦（store 不写、远端无明文）', async () => {
+    const secretContent = `# config\nkey: ${FAKE_TOKEN}\n`;
+
+    const h = makeHarness({
+      seed: {
+        'pi/settings/settings.json': '{"theme":"base"}\n',
+        'pi/skills/foo/SKILL.md': '# foo base\n',
+      },
+      remote: {
+        'pi/settings/settings.json': '{"theme":"remote"}\n',
+        'pi/skills/foo/SKILL.md': '# foo remote\n',
+      },
+      local: {
+        'settings.json': '{"theme":"local"}\n',
+        'skills/foo/SKILL.md': secretContent,
+      },
+    });
+
+    // 前置：同一份密钥确实会被 push 拦住（proves 闸门本身有效，而不是「什么都能过」）。
+    const pushReport = await runPush(
+      { homerHome: h.paths.home, yes: true },
+      {
+        sources: sourcesOf(
+          { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+          { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': secretContent } },
+          { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+        ),
+      },
+    );
+    expect(pushReport.status).toBe('secrets-rejected');
+
+    const headBefore = gitOk(h.paths.home, ['rev-parse', 'HEAD']).trim();
+
+    // merge --accept-local：冲突（mirror foo）保留本地 + clean 动作（settings）落盘。
+    const report = await runMerge({ homerHome: h.paths.home, acceptLocal: true }, {
+      sources: sourcesOf(
+        { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+        { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': secretContent } },
+        { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+      ),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.status).toBe('error');
+    expect(report.commit).toBeUndefined();
+    expect(report.errors.join(' ')).toContain('疑似密钥');
+    // 报告里给的是 path:line + patternId + 描述（不打印摘录 → --json 不泄露密钥）
+    expect(report.errors.join(' ')).toContain('pi/skills/foo/SKILL.md:2');
+    expect(report.errors.join(' ')).toContain('[anthropic-api-key]');
+    expect(report.errors.join(' ')).not.toContain(FAKE_TOKEN);
+    // ff / base 前移已发生 → 如实告警
+    expect(report.warnings.join(' ')).toContain('base 已前进');
+
+    // ff 已发生（store 对齐远端）但没有新 commit：HEAD 仍停在 upstream HEAD。
+    expect(gitOk(h.paths.home, ['rev-parse', 'HEAD']).trim()).toBe(h.remoteCommit);
+    expect(gitOk(h.paths.home, ['rev-parse', 'HEAD']).trim()).not.toBe(headBefore);
+    // store 未被写入本次合并结果：foo 的 store 内容仍是远端的旧值（密钥绝未入库）。
+    const storeFoo = fs.readFileSync(path.join(h.paths.storeDir, 'pi/skills/foo/SKILL.md'), 'utf8');
+    expect(storeFoo).toBe('# foo remote\n');
+    expect(storeFoo).not.toContain(FAKE_TOKEN);
+    // store 工作区干净（无未提交的密钥字节残留）。
+    expect(gitOk(h.paths.home, ['status', '--porcelain', '--', 'store/']).trim()).toBe('');
+
+    // 远端 bare 里绝无该明文。
+    const bareGrep = gitExec(h.bare, ['grep', '-h', '-e', FAKE_TOKEN, 'HEAD']);
+    // 无命中时 git grep 以非零退出（ok=false，stdout 为空）—— 这正是「远端无明文」的证据。
+    expect(bareGrep.stdout.trim()).toBe('');
+    expect(bareGrep.stdout).not.toContain(FAKE_TOKEN);
+  });
+
+  it('无密钥的同类场景仍照常 resolved（闸门不是无差别拦截）', async () => {
+    const h = makeHarness({
+      seed: {
+        'pi/settings/settings.json': '{"theme":"base"}\n',
+        'pi/skills/foo/SKILL.md': '# foo base\n',
+      },
+      remote: {
+        'pi/settings/settings.json': '{"theme":"remote"}\n',
+        'pi/skills/foo/SKILL.md': '# foo remote\n',
+      },
+      local: {
+        'settings.json': '{"theme":"local"}\n',
+        'skills/foo/SKILL.md': '# foo local\n',
+      },
+    });
+
+    const report = await runMerge({ homerHome: h.paths.home, acceptLocal: true }, {
+      sources: sourcesOf(
+        { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+        { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': '# foo local\n' } },
+        { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+      ),
+    });
+
+    expect(report.status).toBe('resolved');
+    expect(report.commit).toBeDefined();
+  });
+});
+
+describe('merge — M1：写操作后 prune 备份', () => {
+  it('merge 备份后按日期保留最近 N 个目录（与 pull 同款先例）', async () => {
+    const h = makeHarness({
+      seed: {
+        'pi/settings/settings.json': '{"theme":"base"}\n',
+        'pi/skills/foo/SKILL.md': '# foo base\n',
+      },
+      remote: {
+        'pi/settings/settings.json': '{"theme":"remote"}\n',
+        'pi/skills/foo/SKILL.md': '# foo remote\n',
+      },
+      local: {
+        'settings.json': '{"theme":"local"}\n',
+        'skills/foo/SKILL.md': '# foo local\n',
+      },
+      backupKeep: 3,
+    });
+
+    // 构造 5 个历史日期目录（远早于今天，不与本轮备份的日期冲突）。
+    const historical = ['20200101', '20200102', '20200103', '20200104', '20200105'];
+    for (const day of historical) {
+      write(path.join(h.paths.backupsDir, day, '000000-pull', 'pi/skills/old.md'), `keep ${day}\n`);
+    }
+    expect(fs.readdirSync(h.paths.backupsDir).sort()).toEqual(historical);
+
+    const report = await runMerge({ homerHome: h.paths.home, acceptRemote: true }, {
+      sources: sourcesOf(
+        { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+        { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': '# foo local\n' } },
+        { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+      ),
+    });
+
+    // 本轮确实做了备份（accept-remote 覆盖了两个文件）。
+    expect(report.status).toBe('resolved');
+    expect(report.applied.backupDir).toBeDefined();
+    expect(path.basename(report.applied.backupDir as string)).toMatch(/^\d{6}-merge$/);
+
+    // keep=3 → 今天 + 最近两个历史日期（20200104 / 20200105）保留；最旧三个被删。
+    const remaining = fs.readdirSync(h.paths.backupsDir).sort();
+    expect(remaining).toHaveLength(3);
+    expect(remaining.slice(0, 2)).toEqual(['20200104', '20200105']);
+    expect(remaining[2]).toMatch(/^\d{8}$/);
+    for (const removed of ['20200101', '20200102', '20200103']) {
+      expect(fs.existsSync(path.join(h.paths.backupsDir, removed)), `${removed} 应被 prune`).toBe(false);
+    }
+  });
+
+  it('默认 keep=7：10 个历史日期目录 → merge 后剩 7', async () => {
+    const h = makeHarness({
+      seed: { 'pi/skills/foo/SKILL.md': '# foo base\n' },
+      remote: { 'pi/skills/foo/SKILL.md': '# foo remote\n' },
+      local: { 'skills/foo/SKILL.md': '# foo local\n' },
+    });
+
+    const historical = Array.from({ length: 10 }, (_, i) => `202001${String(i + 1).padStart(2, '0')}`);
+    for (const day of historical) {
+      write(path.join(h.paths.backupsDir, day, '000000-pull', 'pi/skills/old.md'), `keep ${day}\n`);
+    }
+
+    const report = await runMerge({ homerHome: h.paths.home, acceptRemote: true }, {
+      sources: sourcesOf(
+        { skills: { 'foo/SKILL.md': '# foo base\n' } },
+        { skills: { 'foo/SKILL.md': '# foo local\n' } },
+        { skills: { 'foo/SKILL.md': '# foo remote\n' } },
+      ),
+    });
+
+    expect(report.status).toBe('resolved');
+    const remaining = fs.readdirSync(h.paths.backupsDir).sort();
+    expect(remaining).toHaveLength(7);
+    expect(remaining.slice(0, 6)).toEqual([
+      '20200105', '20200106', '20200107', '20200108', '20200109', '20200110',
+    ]);
+    expect(remaining[6]).toMatch(/^\d{8}$/);
+    for (const removed of ['20200101', '20200102', '20200103', '20200104']) {
+      expect(fs.existsSync(path.join(h.paths.backupsDir, removed))).toBe(false);
+    }
+  });
+});
+
+describe('merge — M4：store commit 失败必须报 error（不得误报 resolved）', () => {
+  const SRC = sourcesOf(
+    { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+    { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': '# foo local\n' } },
+    { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+  );
+
+  function m4Harness(): Harness {
+    return makeHarness({
+      seed: {
+        'pi/settings/settings.json': '{"theme":"base"}\n',
+        'pi/skills/foo/SKILL.md': '# foo base\n',
+      },
+      remote: {
+        'pi/settings/settings.json': '{"theme":"remote"}\n',
+        'pi/skills/foo/SKILL.md': '# foo remote\n',
+      },
+      local: {
+        'settings.json': '{"theme":"local"}\n',
+        'skills/foo/SKILL.md': '# foo local\n',
+      },
+    });
+  }
+
+  it('commitStoreIfNeeded 返回 undefined（= commit 失败）→ status=error，errors 说明三态', async () => {
+    const h = m4Harness();
+
+    // 注入 git 端口模拟「commit 失败」：store 写入是真 fs（工作区因此变脏），但提交拿不到 SHA。
+    const report = await runMerge(
+      { homerHome: h.paths.home, acceptLocal: true },
+      { sources: SRC, git: { commitStoreIfNeeded: () => undefined } },
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.status).toBe('error');
+    expect(report.commit).toBeUndefined();
+
+    const errs = report.errors.join(' ');
+    // 三态如实说明：工具目录已裁决 / store 已写入 / commit 失败（base 已前移）
+    expect(errs).toContain('store 已写入');
+    expect(errs).toContain('commit');
+    expect(errs).toContain('homer push');
+    expect(errs).toContain('user.name');
+    // 不能谎报成功：没有任何 push 失败 warning 式的「resolved」措辞
+    expect(report.warnings.join(' ')).toContain('base 已前移');
+
+    // 工具目录裁决确实生效（写入不会被回滚），store 工作区确实脏（无从提交）。
+    expect(readTool(h.agentRoot, 'settings.json')).toBe('{"theme":"local"}\n');
+    expect(gitOk(h.paths.home, ['status', '--porcelain', '--', 'store/']).trim()).not.toBe('');
+  });
+
+  it('真实 git 身份缺失（CLI 级）→ exit 1，提示修 user.name / user.email', async () => {
+    const h = m4Harness();
+
+    // 挟掉「所有身份来源」：仓库级 + 全局 / 系统 gitconfig + GIT_AUTHOR_* 环境变量。
+    gitOk(h.paths.home, ['config', '--unset', 'user.email']);
+    gitOk(h.paths.home, ['config', '--unset', 'user.name']);
+    const saved: Record<string, string | undefined> = {};
+    const vars = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'];
+    for (const name of vars) {
+      saved[name] = process.env[name];
+      delete process.env[name];
+    }
+    // 指向不存在的全局 / 系统配置（进程内 gitExec 继承本进程 env）。
+    process.env['GIT_CONFIG_GLOBAL'] = path.join(h.tmp, 'no-such-global-config');
+    process.env['GIT_CONFIG_SYSTEM'] = path.join(h.tmp, 'no-such-system-config');
+
+    try {
+      const cli = await runCli(['merge', '--home', h.paths.home, '--accept-local']);
+      expect(cli.code).toBe(1);
+      expect(cli.stdout).toContain('error');
+      expect(cli.stdout).toContain('store 已写入');
+      expect(cli.stdout).toContain('user.name');
+    } finally {
+      for (const name of vars) {
+        const value = saved[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+});
+
+describe('merge — M6：push 失败语义（本地意图已达成 → resolved + warning，远端待重试）', () => {
+  it('git push 失败 → status=resolved（exit 0）+ warning 指向 homer push；本地 commit 与 state 成立', async () => {
+    const h = makeHarness({
+      seed: {
+        'pi/settings/settings.json': '{"theme":"base"}\n',
+        'pi/skills/foo/SKILL.md': '# foo base\n',
+      },
+      remote: {
+        'pi/settings/settings.json': '{"theme":"remote"}\n',
+        'pi/skills/foo/SKILL.md': '# foo remote\n',
+      },
+      local: {
+        'settings.json': '{"theme":"local"}\n',
+        'skills/foo/SKILL.md': '# foo local\n',
+      },
+    });
+
+    // 注入只让 `git push` 失败的端口（fetch / ff / commit 都走真实实现）——
+    // 比删远端目录更精准：删远端会让前置的 `git fetch` 先失败，根本走不到 push 阶段。
+    const report = await runMerge({ homerHome: h.paths.home, acceptLocal: true }, {
+      sources: sourcesOf(
+        { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+        { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': '# foo local\n' } },
+        { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+      ),
+      git: { gitPush: () => ({ ok: false, stdout: '', stderr: 'remote rejected' }) },
+    });
+
+    // W10 §6 已裁决的语义：merge 的核心承诺「本地意图一致」已达成（commit + state 前进），
+    // 远端待重试 → 维持 resolved / exit 0 + warning。
+    expect(report.status).toBe('resolved');
+    expect(report.ok).toBe(true);
+    expect(report.commit).toBeDefined();
+    expect(report.warnings.join(' ')).toContain('git push 失败');
+    expect(report.warnings.join(' ')).toContain('homer push');
+
+    // 本地 commit 与 state 成立
+    const head = gitOk(h.paths.home, ['rev-parse', 'HEAD']).trim();
+    expect(head).toBe(report.commit);
+    expect(loadState(h.paths).lastSyncCommit).toBe(head);
+  });
+
+  it('死锁闭环（M3+M6）：merge 推送失败 → 提示 homer push → homer push 直接复推成功', async () => {
+    const h = makeHarness({
+      seed: {
+        'pi/settings/settings.json': '{"theme":"base"}\n',
+        'pi/skills/foo/SKILL.md': '# foo base\n',
+      },
+      remote: {
+        'pi/settings/settings.json': '{"theme":"remote"}\n',
+        'pi/skills/foo/SKILL.md': '# foo remote\n',
+      },
+      local: {
+        'settings.json': '{"theme":"local"}\n',
+        'skills/foo/SKILL.md': '# foo local\n',
+      },
+    });
+
+    const pushTarget = gitOk(h.bare, ['rev-parse', 'main']).trim();
+
+    // merge：裁决发生、本地 commit 成立，但推送远端失败（注入）。
+    const merged = await runMerge({ homerHome: h.paths.home, acceptLocal: true }, {
+      sources: sourcesOf(
+        { settings: '{"theme":"base"}\n', skills: { 'foo/SKILL.md': '# foo base\n' } },
+        { settings: '{"theme":"local"}\n', skills: { 'foo/SKILL.md': '# foo local\n' } },
+        { settings: '{"theme":"remote"}\n', skills: { 'foo/SKILL.md': '# foo remote\n' } },
+      ),
+      git: { gitPush: () => ({ ok: false, stdout: '', stderr: 'simulated push failure' }) },
+    });
+    expect(merged.status).toBe('resolved');
+    expect(merged.warnings.join(' ')).toContain('homer push');
+    const mergeHead = merged.commit as string;
+    expect(mergeHead).toBeDefined();
+    expect(gitOk(h.bare, ['rev-parse', 'main']).trim()).toBe(pushTarget); // 远端未前进
+
+    // 用户按提示跑 `homer push`（不注入：真采集 + 真 git）：
+    // 修复前 base = state = 本地 HEAD、remote = fetch 到的旧 commit → 假 remote-ahead，
+    // 而 pull / merge 都是 no-drift / no-conflicts → 三处互踢。修复后 M3 直接复推。
+    const pushed = await runPush({ homerHome: h.paths.home, yes: true });
+    expect(pushed.status).toBe('pushed');
+    expect(pushed.pushedToRemote).toBe(true);
+    expect(pushed.commit).toBe(mergeHead);
+    expect(gitOk(h.bare, ['rev-parse', 'main']).trim()).toBe(mergeHead);
   });
 });
