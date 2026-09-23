@@ -248,7 +248,7 @@ describe('W1 · AgeCryptoPort roundtrip', () => {
 
     const ciphertext = await cryptoPort.encrypt(plaintext, [identity.recipient]);
     expect(await cryptoPort.decrypt(ciphertext, identity)).toEqual(plaintext);
-  });
+  }, 30_000); // 1 MiB 流式加解密在本机 ~5s：默认 5000ms 在并行负载下会擦边超时（显式放宽）
 
   it('密文是 age 二进制格式（非 armor）：不含 armor 头、不含明文', async () => {
     const cryptoPort = createAgeCryptoPort();

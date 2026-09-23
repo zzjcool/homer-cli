@@ -196,7 +196,8 @@ function setupRepo(opts: { seedB?: boolean; machineConfig?: MachineConfigOverrid
   git(path.dirname(A.home), ['clone', origin, A.home]);
   git(A.home, ['config', 'user.email', 'homer-e2e@example.invalid']);
   git(A.home, ['config', 'user.name', 'Homer E2E']);
-  homerJsonOk(A, ['init', '--json']);
+  // `--adapters pi`：M2 的 store 断言以 pi 为基准；三 adapter 默认注册见 tests/e2e/m3.test.ts。
+  homerJsonOk(A, ['init', '--json', '--adapters', 'pi']);
 
   if (opts.machineConfig?.extraConfig !== undefined) {
     const configFile = path.join(A.home, 'homer.json');
