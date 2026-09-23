@@ -80,7 +80,7 @@ $ git diff src/core/types.ts     # 仅 additive（附 §4 全文）
 `age-encryption` 依赖冒烟（本机 Node v22.23.1，为验证依赖可用性而跑，非测试夹具）：
 
 ```
-identity = AGE-SECRET-KEY-19WJMMZ92DNEPCVR2P4W63SEK0Y4CF4SQN78F0CTQQXFKMVQD45JQE2V9GT
+identity = AGE-SECRET-KEY-1...（临时生成，完整值已脱敏——冒烟后即弃，从未用于真实 vault）
 recipient = age10nv7c3jw5nuqh7rclyvpwyl07sjkjtw99699dpuyhqmd7fj2nglq87lsy9
 ciphertext len = 211,  header = age-encryption.org/v1 -> X25519
 plaintext = hello homer          # roundtrip OK
