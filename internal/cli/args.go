@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// Command is a top-level homer command. The command set is deliberately small
-// in P0; later waves add behavior behind the same dispatch points.
+// Command is a top-level homer command.  The complete command list stays in
+// this package so the dispatcher and help text cannot silently drift apart.
 type Command string
 
 const (
@@ -39,8 +39,9 @@ var COMMANDS = []Command{
 // Commands is the idiomatic alias for callers that prefer Go naming.
 var Commands = COMMANDS
 
-// ParsedArgs separates the command word from its arguments. It intentionally
-// does not parse flags; each command owns its flag contract in later waves.
+// ParsedArgs separates the command word from its arguments.  Flag parsing is
+// performed after this split so a command can reject every flag it does not
+// own, matching node:util parseArgs({ strict: true }) in the TS CLI.
 type ParsedArgs struct {
 	Command Command
 	Rest    []string
@@ -87,10 +88,8 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   -h, --help    显示本帮助
 
 退出码:
-  0  成功（包括 help；后续实现中信息性漂移也不视为错误）
+  0  成功（包括 help；漂移是信息而不是错误）
   1  用法错误或命令失败
-
-当前状态: P0 脚手架命令尚未实现
 
 示例:
   homer init
@@ -104,9 +103,9 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   homer secret keygen
 `
 
-// CommandOptions is the common, intentionally permissive P0 flag shape. The
-// values are parsed now so that later waves can replace only the command body,
-// not the command-line contract.
+// CommandOptions is the shared parsed flag shape.  parseOptions accepts the
+// union of known command flags, then validateCommandOptions enforces each
+// command's strict allow-list.
 type CommandOptions struct {
 	Home         string
 	JSON         bool
@@ -155,9 +154,9 @@ func takeOptionValue(args []string, index *int, name string, inline string, hasI
 	if *index+1 >= len(args) {
 		return "", usageArgumentError(fmt.Sprintf("选项 %s 缺少值", name))
 	}
-	*index++
+	*index = *index + 1
 	value := args[*index]
-	if value == "" {
+	if value == "" || isFlag(value) {
 		return "", usageArgumentError(fmt.Sprintf("选项 %s 需要一个值", name))
 	}
 	return value, nil
@@ -172,9 +171,9 @@ func appendAdapters(options *CommandOptions, value string) {
 	}
 }
 
-// parseOptions validates the P0 command flag surface. It is deliberately
-// private: command implementations in later waves can add typed parsers while
-// preserving Run's stable entry point.
+// parseOptions implements the strict, command-local flag surface used by Run.
+// Long options accept both `--name value` and `--name=value`; booleans reject
+// inline values, and unknown options are errors rather than positionals.
 func parseOptions(command Command, args []string, allowPositionals bool) (CommandOptions, error) {
 	var options CommandOptions
 	for index := 0; index < len(args); index++ {
@@ -279,13 +278,25 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 
 func commandUsage(command Command) string {
 	switch command {
+	case CommandInit:
+		return "用法: homer init [options]\n\n扫描 adapter，生成 homer.json + store 快照。\n\n选项: --home <dir> --adapters <ids> --force --json -h, --help"
+	case CommandStatus:
+		return "用法: homer status [options]\n\n显示本地 / store / git remote 漂移概览。\n\n选项: --home <dir> --json --verbose, -v -h, --help"
+	case CommandDiff:
+		return "用法: homer diff [options]\n\n显示键级与行级差异。\n\n选项: --home <dir> --adapter <id> --category <name> -h, --help"
+	case CommandPush:
+		return "用法: homer push [options]\n\n选项: --home <dir> --json --yes --no-push -h, --help"
+	case CommandPull:
+		return "用法: homer pull [options]\n\n选项: --home <dir> --json --yes -h, --help"
+	case CommandMerge:
+		return "用法: homer merge [options]\n\n选项: --home <dir> --json --accept-local --accept-remote -h, --help"
 	case CommandHome:
 		return "用法: homer home <repo-url> [options]\n\n首次对接模式: --mode pull|merge|skip；--yes 默认 merge。\n\n选项: --home <dir> --mode <mode> --yes --json -h, --help"
 	case CommandDoctor:
-		return "用法: homer doctor [options]\n\n八项体检（P0 占位）。\n\n选项: --home <dir> --offline --json -h, --help"
+		return "用法: homer doctor [options]\n\n八项体检。\n\n选项: --home <dir> --offline --json -h, --help"
 	case CommandSecret:
 		return "用法: homer secret <keygen|push|pull|list> [options]\n\n选项: --home <dir> --yes --no-push --json -h, --help"
 	default:
-		return fmt.Sprintf("用法: homer %s [options]\n\n当前命令尚未实现。\n\n选项: --home <dir> --json -h, --help", command)
+		return fmt.Sprintf("用法: homer %s [options]", command)
 	}
 }
