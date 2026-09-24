@@ -663,7 +663,7 @@ func secretIgnorePaths(config *core.HomerConfig) []string {
 
 func pushCommitMessage(changedCount int) string {
 	if changedCount == 0 {
-		return "homer push: 建立同步基线（store 首次入库）"
+		return "homer push: 建立同步基线（store + homer.json）"
 	}
 	return fmt.Sprintf("homer push: 同步 %d 个变更文件", changedCount)
 }
