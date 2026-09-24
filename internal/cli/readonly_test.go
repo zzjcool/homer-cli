@@ -435,3 +435,19 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestRunStripsArbitraryExecutableName guards the real-world dispatch path:
+// installed binaries may be renamed (homer_linux_amd64, homer-bin, ...), so
+// argv[0] must be stripped by "not a known command", never by matching a
+// fixed binary name. (Regression for the v1 smoke bug.)
+func TestRunStripsArbitraryExecutableName(t *testing.T) {
+	// "init" as argv[0] with a real command after it must still dispatch.
+	code := Run([]string{"/usr/local/bin/homer_linux_amd64", "--help"})
+	if code != 0 {
+		t.Fatalf("help via renamed binary: exit=%d", code)
+	}
+	// A fully stripped argv still works (package tests use this form).
+	if code := Run([]string{"--help"}); code != 0 {
+		t.Fatalf("help via stripped argv: exit=%d", code)
+	}
+}

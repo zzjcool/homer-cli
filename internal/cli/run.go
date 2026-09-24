@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -192,11 +191,26 @@ func withoutExecutable(args []string) []string {
 	if len(args) == 0 {
 		return nil
 	}
-	base := filepath.Base(args[0])
-	if base == "homer" || base == "homer.exe" {
+	// The executable name never equals a known command; strip argv[0] based on
+	// that instead of matching a fixed binary name (installed binaries may be
+	// renamed, e.g. homer_linux_amd64 or homer-bin).
+	if !isKnownCommand(args[0]) {
 		return args[1:]
 	}
+
 	return args
+}
+
+func isKnownCommand(arg string) bool {
+	if arg == "-h" || arg == "--help" {
+		return true
+	}
+	for _, cmd := range COMMANDS {
+		if string(cmd) == arg {
+			return true
+		}
+	}
+	return false
 }
 
 func writeLine(writer io.Writer, text string) {
