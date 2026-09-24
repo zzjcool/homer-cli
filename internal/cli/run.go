@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/core"
 )
 
 // Run is the stable process entry point used by cmd/homer. args is normally
@@ -59,11 +63,61 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		}
 	}
 
-	// P0 deliberately has no side effects outside argument validation. Later
-	// waves replace this one line with the real command implementation while
-	// preserving dispatch, usage, and exit-code behavior.
-	writeLine(errOut, fmt.Sprintf("homer %s: 尚未实现", parsed.Command))
-	return 1
+	switch parsed.Command {
+	case CommandInit:
+		report, err := commands.RunInit(commands.InitOptions{
+			HomerHome: options.Home,
+			Adapters:  options.Adapters,
+			JSON:      options.JSON,
+		}, commands.InitRunOptions{Force: options.Force})
+		if err != nil {
+			return commandError(parsed.Command, err, errOut)
+		}
+		if options.JSON {
+			writeLine(out, RenderInitJSON(report))
+		} else {
+			writeLine(out, RenderInit(report))
+		}
+		return 0
+
+	case CommandStatus:
+		report, err := commands.RunStatus(commands.StatusOptions{
+			HomerHome: options.Home,
+			JSON:      options.JSON,
+			Verbose:   options.Verbose,
+		})
+		if err != nil {
+			return commandError(parsed.Command, err, errOut)
+		}
+		if options.JSON {
+			writeLine(out, RenderStatusJSON(report))
+		} else {
+			writeLine(out, RenderStatus(report, RenderStatusOptions{Verbose: options.Verbose}))
+		}
+		// Drift is information, not a failing process status.
+		return 0
+
+	case CommandDiff:
+		text, err := commands.RunDiff(commands.DiffOptions{
+			HomerHome: options.Home,
+			Adapter:   options.Adapter,
+			Category:  options.Category,
+		})
+		if err != nil {
+			return commandError(parsed.Command, err, errOut)
+		}
+		if text != "" {
+			writeLine(out, text)
+		}
+		return 0
+
+	default:
+		// Write-path commands belong to the later wave.  Their option surface is
+		// nevertheless parsed and validated here, so unknown flags fail strictly
+		// and accepted P0 invocations do not accidentally perform writes.
+		writeLine(errOut, fmt.Sprintf("homer %s: 尚未实现", parsed.Command))
+		return 1
+	}
 }
 
 func withoutExecutable(args []string) []string {
@@ -96,51 +150,118 @@ func usageError(command Command, message string, out, errOut io.Writer) int {
 	writeLine(errOut, fmt.Sprintf("homer %s: %s", command, message))
 	writeLine(errOut, "")
 	writeLine(errOut, commandUsage(command))
-	_ = out // kept in the signature so future command usage can select a stream
+	_ = out // kept in the signature so usage can later choose a stream
 	return 1
 }
 
-func validateCommandOptions(command Command, options CommandOptions) error {
-	unsupported := func(flag string) error {
-		return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 %s", command, flag))
+func commandError(command Command, err error, errOut io.Writer) int {
+	if err == nil {
+		return 0
 	}
+	var cliErr core.CliError
+	if errors.As(err, &cliErr) {
+		writeLine(errOut, cliErr.Error())
+		return cliErr.ExitCode()
+	}
+	writeLine(errOut, fmt.Sprintf("homer %s: %s", command, err.Error()))
+	return 1
+}
 
+func unsupportedOptions(command Command, options CommandOptions, names ...string) error {
+	for _, name := range names {
+		switch name {
+		case "yes":
+			if options.Yes {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --yes", command))
+			}
+		case "no-push":
+			if options.NoPush {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --no-push", command))
+			}
+		case "accept-local":
+			if options.AcceptLocal {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --accept-local", command))
+			}
+		case "accept-remote":
+			if options.AcceptRemote {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --accept-remote", command))
+			}
+		case "offline":
+			if options.Offline {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --offline", command))
+			}
+		case "verbose":
+			if options.Verbose {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --verbose", command))
+			}
+		case "force":
+			if options.Force {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --force", command))
+			}
+		case "adapters":
+			if len(options.Adapters) > 0 {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --adapters", command))
+			}
+		case "adapter":
+			if options.Adapter != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --adapter", command))
+			}
+		case "category":
+			if options.Category != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --category", command))
+			}
+		case "mode":
+			if options.Mode != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --mode", command))
+			}
+		}
+	}
+	return nil
+}
+
+func validateCommandOptions(command Command, options CommandOptions) error {
 	switch command {
 	case CommandInit:
-		if options.Yes || options.NoPush || options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-			return unsupported("该选项")
-		}
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "adapter", "category", "mode")
 	case CommandStatus:
-		if options.Yes || options.NoPush || options.AcceptLocal || options.AcceptRemote || options.Offline || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-			return unsupported("该选项")
-		}
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "force", "adapters", "adapter", "category", "mode")
 	case CommandDiff:
-		if options.Yes || options.NoPush || options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Mode != "" {
-			return unsupported("该选项")
+		// TS diff intentionally has no --json flag; keep strict command-local
+		// parsing even though status/init expose machine-readable reports.
+		if options.JSON {
+			return usageArgumentError("命令 diff 不支持选项 --json")
 		}
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "mode")
 	case CommandPush:
-		if options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-			return unsupported("该选项")
-		}
+		return unsupportedOptions(command, options, "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category", "mode")
 	case CommandPull:
-		if options.NoPush || options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-			return unsupported("该选项")
-		}
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category", "mode")
 	case CommandMerge:
-		if options.Yes || options.NoPush || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-			return unsupported("该选项")
+		if options.Yes {
+			return usageArgumentError("命令 merge 不支持选项 --yes")
+		}
+		if options.NoPush {
+			return usageArgumentError("命令 merge 不支持选项 --no-push")
+		}
+		if options.Offline {
+			return usageArgumentError("命令 merge 不支持选项 --offline")
+		}
+		if options.Verbose {
+			return usageArgumentError("命令 merge 不支持选项 --verbose")
+		}
+		if options.Force {
+			return usageArgumentError("命令 merge 不支持选项 --force")
+		}
+		if len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
+			return usageArgumentError("命令 merge 不支持该选项")
 		}
 		if options.AcceptLocal && options.AcceptRemote {
 			return usageArgumentError("--accept-local 与 --accept-remote 不能同时使用")
 		}
 	case CommandHome:
-		if options.NoPush || options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" {
-			return unsupported("该选项")
-		}
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category")
 	case CommandDoctor:
-		if options.Yes || options.NoPush || options.AcceptLocal || options.AcceptRemote || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-			return unsupported("该选项")
-		}
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "verbose", "force", "adapters", "adapter", "category", "mode")
 	default:
 		return usageArgumentError(fmt.Sprintf("未知命令: %s", command))
 	}
@@ -181,24 +302,17 @@ func runSecret(args []string, out, errOut io.Writer) int {
 }
 
 func validateSecretOptions(subcommand string, options CommandOptions) error {
-	unsupported := func(flag string) error {
-		return usageArgumentError(fmt.Sprintf("secret %s 不支持选项 %s", subcommand, flag))
-	}
 	if options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
-		return unsupported("该选项")
+		return usageArgumentError(fmt.Sprintf("secret %s 不支持该选项", subcommand))
 	}
 	switch subcommand {
 	case "keygen", "list":
 		if options.Yes || options.NoPush {
-			return unsupported("该选项")
-		}
-	case "push":
-		if options.Yes && options.NoPush {
-			return usageArgumentError("secret push: --yes 与 --no-push 可以同时使用，但此处仅为占位")
+			return usageArgumentError(fmt.Sprintf("secret %s 不支持 --yes / --no-push", subcommand))
 		}
 	case "pull":
 		if options.NoPush {
-			return unsupported("--no-push")
+			return usageArgumentError("secret pull 不支持选项 --no-push")
 		}
 	}
 	return nil
