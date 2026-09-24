@@ -9,6 +9,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
+	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
 
 // Run is the stable process entry point used by cmd/homer. args is normally
@@ -111,10 +112,77 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		}
 		return 0
 
+	case CommandPush:
+		report := commands.RunPush(commands.PushOptions{
+			HomerHome: options.Home,
+			JSON:      options.JSON,
+			Yes:       options.Yes,
+			NoPush:    options.NoPush,
+		}, nil)
+		if options.JSON {
+			writeLine(out, commands.RenderPushJSON(report))
+		} else {
+			writeLine(out, commands.RenderPushReport(report))
+		}
+		return report.ExitCode()
+
+	case CommandPull:
+		report := commands.RunPull(commands.PullOptions{
+			HomerHome: options.Home,
+			JSON:      options.JSON,
+			Yes:       options.Yes,
+		}, nil)
+		if options.JSON {
+			writeLine(out, commands.RenderPullJSON(report))
+		} else {
+			writeLine(out, commands.RenderPullReport(report))
+		}
+		return report.ExitCode()
+
+	case CommandMerge:
+		report := commands.RunMerge(commands.MergeOptions{
+			HomerHome:    options.Home,
+			JSON:         options.JSON,
+			AcceptLocal:  options.AcceptLocal,
+			AcceptRemote: options.AcceptRemote,
+		}, nil)
+		if options.JSON {
+			writeLine(out, commands.RenderMergeJSON(report))
+		} else {
+			writeLine(out, commands.RenderMergeReport(report))
+		}
+		return report.ExitCode()
+
+	case CommandHome:
+		mode := commands.HomeOptions{HomerHome: options.Home, JSON: options.JSON, Yes: options.Yes, RepoURL: options.Positionals[0]}
+		if options.Mode != "" {
+			mode.Mode = syncx.FirstContactMode(options.Mode)
+		}
+		report := commands.RunHome(mode, nil)
+		if options.JSON {
+			writeLine(out, commands.RenderHomeJSON(report))
+		} else {
+			writeLine(out, commands.RenderHomeReport(report))
+		}
+		return report.ExitCode()
+
+	case CommandDoctor:
+		if options.JSON {
+			return commands.ExecuteDoctor(commands.DoctorOptions{
+				HomerHome: options.Home,
+				JSON:      true,
+				Offline:   options.Offline,
+			}, nil, out)
+		}
+		report := commands.RunDoctor(commands.DoctorOptions{
+			HomerHome: options.Home,
+			JSON:      false,
+			Offline:   options.Offline,
+		}, nil)
+		writeLine(out, commands.RenderDoctorReport(report))
+		return report.ExitCode()
+
 	default:
-		// Write-path commands belong to the later wave.  Their option surface is
-		// nevertheless parsed and validated here, so unknown flags fail strictly
-		// and accepted P0 invocations do not accidentally perform writes.
 		writeLine(errOut, fmt.Sprintf("homer %s: 尚未实现", parsed.Command))
 		return 1
 	}
@@ -297,8 +365,12 @@ func runSecret(args []string, out, errOut io.Writer) int {
 		return usageError(CommandSecret, validationErr.Error(), out, errOut)
 	}
 
-	writeLine(errOut, fmt.Sprintf("homer secret %s: 尚未实现", subcommand))
-	return 1
+	return commands.ExecuteSecret(subcommand, commands.SecretCommandOptions{
+		HomerHome: options.Home,
+		JSON:      options.JSON,
+		Yes:       options.Yes,
+		NoPush:    options.NoPush,
+	}, nil, out, errOut)
 }
 
 func validateSecretOptions(subcommand string, options CommandOptions) error {
