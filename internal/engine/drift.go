@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
@@ -34,7 +35,7 @@ func StripExcludeKeys(snapshot AdapterSnapshot, excludeKeysByCategory map[string
 			copyEntry := entry
 			if len(keys) != 0 && entry.Kind == "json" {
 				if value, ok := parseEntry(&entry); ok {
-					copyEntry.Content = string(orderedjson.Serialize(orderedjson.StripTopKeys(value, keys)))
+					copyEntry.Content = compactSerialize(orderedjson.StripTopKeys(value, keys))
 				}
 			}
 			copyCategory.Files[path] = copyEntry
@@ -52,6 +53,43 @@ func StripExcludeKeysSnapshots(snapshots []AdapterSnapshot, excludeKeysByCategor
 		out[index] = StripExcludeKeys(snapshot, excludeKeysByCategory)
 	}
 	return out
+}
+
+// compactSerialize matches JSON.stringify(value) while preserving the
+// orderedjson object's property order and whitespace inside string values.
+// Exclude-key stripping is a judgement operation, so its single canonical
+// implementation lives beside StripExcludeKeys in the engine package.
+func compactSerialize(value orderedjson.Value) string {
+	pretty := orderedjson.Serialize(value)
+	var out strings.Builder
+	out.Grow(len(pretty))
+	inString := false
+	escaped := false
+	for _, char := range string(pretty) {
+		if inString {
+			out.WriteRune(char)
+			if escaped {
+				escaped = false
+			} else if char == '\\' {
+				escaped = true
+			} else if char == '"' {
+				inString = false
+			}
+			continue
+		}
+		if char == '"' {
+			inString = true
+			out.WriteRune(char)
+			continue
+		}
+		switch char {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			out.WriteRune(char)
+		}
+	}
+	return out.String()
 }
 
 // ComputeDrift aggregates the three-way engine decisions by category.  A nil

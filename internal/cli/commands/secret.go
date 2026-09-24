@@ -95,6 +95,13 @@ type SecretKeygenReport struct {
 	Created      bool   `json:"created"`
 }
 
+func (report SecretKeygenReport) ExitCode() int {
+	if report.OK {
+		return 0
+	}
+	return 1
+}
+
 // RunSecretKeygen generates and atomically persists a new identity. The
 // private key is returned by agecrypto only to the command's local stack and
 // is never copied into the report or an error string.
@@ -284,6 +291,9 @@ func RunSecretPush(options SecretPushOptions, deps *SecretDeps) SecretPushReport
 		return report
 	}
 
+	if commit == "" {
+		warnings = append(warnings, "vault 内容与 HEAD 一致，未产生新 commit")
+	}
 	report := newPushReport(SecretPushStatusPushed)
 	report.Encrypted = encrypted
 	report.Commit = commit
@@ -550,6 +560,8 @@ type SecretListOptions struct {
 type SecretListReport struct {
 	Secrets []agecrypto.VaultEntryStatus `json:"secrets"`
 }
+
+func (SecretListReport) ExitCode() int { return 0 }
 
 // VaultEntryStatus is re-exported from the agecrypto vault boundary so the
 // command report has one authoritative inventory type.

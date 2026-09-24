@@ -28,3 +28,12 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Smoke test install.sh from dist
+        env:
+          HOME: ${{ runner.temp }}/homer-install/home
+          HOMER_INSTALL_BASE_URL: file://${{ github.workspace }}/dist
+          HOMER_INSTALL_PREFIX: ${{ runner.temp }}/homer-install/bin
+        run: |
+          mkdir -p "$HOME" "$HOMER_INSTALL_PREFIX"
+          sh ./install.sh
+          "$HOMER_INSTALL_PREFIX/homer" --help >/dev/null

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gitx"
@@ -52,29 +53,60 @@ func writeTestSnapshot(content string, mode core.SyncMode) []core.AdapterSnapsho
 }
 
 func fakeWriteGit(heads ...string) GitPort {
+	return fakeWriteGitWithPushFailures(0, heads...)
+}
+
+func fakeWriteGitWithPushFailures(pushFailures int, heads ...string) GitPort {
 	calls := 0
+	remainingFailures := pushFailures
+	head := func(string) string {
+		if len(heads) == 0 {
+			return ""
+		}
+		index := calls
+		calls++
+		if index < len(heads) {
+			return heads[index]
+		}
+		return heads[len(heads)-1]
+	}
+	push := func(string) gitx.ExecResult {
+		if remainingFailures > 0 {
+			remainingFailures--
+			return gitx.ExecResult{Stderr: "remote rejected"}
+		}
+		return gitx.ExecResult{OK: true}
+	}
 	return GitPort{
-		IsGitRepo:              func(string) bool { return true },
-		HasUpstream:            func(string) bool { return true },
-		HasPushTarget:          func(string) bool { return true },
+		IsGitRepo:     func(string) bool { return true },
+		HasUpstream:   func(string) bool { return true },
+		HasPushTarget: func(string) bool { return true },
+		UpstreamRef:   func(string) string { return "origin/main" },
+		Exec: func(string, []string, time.Duration) gitx.ExecResult {
+			return gitx.ExecResult{OK: true, Stdout: "remote-commit\n"}
+		},
+		IsAncestorOf:           func(string, string, string) bool { return true },
 		Fetch:                  func(string) gitx.ExecResult { return gitx.ExecResult{OK: true} },
 		GitFetch:               func(string) gitx.ExecResult { return gitx.ExecResult{OK: true} },
 		RequireCleanStore:      func(core.HomerPaths) error { return nil },
 		RequireFastForwardable: func(core.HomerPaths) error { return nil },
 		MergeFFUpstream:        func(string) gitx.ExecResult { return gitx.ExecResult{OK: true} },
-		HeadCommit: func(string) string {
-			index := calls
-			calls++
-			if index < len(heads) {
-				return heads[index]
+		HeadCommit:             head,
+		IsStoreClean:           func(string) bool { return true },
+		CommitStoreIfNeeded: func(_ core.HomerPaths, _ string) string {
+			if len(heads) > 0 {
+				return heads[0]
 			}
-			return heads[len(heads)-1]
+			return "commit"
 		},
-		IsStoreClean:        func(string) bool { return true },
-		CommitStoreIfNeeded: func(core.HomerPaths, string) string { return "commit" },
-		CommitAllStore:      func(string, string) string { return "commit" },
-		Push:                func(string) gitx.ExecResult { return gitx.ExecResult{OK: true} },
-		GitPush:             func(string) gitx.ExecResult { return gitx.ExecResult{OK: true} },
+		CommitAllStore: func(_ string, _ string) string {
+			if len(heads) > 0 {
+				return heads[0]
+			}
+			return "commit"
+		},
+		Push:    push,
+		GitPush: push,
 	}
 }
 
@@ -101,6 +133,12 @@ func TestPushCreatesInitialBaselineOnEmptyRemote(t *testing.T) {
 		return os.Getenv(name)
 	})
 	config := writeTestConfig(paths, tool, core.SyncModeMirror)
+	if result := gitx.Exec(home, []string{"add", "homer.json"}, 0); !result.OK {
+		t.Fatal(result.Stderr)
+	}
+	if result := gitx.Exec(home, []string{"commit", "-m", "configuration baseline"}, 0); !result.OK {
+		t.Fatal(result.Stderr)
+	}
 	if err := os.MkdirAll(tool, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +162,99 @@ func TestPushCreatesInitialBaselineOnEmptyRemote(t *testing.T) {
 		t.Fatalf("state baseline = %q, head = %q", state.LastSyncCommit, gitx.HeadCommit(home))
 	}
 	_ = config
+}
+
+func TestPushUnbornRepositoryRemainsNoDrift(t *testing.T) {
+	home := t.TempDir()
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return home
+		}
+		return os.Getenv(name)
+	})
+	if err := gitx.EnsureGitRepo(home); err != nil {
+		t.Fatal(err)
+	}
+	config := writeTestConfig(paths, filepath.Join(home, "tool"), core.SyncModeMirror)
+	if err := os.MkdirAll(filepath.Join(home, "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "tool", "settings.json"), []byte("baseline\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.WriteSnapshotToStore(paths, writeTestSnapshot("baseline\n", core.SyncModeMirror)[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	report := RunPush(PushOptions{HomerHome: home, Yes: true}, nil)
+	if report.Status != PushStatusNoDrift || report.ExitCode() != 0 {
+		t.Fatalf("unborn push report = %#v", report)
+	}
+	if got := gitx.HeadCommit(home); got != "" {
+		t.Fatalf("unborn push created commit %q", got)
+	}
+	_ = config
+}
+
+func TestPushFailedRemoteRetainsCommitAndRetryPushesIt(t *testing.T) {
+	paths := writeTestPaths(t)
+	writeTestConfig(paths, filepath.Join(paths.Home, "tool"), core.SyncModeMirror)
+	firstSources := syncx.SyncSources{
+		Base:   writeTestSnapshot("base\n", core.SyncModeMirror),
+		Local:  writeTestSnapshot("local\n", core.SyncModeMirror),
+		Remote: writeTestSnapshot("base\n", core.SyncModeMirror),
+	}
+	git := fakeWriteGitWithPushFailures(1, "local-commit")
+	first := RunPush(PushOptions{HomerHome: paths.Home, Yes: true}, &PushDeps{Sources: firstSources, Git: git})
+	if first.Status != PushStatusError || first.ExitCode() != 1 || first.Commit == "" {
+		t.Fatalf("failed push report = %#v", first)
+	}
+	if !strings.Contains(strings.Join(first.Errors, "\n"), "本地 commit 已成功") {
+		t.Fatalf("failed push errors = %#v", first.Errors)
+	}
+	if state := core.LoadState(paths); state.LastSyncCommit != first.Commit {
+		t.Fatalf("state commit = %q, report commit = %q", state.LastSyncCommit, first.Commit)
+	}
+
+	secondSources := syncx.SyncSources{
+		Base:   writeTestSnapshot("local\n", core.SyncModeMirror),
+		Local:  writeTestSnapshot("local\n", core.SyncModeMirror),
+		Remote: writeTestSnapshot("local\n", core.SyncModeMirror),
+	}
+	second := RunPush(PushOptions{HomerHome: paths.Home, Yes: true}, &PushDeps{Sources: secondSources, Git: git})
+	if second.Status != PushStatusPushed || second.ExitCode() != 0 || !second.PushedToRemote {
+		t.Fatalf("retry push report = %#v", second)
+	}
+	if !strings.Contains(strings.Join(second.Warnings, "\n"), "补推送") {
+		t.Fatalf("retry push warnings = %#v", second.Warnings)
+	}
+}
+
+func TestMergePushFailureRemainsResolvedWithWarning(t *testing.T) {
+	paths := writeTestPaths(t)
+	writeTestConfig(paths, filepath.Join(paths.Home, "tool"), core.SyncModeMirror)
+	tool := filepath.Join(paths.Home, "tool", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(tool), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tool, []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sources := syncx.SyncSources{
+		Base:   writeTestSnapshot("base\n", core.SyncModeMirror),
+		Local:  writeTestSnapshot("local\n", core.SyncModeMirror),
+		Remote: writeTestSnapshot("remote\n", core.SyncModeMirror),
+	}
+	git := fakeWriteGitWithPushFailures(1, "merge-commit")
+	git.IsStoreClean = func(string) bool { return false }
+	report := RunMerge(MergeOptions{HomerHome: paths.Home, AcceptLocal: true}, &MergeDeps{Sources: sources, NoFetch: true, Git: git})
+	if report.Status != MergeStatusResolved || report.ExitCode() != 0 || report.Commit != "merge-commit" {
+		t.Fatalf("merge push failure report = %#v", report)
+	}
+	warnings := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(warnings, "git push 失败") || !strings.Contains(warnings, "homer push") {
+		t.Fatalf("merge push failure warning = %q", warnings)
+	}
 }
 
 func TestPullS4KeepsPreFastForwardBaseAndJSONCounts(t *testing.T) {

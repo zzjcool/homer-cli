@@ -232,7 +232,7 @@ func homeMode(options HomeOptions, deps *HomeDeps) (syncx.FirstContactMode, bool
 	if options.Yes {
 		return syncx.FirstContactMerge, true
 	}
-	ui := any(nil)
+	var ui any
 	if deps != nil {
 		ui = deps.UI
 	}
@@ -440,7 +440,10 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 
 	config, err := core.LoadConfig(paths)
 	if err != nil {
-		report.Errors = []string{"该仓库不是 homer 配置中心: " + err.Error(), "请确认 <repo-url> 指向的是 homer 配置仓库（根目录含合法 homer.json）。"}
+		report.Errors = []string{
+			"该仓库不是 homer 配置中心: " + err.Error(),
+			fmt.Sprintf("请确认 <repo-url> 指向的是 homer 配置仓库（根目录含合法 homer.json）。目标目录: %s。如确认 URL 有误请移走该目录后重试。", paths.Home),
+		}
 		return report
 	}
 	report.AdapterIDs = homeEnabledAdapterIDs(*config)

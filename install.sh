@@ -155,6 +155,7 @@ else
     case "$BASE_URL" in
       */latest/download) PACKAGE_URL="$BASE_URL/$ARCHIVE_NAME" ;;
       */releases) PACKAGE_URL="$BASE_URL/latest/download/$ARCHIVE_NAME" ;;
+      */dist|*/dist/) PACKAGE_URL="${BASE_URL%/}/$ARCHIVE_NAME" ;;
       *) PACKAGE_URL="$BASE_URL/releases/latest/download/$ARCHIVE_NAME" ;;
     esac
     [ -n "$CHECKSUM_SOURCE" ] || CHECKSUM_SOURCE=$(dirname "$PACKAGE_URL")/checksums.txt

@@ -36,9 +36,6 @@ var COMMANDS = []Command{
 	CommandHelp,
 }
 
-// Commands is the idiomatic alias for callers that prefer Go naming.
-var Commands = COMMANDS
-
 // ParsedArgs separates the command word from its arguments.  Flag parsing is
 // performed after this split so a command can reject every flag it does not
 // own, matching node:util parseArgs({ strict: true }) in the TS CLI.

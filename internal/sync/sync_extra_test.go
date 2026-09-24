@@ -3,10 +3,12 @@ package sync
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/engine"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
@@ -48,6 +50,10 @@ func TestExcludedKeysMatrixAndPlanting(t *testing.T) {
 	}
 	if local.Categories[0].Files["settings.json"].Content == strippedJSON {
 		t.Fatal("strip mutated or failed to copy local snapshot")
+	}
+	canonical := engine.StripExcludeKeys(local, map[string][]string{"settings": {"apiKeys", "token"}})
+	if !reflect.DeepEqual(stripped, canonical) {
+		t.Fatalf("sync strip diverged from engine strip: %#v != %#v", stripped, canonical)
 	}
 
 	merged, err := orderedjson.Parse([]byte(`{"model":"remote"}`))

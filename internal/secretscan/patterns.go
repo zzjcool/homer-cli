@@ -51,7 +51,3 @@ var SECRET_PATTERNS = []SecretPattern{
 	pattern("generic-secret-assignment", "保守通用密钥赋值（api_key/secret/token/password = \"...\"）", `(api[_-]?key|secret|token|password)["']?\s*[:=]\s*["'][A-Za-z0-9+/_-]{20,}["']`, "i"),
 	pattern("age-secret-key", "age X25519 私钥（AGE-SECRET-KEY-）", `AGE-SECRET-KEY-[a-z0-9]{20,}`, "i"),
 }
-
-// SecretPatterns returns the frozen detector slice. Callers must treat the
-// entries as immutable; regexp values are safe for concurrent read use.
-func SecretPatterns() []SecretPattern { return SECRET_PATTERNS }

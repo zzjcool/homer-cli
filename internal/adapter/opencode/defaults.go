@@ -37,7 +37,3 @@ var DefaultOpencodeAdapter = core.AdapterConfig{
 		".gitignore",
 	},
 }
-
-// DEFAULT_OPENCODE_ADAPTER preserves the archived TypeScript constant
-// spelling.
-var DEFAULT_OPENCODE_ADAPTER = DefaultOpencodeAdapter

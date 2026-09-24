@@ -139,6 +139,32 @@ func TestSecretKeygenRecipientOnlyAndNoOverwrite(t *testing.T) {
 	}
 }
 
+type stableSecretCrypto struct{}
+
+func (stableSecretCrypto) Encrypt([]byte, []string) ([]byte, error) {
+	return []byte("stable-age-ciphertext"), nil
+}
+
+func (stableSecretCrypto) Decrypt([]byte, agecrypto.AgeIdentity) ([]byte, error) {
+	return nil, nil
+}
+
+func TestSecretPushIdempotentReportsNoNewCommit(t *testing.T) {
+	env, _, _, _, _ := setupSecretPush(t, false)
+	deps := &SecretDeps{Age: stableSecretCrypto{}}
+	first := RunSecretPush(SecretPushOptions{HomerHome: env.home, Yes: true}, deps)
+	if first.Status != SecretPushStatusPushed || first.Commit == "" {
+		t.Fatalf("first secret push = %#v", first)
+	}
+	second := RunSecretPush(SecretPushOptions{HomerHome: env.home, Yes: true}, deps)
+	if second.Status != SecretPushStatusPushed || second.Commit != "" {
+		t.Fatalf("idempotent secret push = %#v", second)
+	}
+	if !strings.Contains(strings.Join(second.Warnings, "\n"), "vault 内容与 HEAD 一致，未产生新 commit") {
+		t.Fatalf("idempotent warning = %#v", second.Warnings)
+	}
+}
+
 func TestSecretPushMultiRecipientGitEvidenceAndScope(t *testing.T) {
 	env, a, b, destA, _ := setupSecretPush(t, true)
 	// Keep unrelated dirty files in the worktree. CommitPaths must not absorb

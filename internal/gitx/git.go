@@ -29,10 +29,6 @@ type ExecResult struct {
 // milliseconds so callers cannot accidentally pass a value in the wrong unit.
 const GitDefaultTimeout = 15 * time.Second
 
-// GIT_DEFAULT_TIMEOUT is retained as a plainly discoverable alias for tests
-// and for callers migrating from the TypeScript constant.
-const GIT_DEFAULT_TIMEOUT = GitDefaultTimeout
-
 const (
 	storePathspec = "store/"
 	maxErrorBytes = 8 * 1024

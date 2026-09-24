@@ -65,6 +65,3 @@ var DefaultPIAdapter = core.AdapterConfig{
 		"run-history.jsonl",
 	},
 }
-
-// DEFAULT_PI_ADAPTER is the archived TypeScript constant's spelling.
-var DEFAULT_PI_ADAPTER = DefaultPIAdapter

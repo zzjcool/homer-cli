@@ -1,7 +1,5 @@
 package core
 
-import "fmt"
-
 // CliError is a user-facing error carrying the process exit code selected by
 // the command layer. Code defaults to 1 when constructed with NewCliError.
 type CliError struct {
@@ -33,35 +31,4 @@ func (e CliError) ExitCode() int {
 		return 1
 	}
 	return e.Code
-}
-
-// AsCliError makes it convenient for callers to preserve a non-Cli error's
-// text while giving it the standard user-error code.
-func AsCliError(err error) CliError {
-	if err == nil {
-		return CliError{Code: 1}
-	}
-	if value, ok := err.(CliError); ok {
-		if value.Code == 0 {
-			value.Code = 1
-		}
-		return value
-	}
-	if pointer, ok := err.(*CliError); ok && pointer != nil {
-		value := *pointer
-		if value.Code == 0 {
-			value.Code = 1
-		}
-		return value
-	}
-	return NewCliError(err.Error())
-}
-
-// FormatCliError is a small compatibility helper for command renderers. It
-// deliberately does not expose implementation details beyond the message.
-func FormatCliError(err error) string {
-	if err == nil {
-		return ""
-	}
-	return fmt.Sprint(err)
 }

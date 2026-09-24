@@ -380,7 +380,7 @@ func chooseMergeResolutions(options MergeOptions, deps *MergeDeps, conflicts []s
 		return result, false
 	}
 
-	ui := any(nil)
+	var ui any
 	if deps != nil {
 		ui = deps.UI
 	}

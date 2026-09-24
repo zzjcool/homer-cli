@@ -30,6 +30,3 @@ var DefaultHerdrAdapter = core.AdapterConfig{
 		"release-notes.json",
 	},
 }
-
-// DEFAULT_HERDR_ADAPTER preserves the archived TypeScript constant spelling.
-var DEFAULT_HERDR_ADAPTER = DefaultHerdrAdapter

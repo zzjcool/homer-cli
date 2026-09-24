@@ -14,10 +14,6 @@ import (
 // interpreted as an empty base.
 const StoreCompleteMarker = ".homer-complete"
 
-// STORE_COMPLETE_MARKER preserves the TypeScript constant spelling used by
-// migration tests and by future git reader code.
-const STORE_COMPLETE_MARKER = StoreCompleteMarker
-
 func assertSafeStorePath(value, what string) error {
 	if value == "" {
 		return fmt.Errorf("%s 不能为空", what)

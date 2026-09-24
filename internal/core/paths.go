@@ -70,7 +70,3 @@ func GetHomerPaths(env func(string) string) HomerPaths {
 		KeysDir:    filepath.Join(home, "keys"),
 	}
 }
-
-// getHomerPaths is retained for package-local callers and mirrors the frozen
-// TypeScript-oriented name used by the migration tests.
-func getHomerPaths(env func(string) string) HomerPaths { return GetHomerPaths(env) }

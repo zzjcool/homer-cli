@@ -2,9 +2,9 @@ package sync
 
 import (
 	"sort"
-	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/engine"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
 
@@ -94,24 +94,7 @@ func excludedKeysFor(config core.HomerConfig, adapterID, category string) []stri
 // for judgement. Like the TypeScript JSON.stringify path, valid entries are
 // compactly serialized; raw entries are never mutated.
 func StripSnapshotExcludeKeys(snapshot core.AdapterSnapshot, config core.HomerConfig) core.AdapterSnapshot {
-	byCategory := ExcludedKeysByCategory(config, snapshot.AdapterID)
-	out := cloneSnapshot(snapshot)
-	if len(byCategory) == 0 {
-		return out
-	}
-	for index := range out.Categories {
-		category := &out.Categories[index]
-		keys := byCategory[category.Category]
-		if len(keys) == 0 {
-			continue
-		}
-		files := make(core.SnapshotFiles, len(category.Files))
-		for path, entry := range category.Files {
-			files[path] = stripEntry(entry, keys)
-		}
-		category.Files = files
-	}
-	return out
+	return engine.StripExcludeKeys(snapshot, ExcludedKeysByCategory(config, snapshot.AdapterID))
 }
 
 func stripSnapshotExcludeKeys(snapshot core.AdapterSnapshot, config core.HomerConfig) core.AdapterSnapshot {
@@ -203,18 +186,6 @@ func cloneSnapshot(snapshot core.AdapterSnapshot) core.AdapterSnapshot {
 	return out
 }
 
-func stripEntry(entry core.SnapshotEntry, keys []string) core.SnapshotEntry {
-	if entry.Kind != "json" {
-		return entry
-	}
-	value, ok := ParseJSONContent(entry.Content)
-	if !ok {
-		return entry
-	}
-	stripped := orderedjson.StripTopKeys(value, keys)
-	return core.SnapshotEntry{Kind: "json", Content: compactSerialize(stripped)}
-}
-
 func placeholderEntry(entry core.SnapshotEntry, keys []string) core.SnapshotEntry {
 	if entry.Kind != "json" {
 		return entry
@@ -275,40 +246,4 @@ func objectKeys(object *orderedjson.Object) []string {
 	}
 	sort.Strings(extra)
 	return append(keys, extra...)
-}
-
-// compactSerialize minifies orderedjson's canonical output without touching
-// whitespace inside JSON strings. This preserves insertion order while
-// matching JSON.stringify(value) for the judgement snapshots.
-func compactSerialize(value orderedjson.Value) string {
-	pretty := orderedjson.Serialize(value)
-	var out strings.Builder
-	out.Grow(len(pretty))
-	inString := false
-	escaped := false
-	for _, char := range string(pretty) {
-		if inString {
-			out.WriteRune(char)
-			if escaped {
-				escaped = false
-			} else if char == '\\' {
-				escaped = true
-			} else if char == '"' {
-				inString = false
-			}
-			continue
-		}
-		if char == '"' {
-			inString = true
-			out.WriteRune(char)
-			continue
-		}
-		switch char {
-		case ' ', '\t', '\n', '\r':
-			continue
-		default:
-			out.WriteRune(char)
-		}
-	}
-	return out.String()
 }

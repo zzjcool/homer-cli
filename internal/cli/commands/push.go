@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"strings"
 	"time"
 
@@ -45,11 +44,16 @@ type GitPort struct {
 	RequireFastForwardable func(paths core.HomerPaths) error
 }
 
-// syncPrompt is intentionally structural.  The existing Secret command owns
-// the narrower Confirm-only PromptPort; write commands additionally discover a
-// Select method when a merge/home caller injects one.
-type syncPrompt interface {
+// confirmPrompter and selectPrompter are the command-layer UI seams. They
+// deliberately use the command's private option type so callers cannot rely
+// on reflection or accidentally pass a structurally incompatible selector.
+type confirmPrompter interface {
 	Confirm(message string, fallback bool) bool
+}
+
+type selectPrompter interface {
+	confirmPrompter
+	Select(message string, options []selectOption, fallback string) string
 }
 
 type selectOption struct {
@@ -62,7 +66,7 @@ type selectOption struct {
 // value form keeps hand-built fixtures concise while the function form avoids
 // taking a snapshot before a test has finished setting up its repository.
 type PushDeps struct {
-	UI      any
+	UI      selectPrompter
 	Sources any
 	Git     any
 }
@@ -267,13 +271,8 @@ func homeFor(optionsHome string) core.HomerPaths {
 
 func promptConfirm(value any, message string, fallback bool) bool {
 	if value != nil {
-		if prompt, ok := value.(syncPrompt); ok {
+		if prompt, ok := value.(confirmPrompter); ok {
 			return prompt.Confirm(message, fallback)
-		}
-		// Reflection keeps the command seam compatible with callers that use a
-		// structurally identical PromptPort from the parent cli package.
-		if result, ok := invokePromptMethod(value, "Confirm", message, fallback); ok {
-			return result.Bool()
 		}
 	}
 	if !isTTY() {
@@ -288,13 +287,8 @@ func promptConfirm(value any, message string, fallback bool) bool {
 
 func promptSelect(value any, message string, options []selectOption, fallback string) string {
 	if value != nil {
-		if prompt, ok := value.(interface {
-			Select(string, []selectOption, string) string
-		}); ok {
+		if prompt, ok := value.(selectPrompter); ok {
 			return prompt.Select(message, options, fallback)
-		}
-		if result, ok := invokeSelect(value, message, options, fallback); ok {
-			return result
 		}
 	}
 	if !isTTY() {
@@ -323,63 +317,6 @@ func promptSelect(value any, message string, options []selectOption, fallback st
 func isTTY() bool {
 	info, err := os.Stdout.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-// invokePromptMethod is deliberately small and defensive. It only supports
-// the two scalar methods needed by this package and never lets a malformed
-// injected value panic the command.
-func invokePromptMethod(value any, name string, message string, fallback bool) (reflect.Value, bool) {
-	method := reflect.ValueOf(value).MethodByName(name)
-	if !method.IsValid() {
-		return reflect.Value{}, false
-	}
-	typeInfo := method.Type()
-	if typeInfo.NumIn() != 2 || typeInfo.In(0).Kind() != reflect.String || typeInfo.In(1).Kind() != reflect.Bool || typeInfo.Out(0).Kind() != reflect.Bool {
-		return reflect.Value{}, false
-	}
-	defer func() { _ = recover() }()
-	result := method.Call([]reflect.Value{reflect.ValueOf(message), reflect.ValueOf(fallback)})
-	if len(result) != 1 {
-		return reflect.Value{}, false
-	}
-	return result[0], true
-}
-
-func invokeSelect(value any, message string, options []selectOption, fallback string) (result string, ok bool) {
-	method := reflect.ValueOf(value).MethodByName("Select")
-	if !method.IsValid() {
-		return "", false
-	}
-	typeInfo := method.Type()
-	if typeInfo.NumIn() != 3 || typeInfo.In(0).Kind() != reflect.String || typeInfo.In(2).Kind() != reflect.String || typeInfo.Out(0).Kind() != reflect.String {
-		return "", false
-	}
-	defer func() {
-		if recover() != nil {
-			result, ok = "", false
-		}
-	}()
-
-	optionType := typeInfo.In(1)
-	if optionType.Kind() != reflect.Slice || optionType.Elem().Kind() != reflect.Struct {
-		return "", false
-	}
-	items := reflect.MakeSlice(optionType, len(options), len(options))
-	for i, option := range options {
-		item := items.Index(i)
-		valueField := item.FieldByName("Value")
-		labelField := item.FieldByName("Label")
-		if !valueField.IsValid() || !labelField.IsValid() || !valueField.CanSet() || !labelField.CanSet() || valueField.Kind() != reflect.String || labelField.Kind() != reflect.String {
-			return "", false
-		}
-		valueField.SetString(option.Value)
-		labelField.SetString(option.Label)
-	}
-	resultValue := method.Call([]reflect.Value{reflect.ValueOf(message), items, reflect.ValueOf(fallback)})
-	if len(resultValue) != 1 {
-		return "", false
-	}
-	return resultValue[0].String(), true
 }
 
 func fileRef(ref syncx.FileRef) string {
@@ -570,10 +507,11 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 	}
 
 	changedFiles := append([]syncx.FileRef(nil), check.ChangedFiles...)
-	// init may be run before a repository exists (D1). A dirty/untracked
-	// store is therefore itself the signal that the first store baseline must
-	// be committed; this also covers an already-initialized unborn repository.
-	needsBaseline := !git.isStoreClean(paths.Home)
+	// A baseline is needed only when git already has a commit and store is not
+	// clean relative to it. An unborn repository has no historical baseline;
+	// preserve the TS behavior and report no-drift rather than creating a
+	// commit that cannot yet be based on an existing HEAD.
+	needsBaseline := git.headCommit(paths.Home) != "" && !git.isStoreClean(paths.Home)
 	if len(changedFiles) == 0 && !needsBaseline {
 		if localAhead && !options.NoPush {
 			if retry, ok := retryPush(paths.Home, git, warnings); ok {
@@ -588,7 +526,7 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		warnings = append(warnings, "本地快照已在 store 中，本次不重写 store 内容；仅把 store 补进 git 历史（建立同步基线）")
 	}
 
-	ui := any(nil)
+	var ui selectPrompter
 	if deps != nil {
 		ui = deps.UI
 	}
