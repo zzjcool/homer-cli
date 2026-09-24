@@ -78,6 +78,54 @@ func fakeWriteGit(heads ...string) GitPort {
 	}
 }
 
+func TestPushCreatesInitialBaselineOnEmptyRemote(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	home := filepath.Join(root, "homer")
+	tool := filepath.Join(root, "tool")
+	if result := gitx.Exec(root, []string{"init", "--bare", "-b", "main", origin}, 0); !result.OK {
+		t.Fatal(result.Stderr)
+	}
+	if result := gitx.Exec(root, []string{"init", "-b", "main", home}, 0); !result.OK {
+		t.Fatal(result.Stderr)
+	}
+	for _, args := range [][]string{{"config", "user.email", "w10@example.invalid"}, {"config", "user.name", "W10"}, {"remote", "add", "origin", origin}, {"config", "branch.main.remote", "origin"}, {"config", "branch.main.merge", "refs/heads/main"}} {
+		if result := gitx.Exec(home, args, 0); !result.OK {
+			t.Fatal(result.Stderr)
+		}
+	}
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return home
+		}
+		return os.Getenv(name)
+	})
+	config := writeTestConfig(paths, tool, core.SyncModeMirror)
+	if err := os.MkdirAll(tool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("baseline\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.WriteSnapshotToStore(paths, writeTestSnapshot("baseline\n", core.SyncModeMirror)[0]); err != nil {
+		t.Fatal(err)
+	}
+	report := RunPush(PushOptions{HomerHome: home, Yes: true}, nil)
+	if report.Status != PushStatusPushed || report.ExitCode() != 0 || !report.PushedToRemote {
+		t.Fatalf("initial baseline report = %#v", report)
+	}
+	if gitx.HeadCommit(home) == "" {
+		t.Fatal("initial baseline did not create a local commit")
+	}
+	if got := gitx.Exec(origin, []string{"show", "main:store/pi/settings/settings.json"}, 0); !got.OK || strings.TrimSpace(got.Stdout) != "baseline" {
+		t.Fatalf("origin missing baseline store: %#v", got)
+	}
+	if state := core.LoadState(paths); state.LastSyncCommit != gitx.HeadCommit(home) {
+		t.Fatalf("state baseline = %q, head = %q", state.LastSyncCommit, gitx.HeadCommit(home))
+	}
+	_ = config
+}
+
 func TestPullS4KeepsPreFastForwardBaseAndJSONCounts(t *testing.T) {
 	paths := writeTestPaths(t)
 	config := writeTestConfig(paths, filepath.Join(paths.Home, "tool"), core.SyncModeMirror)

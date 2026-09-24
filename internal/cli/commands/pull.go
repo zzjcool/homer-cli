@@ -442,6 +442,14 @@ func pullActionsValue(actions []syncx.PullConflictAction) orderedjson.Value {
 			keys = append(keys, "keyPaths")
 			values["keyPaths"] = stringArrayValue(action.KeyPaths)
 		}
+		if action.LocalContent != "" {
+			keys = append(keys, "localContent")
+			values["localContent"] = action.LocalContent
+		}
+		if action.RemoteContent != "" {
+			keys = append(keys, "remoteContent")
+			values["remoteContent"] = action.RemoteContent
+		}
 		items = append(items, &orderedjson.Object{Keys: keys, M: values})
 	}
 	return items
