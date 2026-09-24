@@ -110,6 +110,28 @@ func fakeWriteGitWithPushFailures(pushFailures int, heads ...string) GitPort {
 	}
 }
 
+type explicitSelectPrompter struct {
+	confirmed bool
+	selected  string
+}
+
+func (prompter explicitSelectPrompter) Confirm(string, bool) bool { return prompter.confirmed }
+func (prompter explicitSelectPrompter) Select(string, []selectOption, string) string {
+	return prompter.selected
+}
+
+func TestExplicitSelectPrompterSeam(t *testing.T) {
+	prompter := explicitSelectPrompter{confirmed: true, selected: "remote"}
+	var _ selectPrompter = prompter
+	deps := PushDeps{UI: prompter}
+	if !promptConfirm(deps.UI, "confirm", false) {
+		t.Fatal("explicit prompter confirm was not used")
+	}
+	if got := promptSelect(deps.UI, "select", []selectOption{{Value: "local"}, {Value: "remote"}}, "local"); got != "remote" {
+		t.Fatalf("explicit prompter selection = %q", got)
+	}
+}
+
 func TestPushCreatesInitialBaselineOnEmptyRemote(t *testing.T) {
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin.git")

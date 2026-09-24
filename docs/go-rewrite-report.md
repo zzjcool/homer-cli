@@ -52,9 +52,10 @@ amd64/arm64 四平台归档与 `file://dist` installer 冒烟通过；覆盖-hom
 
 ## 测试覆盖与统计
 
-- 全量 Go 测试：**324 个 test / subtest 事件全部通过，0 fail**（含 7 个 e2e
-  group；`go test -v` 的 `=== RUN` 与 `--- PASS` 均为 324）。
-- e2e package：`TestMVPSevenGroups` + 7 个命名 group，真实编译二进制跨进程运行。
+- 全量 Go 测试：**377 个 test / subtest 事件全部通过，0 fail**（含原有 7 组、review
+  冻结 3 组及 dist installer smoke；`go test -v` 的 `=== RUN` 与 `--- PASS` 均为 377）。
+- e2e package：`TestMVPSevenGroups` + `TestMVPSyncReviewGroups` 三个命名组 +
+  `TestInstallDistBaseURLArchiveSmoke`，真实编译二进制跨进程运行。
 - 发布矩阵：`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64` 四个
   `CGO_ENABLED=0 go build` 产物均非空。
 - npm：`npm pack`、本地 `HOMER_INSTALL_PACKAGE` postinstall、wrapper `--help`
@@ -67,42 +68,52 @@ amd64/arm64 四平台归档与 `file://dist` installer 冒烟通过；覆盖-hom
 ```text
 $ go build ./... && go vet ./... && if [ -n "$(gofmt -l . | grep -v vendor || true)" ]; then gofmt -l . | grep -v vendor; exit 1; fi && go test ./... -count=1
 ?    github.com/zzjcool/homer-cli/cmd/homer [no test files]
-ok   github.com/zzjcool/homer-cli/internal/adapter 0.013s
+ok   github.com/zzjcool/homer-cli/internal/adapter 0.015s
 ok   github.com/zzjcool/homer-cli/internal/adapter/herdr 0.003s [no tests to run]
 ok   github.com/zzjcool/homer-cli/internal/adapter/opencode 0.002s [no tests to run]
 ok   github.com/zzjcool/homer-cli/internal/adapter/pi 0.002s [no tests to run]
-ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.047s
-ok   github.com/zzjcool/homer-cli/internal/backup 0.005s
-ok   github.com/zzjcool/homer-cli/internal/cli 0.238s
-ok   github.com/zzjcool/homer-cli/internal/cli/commands 0.905s
-ok   github.com/zzjcool/homer-cli/internal/core 0.014s
-ok   github.com/zzjcool/homer-cli/internal/doctor 0.189s
-ok   github.com/zzjcool/homer-cli/internal/engine 0.007s
-ok   github.com/zzjcool/homer-cli/internal/gitx 0.879s
-ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.006s
-ok   github.com/zzjcool/homer-cli/internal/secretscan 0.003s
-ok   github.com/zzjcool/homer-cli/internal/sync 0.156s
-ok   github.com/zzjcool/homer-cli/internal/testutil 0.002s [no tests to run]
-ok   github.com/zzjcool/homer-cli/tests/e2e 1.087s
+ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.049s
+ok   github.com/zzjcool/homer-cli/internal/backup 0.004s
+ok   github.com/zzjcool/homer-cli/internal/cli 0.244s
+ok   github.com/zzjcool/homer-cli/internal/cli/commands 1.091s
+ok   github.com/zzjcool/homer-cli/internal/core 0.016s
+ok   github.com/zzjcool/homer-cli/internal/doctor 0.182s
+ok   github.com/zzjcool/homer-cli/internal/engine 0.010s
+ok   github.com/zzjcool/homer-cli/internal/gitx 0.882s
+ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.007s
+ok   github.com/zzjcool/homer-cli/internal/secretscan 0.004s
+ok   github.com/zzjcool/homer-cli/internal/sync 0.131s
+ok   github.com/zzjcool/homer-cli/tests/e2e 2.975s
 ```
 
-### 四平台交叉编译（GoReleaser 未安装时的冻结 fallback）
+### GoReleaser snapshot / 四平台归档
 
 ```text
-$ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
->   GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o "/tmp/homer-w11-cross-final/homer-${target%/*}-${target#*/}" ./cmd/homer
->   test -s "/tmp/homer-w11-cross-final/homer-${target%/*}-${target#*/}"
->   printf '%s OK\\n' "$target"
-> done
-linux/amd64 OK
-linux/arm64 OK
-darwin/amd64 OK
-darwin/arm64 OK
-total 26M
--rwxr-xr-x 1 root root 6.6M Sep 24 13:22 homer-darwin-amd64
--rwxr-xr-x 1 root root 6.4M Sep 24 13:22 homer-darwin-arm64
--rwxr-xr-x 1 root root 6.7M Sep 24 13:22 homer-linux-amd64
--rwxr-xr-x 1 root root 6.5M Sep 24 13:22 homer-linux-arm64
+$ GOBIN=/tmp/homer-tools go install github.com/goreleaser/goreleaser/v2@latest
+$ /tmp/homer-tools/goreleaser release --snapshot --clean
+  • starting release
+  • skipping announce, publish, and validate...           reason=disabled during snapshot mode
+  • snapshotting                                             version=ts-v1.0.0-SNAPSHOT-8069e96
+  • building                                                paths=cmd/homer binaries=homer target=darwin_arm64_v8.0
+  • building                                                paths=cmd/homer binaries=homer target=linux_amd64_v1
+  • building                                                paths=cmd/homer binaries=homer target=linux_arm64_v8.0
+  • building                                                paths=cmd/homer binaries=homer target=darwin_amd64_v1
+  • archiving                                               name=dist/homer_darwin_arm64.tar.gz
+  • archiving                                               name=dist/homer_darwin_amd64.tar.gz
+  • archiving                                               name=dist/homer_linux_arm64.tar.gz
+  • archiving                                               name=dist/homer_linux_amd64.tar.gz
+  • calculating checksums
+  • release succeeded after 2s
+
+$ find dist -maxdepth 1 -type f -printf '%f\\n' | sort
+artifacts.json
+checksums.txt
+config.yaml
+homer_darwin_amd64.tar.gz
+homer_darwin_arm64.tar.gz
+homer_linux_amd64.tar.gz
+homer_linux_arm64.tar.gz
+metadata.json
 ```
 
 ### Installer / npm 语法与 e2e
@@ -111,25 +122,19 @@ total 26M
 $ sh -n install.sh && node --check npm/install.js && node --check npm/bin/homer.js && echo 'release/npm syntax OK'
 release/npm syntax OK
 
-$ go test ./tests/e2e -run TestMVPSevenGroups -count=1 -v
-=== RUN   TestMVPSevenGroups
-=== RUN   TestMVPSevenGroups/01-machine-A-assembly
-=== RUN   TestMVPSevenGroups/02-machine-B-home-restore
-=== RUN   TestMVPSevenGroups/03-device-rotation
-=== RUN   TestMVPSevenGroups/04-required-placeholder-doctor
-=== RUN   TestMVPSevenGroups/05-allowEscape-snapshot
-=== RUN   TestMVPSevenGroups/06-install-sh-smoke
-=== RUN   TestMVPSevenGroups/07-isolated-read-only-smoke
---- PASS: TestMVPSevenGroups (1.09s)
-    --- PASS: TestMVPSevenGroups/01-machine-A-assembly (0.07s)
-    --- PASS: TestMVPSevenGroups/02-machine-B-home-restore (0.00s)
-    --- PASS: TestMVPSevenGroups/03-device-rotation (0.06s)
-    --- PASS: TestMVPSevenGroups/04-required-placeholder-doctor (0.03s)
-    --- PASS: TestMVPSevenGroups/05-allowEscape-snapshot (0.05s)
-    --- PASS: TestMVPSevenGroups/06-install-sh-smoke (0.09s)
-    --- PASS: TestMVPSevenGroups/07-isolated-read-only-smoke (0.02s)
+$ sh -n install.sh && go test ./tests/e2e -run 'Test(InstallDistBaseURLArchiveSmoke|MVPSyncReviewGroups)' -count=1 -v
+=== RUN   TestInstallDistBaseURLArchiveSmoke
+--- PASS: TestInstallDistBaseURLArchiveSmoke (0.91s)
+=== RUN   TestMVPSyncReviewGroups
+=== RUN   TestMVPSyncReviewGroups/03-pull-apply-and-backup-old-version
+=== RUN   TestMVPSyncReviewGroups/04-remote-ahead-same-file-pull-rejects-conflict
+=== RUN   TestMVPSyncReviewGroups/06-pull-delete-propagates-and-backs-up-deleted-content
+--- PASS: TestMVPSyncReviewGroups (0.95s)
+    --- PASS: TestMVPSyncReviewGroups/03-pull-apply-and-backup-old-version (0.16s)
+    --- PASS: TestMVPSyncReviewGroups/04-remote-ahead-same-file-pull-rejects-conflict (0.06s)
+    --- PASS: TestMVPSyncReviewGroups/06-pull-delete-propagates-and-backs-up-deleted-content (0.15s)
 PASS
-ok   github.com/zzjcool/homer-cli/tests/e2e 1.097s
+ok   github.com/zzjcool/homer-cli/tests/e2e 1.867s
 
 $ HOME=$(mktemp -d) HOMER_INSTALL_PACKAGE=/tmp/homer-w11-release-final/homer_linux_amd64.tar.gz HOMER_INSTALL_PREFIX=$(mktemp -d) sh install.sh
 ✓ homer 安装完成（/tmp/tmp.sr8liujL7L/homer）
@@ -159,20 +164,22 @@ homer — dotfiles for humans and their AI agents
 ### GoReleaser availability
 
 ```text
-$ command -v goreleaser || echo 'goreleaser: unavailable (using go build cross-compile fallback)'
-goreleaser: unavailable (using go build cross-compile fallback)
+$ command -v goreleaser || echo 'goreleaser: unavailable'
+goreleaser: unavailable
+$ GOBIN=/tmp/homer-tools go install github.com/goreleaser/goreleaser/v2@latest
+$ /tmp/homer-tools/goreleaser release --snapshot --clean
+  • release succeeded after 2s
 ```
 
 ## MR / PR
 
-- 分支已准备：`w11-integrator`
-- PR 创建入口：<https://github.com/zzjcool/homer-cli/pull/new/w11-integrator>
-- 实际 PR URL：<https://github.com/zzjcool/homer-cli/pull/new/w11-integrator>（分支 push 后可直接创建）。
+- 分支已准备：`pi-subagent/review-fix`
+- PR 创建入口：<https://github.com/zzjcool/homer-cli/pull/new/pi-subagent/review-fix>（push 后可直接创建）。
 
 ## 已知限制 / 未决问题
 
-1. 当前环境没有 `goreleaser`，因此没有执行真实 `goreleaser build --snapshot --clean`；
-   四平台 `go build` 已成功，配置与 tag release workflow 已提交。
+1. GoReleaser 系统 PATH 初始不可用，已按计划用 `go install` 安装到 `/tmp/homer-tools` 并成功运行
+   `release --snapshot --clean`；四平台归档、checksum 与 `file://dist` installer smoke 已通过。
 2. e2e 使用本地编译二进制和本地 bare origin，不接触真实远端；这正是 §6 / §9
    的隔离验收边界。
 3. npm postinstall 的 GitHub 下载是 best-effort，网络失败不阻断 npm install；生产
@@ -203,7 +210,7 @@ goreleaser: unavailable (using go build cross-compile fallback)
 | **minor 2** | `needsBaseline` 恢复 TS 条件 `headCommit != "" && !isStoreClean`；新增 unborn repository 保持 no-drift 测试。 |
 | **minor 3** | secret push 幂等分支新增「vault 内容与 HEAD 一致，未产生新 commit」warning 与稳定加密回归。 |
 | **minor 4** | status 与 sync excluded-key strip 统一调用 `engine.StripExcludeKeys`，删除 sync 私有 `compactSerialize`，并断言两边结果一致。 |
-| **minor 5** | Push/Pull/Merge/Home UI seam 改为显式 `confirmPrompter` / `selectPrompter`，移除 reflect 与 `invokeSelect` / `invokePromptMethod`。 |
+| **minor 5** | `PushDeps.UI` 改为显式 `selectPrompter`，共享 prompt helper 仅做显式 `confirmPrompter` / `selectPrompter` 断言，移除 reflect 与 `invokeSelect` / `invokePromptMethod`。 |
 
 ### 已知限制（本轮不改）
 
