@@ -212,7 +212,7 @@ $ /tmp/homer-tools/goreleaser release --snapshot --clean
 | **M7 TS 拼写别名** | 删除 `Commands`、`getHomerPaths`、`AsCliError`、`FormatCliError`、`STORE_COMPLETE_MARKER`、`GIT_DEFAULT_TIMEOUT`、三组 `DEFAULT_*_ADAPTER`、各 built-in index 的死 `Scan/GlobMatch` 与未导出 wrapper、`SecretPatterns()`；全量编译回归作为隐藏调用探测。 |
 | **M8 发布闭环** | release workflow 在 GoReleaser 后以 `HOMER_INSTALL_BASE_URL=file://${GITHUB_WORKSPACE}/dist` 安装 Linux amd64 归档并执行 `homer --help`；install 脚本与 `install_dist_test.go` 锁定归档名和 checksum/download 路径。 |
 | **minor 1** | home 配置失败信息追加目标目录与「如确认 URL 有误请移走该目录后重试」，有回归断言。 |
-| **minor 2** | `needsBaseline` 恢复 TS 条件 `headCommit != "" && !isStoreClean`；新增 unborn repository 保持 no-drift 测试。 |
+| **minor 2** | W11 旧版记录的 unborn `no-drift` 语义由本轮审计裁定覆盖；v1.1 改为首次 push 自动 baseline，见下方 M1 语义裁定与 e2e。 |
 | **minor 3** | secret push 幂等分支新增「vault 内容与 HEAD 一致，未产生新 commit」warning 与稳定加密回归。 |
 | **minor 4** | status 与 sync excluded-key strip 统一调用 `engine.StripExcludeKeys`，删除 sync 私有 `compactSerialize`，并断言两边结果一致。 |
 | **minor 5** | `PushDeps.UI` 改为显式 `selectPrompter`，共享 prompt helper 仅做显式 `confirmPrompter` / `selectPrompter` 断言，移除 reflect 与 `invokeSelect` / `invokePromptMethod`。 |
@@ -223,3 +223,108 @@ $ /tmp/homer-tools/goreleaser release --snapshot --clean
 - npm 版本号不联动，README 已明确说明。
 - e2e 共享 world 结构保留，与 TS 版同款叙事。
 - config 声明序只做上述文档化裁定。
+
+## v1.1 audit-driven remediation
+
+审计依据：`/tmp/homer-advisor-audit/AUDIT.md` §三、§四；同时核对了
+`legacy/ts:src/cli/commands/push.ts` 与 `legacy/ts:src/core/git/git.ts`，确认 TS 时代
+的 `commitAllStore` 也只提交 `store/`，因此这是跨实现一起修正的既有缺陷，而不是仅 Go
+重写漏移植。
+
+### M1 语义裁定（V2）
+
+冻结的 M1 降级矩阵已升级：`~/.homer` 非 git 仓库不再 `warning + no-drift` 空操作；
+`homer push` 会调用 `ensureGitRepo`（`git init -b master` + 幂等 `.gitignore`），提交
+`store/`、根目录 `homer.json` 与 `.gitignore` 的「建立同步基线」，无 remote 时完成
+local-only 基线并给出接线提示，有 remote 时自动首推并建立 `origin/<branch>` upstream。
+该变化以审计复现的端到端回归为准，后续 pull/merge 仍要求仓库与 upstream 已配置。
+
+### V1-V7 修复与回归
+
+- **V1**：`CommitAllStore` 的 pathspec 扩展为 `store/` + `homer.json` + `.gitignore`，保证配置中心识别文件随仓库提交。
+- **V2**：首次/无漂移 `push` 也自动初始化 git、提交同步基线；无 remote 保留 local-only warning。
+- **V3**：`init --remote <url>` 完成 init、origin 接线、基线 commit 与首推；`homer remote <url>` 幂等 add/set-url origin 并输出 `git -C <home> push -u`。
+- **V4**：`home` 对配置中心识别失败明确指出根目录缺少 `homer.json`，兼容旧版 push 的恢复步骤与失败目录移除步骤。
+- **V5**：新增 `homer version` / `--version`，开发构建显示 `dev`，GoReleaser 的 `-X main.version={{.Version}}` 注入链路接通。
+- **V6**：pull/merge 的 fast-forward 分叉错误追加“两台机器都推送过”及 push / pull --rebase + merge 两条解法。
+- **V7**：push 远端失败或未送达时输出实际 home、remote、branch 拼出的 `git -C <home> push -u origin master`（按分支实际值渲染）命令。
+
+新增回归包括 `internal/gitx` 配置中心 pathspec/首推行为、remote/init/version/divergence
+命令单测，以及 `tests/e2e/v11_audit_test.go`：A `init` → 手工 `git remote add` →
+`push --yes` → bare origin 检查 `homer.json` / `.gitignore` → B clone 后 `home --yes`。
+
+### v1.1 验证记录
+
+新增 e2e 主闭环为 `TestV11AuditMainline`；全量 Go 测试按 `=== RUN` / `--- PASS` 事件计数为
+**388 tests/subtests，388 pass，0 fail**（基线 381 + 本轮 7 个回归组）。以下为最终验证命令与
+原样输出：
+
+```text
+$ npm --prefix npm run typecheck && npm --prefix npm test
+
+> homer-cli@1.0.0 typecheck
+> node --check install.js && node --check bin/homer.js
+
+
+> homer-cli@1.0.0 test
+> node --check install.js && node --check bin/homer.js
+
+$ go build ./... && go vet ./... && test -z "$(gofmt -l . | grep -v vendor || true)" && go test ./... -count=1
+?    github.com/zzjcool/homer-cli/cmd/homer [no test files]
+ok   github.com/zzjcool/homer-cli/internal/adapter 0.013s
+ok   github.com/zzjcool/homer-cli/internal/adapter/herdr 0.002s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/adapter/opencode 0.002s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/adapter/pi 0.002s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.047s
+ok   github.com/zzjcool/homer-cli/internal/backup 0.004s
+ok   github.com/zzjcool/homer-cli/internal/cli 0.227s
+ok   github.com/zzjcool/homer-cli/internal/cli/commands 1.509s
+ok   github.com/zzjcool/homer-cli/internal/core 0.015s
+ok   github.com/zzjcool/homer-cli/internal/doctor 0.172s
+ok   github.com/zzjcool/homer-cli/internal/engine 0.008s
+ok   github.com/zzjcool/homer-cli/internal/gitx 0.909s
+ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.006s
+ok   github.com/zzjcool/homer-cli/internal/secretscan 0.003s
+ok   github.com/zzjcool/homer-cli/internal/sync 0.276s
+ok   github.com/zzjcool/homer-cli/tests/e2e 3.611s
+$ go test ./... -count=1 -v > /tmp/homer-v11-go-test-final.log 2>&1 && printf ...
+RUN_COUNT=388
+PASS_COUNT=388
+FAIL_COUNT=0
+$ git diff --check
+```
+
+GoReleaser ldflags 接线手验：
+
+```text
+$ /tmp/homer-v11-version-final version
+homer version: v1.1.0-audit
+$ /tmp/homer-v11-version-final --version
+homer version: v1.1.0-audit
+```
+
+修复后二进制手动复跑审计主闭环（临时双 HOME + bare origin）：
+
+```text
+$ homer init --json
+...（init 注册 pi / herdr / opencode，errors=[]）
+$ git -C "$HOMER_HOME" init -b master && git -C "$HOMER_HOME" remote add origin "$ORIGIN"
+Initialized empty Git repository in /tmp/homer-v11-manual-final2.TbALVw/a-home/.homer/.git/
+$ homer push --yes --json
+{"ok":true,"status":"pushed","changedFiles":[],"pushedToRemote":true,"warnings":["未配置 git upstream，remote 视作 = base（M1 语义）","本地快照已在 store 中，本次不重写 store 内容；将提交 store + homer.json + .gitignore，建立同步基线"]}
+$ git --git-dir "$ORIGIN" ls-tree -r --name-only master
+.gitignore
+homer.json
+store/herdr/.homer-complete
+store/opencode/.homer-complete
+store/pi/.homer-complete
+$ HOME="$ROOT/b-home" HOMER_HOME="$ROOT/b-home/.homer" homer home "$ORIGIN" --yes --json
+{"ok":true,"status":"homed","cloned":true,"firstContact":{"mode":"merge","applied":{"written":[],"deleted":[],"conflicts":[]},"conflicts":[]},"doctor":{"ok":true,...},"errors":[]}
+$ HOME="$ROOT/b-home" HOMER_HOME="$ROOT/b-home/.homer" homer --version
+homer version: dev
+MANUAL_ROOT=/tmp/homer-v11-manual-final2.TbALVw
+```
+
+手动闭环结果：bare origin 含 `homer.json` 与 `.gitignore`，新机器 `home --yes` 返回
+`status=homed` / `doctor.ok=true`，版本命令和 ldflags 注入均通过。实现 commit hash 与
+PR URL 在交付后回填；当前工作分支为 `fix/v1.1-audit`。

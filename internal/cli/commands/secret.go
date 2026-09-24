@@ -300,10 +300,13 @@ func RunSecretPush(options SecretPushOptions, deps *SecretDeps) SecretPushReport
 	report.Warnings = warnings
 	if options.NoPush {
 		report.Warnings = append(report.Warnings, "--no-push: 只做本地 commit，未推送远端")
+		if gitx.HasRemote(paths.Home) {
+			report.Warnings = append(report.Warnings, "如需推送请运行 `"+gitx.PushHint(paths.Home)+"`")
+		}
 		return report
 	}
 	if !gitx.HasPushTarget(paths.Home) {
-		report.Warnings = append(report.Warnings, "未配置 git upstream，仅本地 commit（local-only 模式；如需推送请 `git push -u <remote> <branch>`）")
+		report.Warnings = append(report.Warnings, "未配置 git remote，仅本地 commit（local-only 模式；如需推送请先运行 `homer remote <url>`）")
 		return report
 	}
 
@@ -316,7 +319,7 @@ func RunSecretPush(options SecretPushOptions, deps *SecretDeps) SecretPushReport
 		report := newPushReport(SecretPushStatusError)
 		report.Encrypted = encrypted
 		report.Commit = commit
-		report.Warnings = append(warnings, "远端推送失败: "+reason)
+		report.Warnings = append(warnings, "远端推送失败；请运行 `"+gitx.PushHint(paths.Home)+"`："+reason)
 		report.Errors = []string{
 			fmt.Sprintf("本地 commit 已成功%s，远端推送失败: %s", commitSuffix(commit), reason),
 			"密钥已在本地提交，修复远端问题后重试 `homer secret push`。",

@@ -370,10 +370,13 @@ func GitFetch(home string) ExecResult { return Fetch(home) }
 // remote was only added by name, establish upstream on the first push so a
 // fresh Homer workspace can complete the promised one-command bootstrap.
 func Push(home string) ExecResult {
-	if UpstreamRef(home) != "" || configuredBranchRemote(home) != "" {
+	if UpstreamRef(home) != "" {
 		return Exec(home, []string{"push"}, 0)
 	}
-	remote := preferredRemote(home)
+	remote := configuredBranchRemote(home)
+	if remote == "" {
+		remote = preferredRemote(home)
+	}
 	branch := currentBranch(home)
 	if remote != "" && branch != "" {
 		return Exec(home, []string{"push", "-u", remote, branch}, 0)
