@@ -13,6 +13,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/adapter/opencode"
 	"github.com/zzjcool/homer-cli/internal/adapter/pi"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gitx"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
 
@@ -24,6 +25,7 @@ type InitOptions struct {
 	Adapters []string
 	JSON     bool
 	Force    bool
+	Remote   string
 }
 
 // InitRunOptions contains command-only switches that are not part of the
@@ -83,6 +85,7 @@ const INIT_USAGE = `用法: homer init [options]
   --home <dir>          homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
   --adapters <ids>      只初始化指定 adapter（逗号分隔，可重复）
   --force               覆盖已存在的 homer.json
+  --remote <url>        初始化 git、绑定 origin，并建立/推送首个同步基线
   --json                输出机器可读 JSON（InitReport）
   -h, --help            显示本帮助
 
@@ -210,6 +213,11 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return InitReport{}, err
 	}
+	if opts.Remote != "" {
+		if err := gitx.AssertCloneableRepoURL(opts.Remote); err != nil {
+			return InitReport{}, core.NewCliError("remote URL 不得以 \"-\" 开头: " + err.Error())
+		}
+	}
 
 	selected, err := selectedAdapters(opts.Adapters)
 	if err != nil {
@@ -268,7 +276,44 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 	if err := saveConfig(paths, config); err != nil {
 		return InitReport{}, err
 	}
+	if opts.Remote != "" {
+		if err := initializeRemote(paths, opts.Remote); err != nil {
+			return InitReport{}, err
+		}
+	}
 	return report, nil
+}
+
+// initializeRemote is the opt-in init one-liner: create the repository,
+// configure origin, commit the complete configuration center, persist the
+// local sync state, and establish the upstream with one push.
+func initializeRemote(paths core.HomerPaths, remote string) error {
+	if err := gitx.EnsureGitRepo(paths.Home); err != nil {
+		return err
+	}
+	if err := gitx.AddOrSetRemote(paths.Home, remote); err != nil {
+		return err
+	}
+	commit := gitx.CommitAllStore(paths.Home, "homer init: 建立同步基线")
+	if commit == "" && !gitx.IsPushClean(paths.Home) {
+		return core.NewCliError(fmt.Sprintf("已配置 origin，但初始 git commit 失败: %s", paths.Home))
+	}
+	if commit == "" {
+		commit = gitx.HeadCommit(paths.Home)
+	}
+	if commit == "" {
+		return core.NewCliError("无法确定初始同步基线 commit；请检查 git user.name / user.email 后重试 `homer push --yes`。")
+	}
+	if err := nowState(paths, commit, "push"); err != nil {
+		return err
+	}
+	if pushed := gitx.Push(paths.Home); !pushed.OK {
+		return core.NewCliError(fmt.Sprintf(
+			"初始同步基线已提交但未推送到 origin: %s\n请运行 `%s`。",
+			firstLine(pushed.Stderr), gitx.PushHint(paths.Home),
+		))
+	}
+	return nil
 }
 
 // RunInitWithDefaults is a convenience spelling for callers that do not need

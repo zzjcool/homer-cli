@@ -328,8 +328,10 @@ func TestRunHomeConfigFailureNamesTargetAndRemovalHint(t *testing.T) {
 	if report.Status != HomeStatusError || !strings.Contains(message, "不是 homer 配置中心") {
 		t.Fatalf("config failure report = %#v", report)
 	}
-	if !strings.Contains(message, target) || !strings.Contains(message, "如确认 URL 有误请移走该目录后重试") {
-		t.Fatalf("config failure guidance = %q", message)
+	for _, want := range []string{"根目录缺少 homer.json", "旧版 homer 推送", "homer push --yes", "恢复步骤", target} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("config failure guidance missing %q: %q", want, message)
+		}
 	}
 }
 

@@ -11,8 +11,12 @@
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/main/install.sh | sh
 homer init && homer secret keygen
-homer push --yes
+homer push --yes                 # 首次 push 自动 git init + 建立基线
 ```
+
+**心智模型：配置中心仓库就是 `~/.homer` 本身**（不是 `~/.homer/store/`）。
+`homer.json`、`.gitignore` 与 `store/` 一起提交；`state.json`、`backups/` 和
+`keys/` 只留在本机。首次 `push` 没有 remote 时仍会完成本地基线并给出 warning。
 
 新机器可直接归位：
 
@@ -85,9 +89,15 @@ npm install -g homer-cli
 homer init --json                         # 默认注册 pi / herdr / opencode
 homer secret keygen                       # 私钥写入 ~/.homer/keys/age.txt（0600）
 # 在 homer.json 写 secrets.recipients 与 secrets.files，并把明文落到目标路径
+homer remote <配置仓库 URL>                # 可选：确保 ~/.homer 是仓库并配置 origin
+# 或用 homer init --remote <配置仓库 URL> 一次完成 init + git init + 首推
 homer secret push --yes                   # secrets/<name>.age 只存密文
-homer push --yes                          # store 快照提交并推送 git
+homer push --yes                          # 首次建立基线；有 remote 自动 push -u
 ```
+
+`homer remote` 只接线、不自动上传，输出的 `git -C ~/.homer push -u origin
+master`（分支名按实际仓库显示）确认无误后运行即可。`homer init --remote` 则会
+直接完成配置中心初始 commit 和首推。
 
 三 adapter 的默认范围：
 
@@ -118,6 +128,15 @@ identity 时会安全地跳过密钥并给出补齐步骤。配置归位不覆�
 `homer doctor` 按固定顺序检查 config、repo、store-clean、remote、adapters、age、
 machine、required 八项。warn（例如离线、工具未安装、`__REQUIRED__` 残留）不改变
 退出码；只有 fail 返回 1。`--offline` 可在无网络 CI 使用。
+
+### 版本与诊断
+
+```sh
+homer version
+homer --version
+```
+
+发布二进制通过 GoReleaser 注入版本；源码构建与开发构建显示 `dev`。
 
 ## 安全备案（必读）
 
@@ -161,6 +180,8 @@ sh -n install.sh
   `git -C <home> fetch origin && git -C <home> merge --ff-only origin/master`，避免随后
   `homer push` 遇到 non-fast-forward。doctor 会在需要时回落读取 upstream 密文进行
   可解性检查。
+- `pull` / `merge` 检测到两台机器都推送造成的分叉时，会给出两条路径：放弃另一机改动就
+  在本机 `homer push`，保留两边则 `git -C <home> pull --rebase` 后 `homer merge`。
 - 不包含 M4/M5 的 `sync`、`pair`、tailcat、插件机制与并发锁；真实 HOME / 真实远端
   不属于自动化测试对象。
 

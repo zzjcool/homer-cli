@@ -91,7 +91,7 @@ func RequireFastForwardable(paths core.HomerPaths) error {
 	if head == remote || gitx.IsAncestorOf(paths.Home, head, remote) {
 		return nil
 	}
-	return core.NewCliError(fmt.Sprintf("本地与远端已分叉（HEAD %s 不是 %s 的祖先）", shortCommit(head), ref))
+	return core.NewCliError(fmt.Sprintf("本地与远端已分叉（HEAD %s 不是 %s 的祖先）\n两台机器都推送过。解法：① 在本机 homer push（若另一机的改动已不需要）② git -C %s pull --rebase 后 homer merge（保留两边）", shortCommit(head), ref, paths.Home))
 }
 
 func requireFastForwardable(paths core.HomerPaths) error { return RequireFastForwardable(paths) }

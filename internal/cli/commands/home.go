@@ -472,7 +472,8 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 	if err != nil {
 		report.Errors = []string{
 			"该仓库不是 homer 配置中心: " + err.Error(),
-			fmt.Sprintf("请确认 <repo-url> 指向的是 homer 配置仓库（根目录含合法 homer.json）。目标目录: %s。如确认 URL 有误请移走该目录后重试。", paths.Home),
+			"根目录缺少 homer.json（若该仓库由旧版 homer 推送，请在机器 A 重新 homer push 以纳入配置文件）。",
+			fmt.Sprintf("恢复步骤：在机器 A 运行 `homer push --yes` 纳入 homer.json；回到本机移走失败的目标目录 %s，再重跑 `homer home <repo-url> --yes`。请确认 URL 指向的是 homer 配置仓库。", paths.Home),
 		}
 		return report
 	}

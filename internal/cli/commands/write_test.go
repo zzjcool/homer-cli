@@ -238,6 +238,9 @@ func TestPushFailedRemoteRetainsCommitAndRetryPushesIt(t *testing.T) {
 	if !strings.Contains(strings.Join(first.Errors, "\n"), "本地 commit 已成功") {
 		t.Fatalf("failed push errors = %#v", first.Errors)
 	}
+	if !strings.Contains(strings.Join(first.Warnings, "\n"), "git -C "+paths.Home+" push -u origin master") {
+		t.Fatalf("failed push recovery hint = %#v", first.Warnings)
+	}
 	if state := core.LoadState(paths); state.LastSyncCommit != first.Commit {
 		t.Fatalf("state commit = %q, report commit = %q", state.LastSyncCommit, first.Commit)
 	}

@@ -10,21 +10,24 @@ import (
 type Command string
 
 const (
-	CommandInit   Command = "init"
-	CommandStatus Command = "status"
-	CommandDiff   Command = "diff"
-	CommandPush   Command = "push"
-	CommandPull   Command = "pull"
-	CommandMerge  Command = "merge"
-	CommandHome   Command = "home"
-	CommandDoctor Command = "doctor"
-	CommandSecret Command = "secret"
-	CommandHelp   Command = "help"
+	CommandInit    Command = "init"
+	CommandRemote  Command = "remote"
+	CommandStatus  Command = "status"
+	CommandDiff    Command = "diff"
+	CommandPush    Command = "push"
+	CommandPull    Command = "pull"
+	CommandMerge   Command = "merge"
+	CommandHome    Command = "home"
+	CommandDoctor  Command = "doctor"
+	CommandSecret  Command = "secret"
+	CommandVersion Command = "version"
+	CommandHelp    Command = "help"
 )
 
 // COMMANDS is the frozen top-level command order shown by --help.
 var COMMANDS = []Command{
 	CommandInit,
+	CommandRemote,
 	CommandStatus,
 	CommandDiff,
 	CommandPush,
@@ -33,6 +36,7 @@ var COMMANDS = []Command{
 	CommandHome,
 	CommandDoctor,
 	CommandSecret,
+	CommandVersion,
 	CommandHelp,
 }
 
@@ -54,6 +58,9 @@ func SplitCommand(argv []string) ParsedArgs {
 	if first == "--help" || first == "-h" {
 		return ParsedArgs{Command: CommandHelp, Rest: append([]string(nil), argv[1:]...)}
 	}
+	if first == "--version" {
+		return ParsedArgs{Command: CommandVersion, Rest: append([]string(nil), argv[1:]...)}
+	}
 	for _, command := range COMMANDS {
 		if string(command) == first {
 			return ParsedArgs{Command: command, Rest: append([]string(nil), argv[1:]...)}
@@ -71,6 +78,7 @@ const USAGE = `homer — dotfiles for humans and their AI agents
 
 命令:
   init      扫描 adapter 并生成 homer.json + store 快照
+  remote    配置 origin remote（不自动推送）
   status    显示本地/仓库之间的漂移概览
   diff      显示漂移的详细差异
   push      密钥扫描后推送本地快照到 store 并提交（+ 推送远端）
@@ -79,9 +87,11 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   home      新机器一键归位：clone 配置仓库 → 应用配置 → 解密密钥 → doctor
   doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
   secret    密钥投递：keygen | push | pull | list
+  version   打印 homer 版本（开发构建显示 dev）
 
 全局选项:
   --home <dir>  homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
+  --version     打印版本
   -h, --help    显示本帮助
 
 退出码:
@@ -118,6 +128,7 @@ type CommandOptions struct {
 	Adapter      string
 	Category     string
 	Mode         string
+	Remote       string
 	Positionals  []string
 }
 
@@ -242,6 +253,12 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 				return options, usageArgumentError("选项 --force 不接受值")
 			}
 			options.Force = true
+		case "--remote":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			options.Remote = value
 		case "--adapters":
 			value, err := takeOptionValue(args, &index, name, inline, hasInline)
 			if err != nil {
@@ -276,7 +293,9 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 func commandUsage(command Command) string {
 	switch command {
 	case CommandInit:
-		return "用法: homer init [options]\n\n扫描 adapter，生成 homer.json + store 快照。\n\n选项: --home <dir> --adapters <ids> --force --json -h, --help"
+		return "用法: homer init [options]\n\n扫描 adapter，生成 homer.json + store 快照。\n\n选项: --home <dir> --adapters <ids> --force --remote <url> --json -h, --help"
+	case CommandRemote:
+		return "用法: homer remote <url> [options]\n\n配置 origin，不自动推送。\n\n选项: --home <dir> --json -h, --help"
 	case CommandStatus:
 		return "用法: homer status [options]\n\n显示本地 / store / git remote 漂移概览。\n\n选项: --home <dir> --json --verbose, -v -h, --help"
 	case CommandDiff:
@@ -293,6 +312,8 @@ func commandUsage(command Command) string {
 		return "用法: homer doctor [options]\n\n八项体检。\n\n选项: --home <dir> --offline --json -h, --help"
 	case CommandSecret:
 		return "用法: homer secret <keygen|push|pull|list> [options]\n\n选项: --home <dir> --yes --no-push --json -h, --help"
+	case CommandVersion:
+		return "用法: homer version"
 	default:
 		return fmt.Sprintf("用法: homer %s [options]", command)
 	}
