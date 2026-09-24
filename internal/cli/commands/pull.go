@@ -76,8 +76,10 @@ const PULL_USAGE = `用法: homer pull [options]
 退出码: applied / no-drift → 0；aborted / conflicts-remain / error → 1。`
 
 const (
-	pullPreviewMaxLines      = 20
-	pullPreviewMaxInputLines = 2000
+	PREVIEW_MAX_LINES            = 20
+	PREVIEW_DIFF_MAX_INPUT_LINES = 2000
+	pullPreviewMaxLines          = PREVIEW_MAX_LINES
+	pullPreviewMaxInputLines     = PREVIEW_DIFF_MAX_INPUT_LINES
 )
 
 func pullIsConflict(action syncx.PullAction) bool { return action.Type == syncx.PullActionConflict }

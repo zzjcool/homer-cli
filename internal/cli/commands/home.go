@@ -30,6 +30,7 @@ type HomeOptions struct {
 }
 
 type FirstContactMode = syncx.FirstContactMode
+type HomeConflictSummary = syncx.PullConflictAction
 
 type HomeStatus string
 
