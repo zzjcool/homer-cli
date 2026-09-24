@@ -1,6 +1,10 @@
 package core
 
-import "github.com/zzjcool/homer-cli/internal/orderedjson"
+import (
+	"reflect"
+
+	"github.com/zzjcool/homer-cli/internal/orderedjson"
+)
 
 // isParsableJson reports whether content is any valid JSON value. JSON arrays,
 // scalars, and null are intentionally valid here; the merge engine decides
@@ -35,8 +39,11 @@ func isPlainObject(value any) bool {
 	if value == nil {
 		return false
 	}
-	_, ok := value.(map[string]any)
-	return ok
+	if _, ok := value.(*orderedjson.Object); ok {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	return rv.Kind() == reflect.Map && rv.Type().Key().Kind() == reflect.String && !rv.IsNil()
 }
 
 // IsPlainObject is the exported form used by package tests and future workers.
