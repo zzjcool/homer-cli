@@ -290,6 +290,45 @@ func TestSecretPullUpstreamBackupPermissionsAndNoFF(t *testing.T) {
 	}
 }
 
+func TestSecretPullSuccessOutputIncludesWorkspaceSyncHint(t *testing.T) {
+	env, _, _, _, _ := setupSecretPush(t, false)
+	if got := RunSecretPush(SecretPushOptions{HomerHome: env.home, Yes: true}, nil); got.Status != SecretPushStatusPushed {
+		t.Fatalf("push = %#v", got)
+	}
+
+	hint := "git -C " + env.home + " fetch origin && git -C " + env.home + " merge --ff-only origin/master"
+	var human bytes.Buffer
+	if code := ExecuteSecret("pull", SecretCommandOptions{HomerHome: env.home, Yes: true}, nil, &human, &human); code != 0 {
+		t.Fatalf("human pull exit = %d: %s", code, human.String())
+	}
+	if !strings.Contains(human.String(), "提示: vault 已更新") || !strings.Contains(human.String(), hint) {
+		t.Fatalf("human pull hint = %q", human.String())
+	}
+
+	var machine bytes.Buffer
+	if code := ExecuteSecret("pull", SecretCommandOptions{HomerHome: env.home, Yes: true, JSON: true}, nil, &machine, &machine); code != 0 {
+		t.Fatalf("json pull exit = %d: %s", code, machine.String())
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(machine.Bytes(), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	warnings, ok := parsed["warnings"].([]any)
+	if !ok {
+		t.Fatalf("json pull warnings field = %#v", parsed["warnings"])
+	}
+	found := false
+	for _, warning := range warnings {
+		if strings.Contains(warning.(string), hint) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("json pull hint missing: %#v", warnings)
+	}
+}
+
 func TestSecretPullUndecryptableZeroWritesAndFetchRollbackGuard(t *testing.T) {
 	env, a, _, destA, _ := setupSecretPush(t, false)
 	if got := RunSecretPush(SecretPushOptions{HomerHome: env.home, Yes: true}, nil); got.Status != SecretPushStatusPushed {

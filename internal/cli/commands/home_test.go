@@ -177,6 +177,142 @@ func TestRunHomeIdentityMissingStillHomed(t *testing.T) {
 	}
 }
 
+func TestRunHomeCreatesMissingEnabledAdapterRoots(t *testing.T) {
+	root := t.TempDir()
+	osHome := filepath.Join(root, "os-home")
+	if err := os.MkdirAll(osHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", osHome)
+
+	config := core.HomerConfig{
+		Version: 1,
+		Adapters: map[string]core.AdapterConfig{
+			"pi": {
+				Root: "~/.pi/agent",
+				Categories: map[string]core.CategoryConfig{
+					"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
+				},
+			},
+			"herdr": {
+				Root: "~/.config/herdr",
+				Categories: map[string]core.CategoryConfig{
+					"config": {Paths: []string{"config.toml"}, Mode: core.SyncModeMirror},
+				},
+			},
+			"opencode": {
+				Root: "~/.config/opencode",
+				Categories: map[string]core.CategoryConfig{
+					"config": {Paths: []string{"opencode.json"}, Mode: core.SyncModeMirror},
+				},
+			},
+		},
+	}
+	snapshots := []core.AdapterSnapshot{
+		{AdapterID: "pi", Categories: []core.CategorySnapshot{{AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
+			"settings.json": {Kind: "file", Content: "pi\n"},
+		}}}},
+		{AdapterID: "herdr", Categories: []core.CategorySnapshot{{AdapterID: "herdr", Category: "config", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
+			"config.toml": {Kind: "file", Content: "herdr\n"},
+		}}}},
+		{AdapterID: "opencode", Categories: []core.CategorySnapshot{{AdapterID: "opencode", Category: "config", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
+			"opencode.json": {Kind: "file", Content: "opencode\n"},
+		}}}},
+	}
+	target := filepath.Join(root, "homer")
+	report := RunHome(HomeOptions{HomerHome: target, RepoURL: "fixture", Yes: true}, &HomeDeps{
+		Clone: func(_, dest string) error {
+			paths := core.GetHomerPaths(func(name string) string {
+				if name == "HOMER_HOME" {
+					return dest
+				}
+				return ""
+			})
+			if err := core.SaveConfig(paths, config); err != nil {
+				return err
+			}
+			for _, snapshot := range snapshots {
+				if err := core.WriteSnapshotToStore(paths, snapshot); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+	if report.Status != HomeStatusHomed || report.FirstContact == nil {
+		t.Fatalf("home report = %#v", report)
+	}
+	if written := len(report.FirstContact.Applied.Written); written != 3 {
+		t.Fatalf("home writes = %d, want 3; report=%#v", written, report)
+	}
+	for _, adapterConfig := range config.Adapters {
+		root := core.ExpandHome(adapterConfig.Root)
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("adapter root %s was not created: %v", root, err)
+		}
+	}
+	for _, expected := range []struct {
+		path    string
+		content string
+	}{
+		{filepath.Join(osHome, ".pi", "agent", "settings.json"), "pi\n"},
+		{filepath.Join(osHome, ".config", "herdr", "config.toml"), "herdr\n"},
+		{filepath.Join(osHome, ".config", "opencode", "opencode.json"), "opencode\n"},
+	} {
+		if content, err := os.ReadFile(expected.path); err != nil || string(content) != expected.content {
+			t.Fatalf("home write %s = %q, err=%v", expected.path, content, err)
+		}
+	}
+}
+
+func TestRunHomeAdapterRootCreationFailureWarns(t *testing.T) {
+	root := t.TempDir()
+	osHome := filepath.Join(root, "os-home")
+	if err := os.MkdirAll(osHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", osHome)
+	blocked := filepath.Join(osHome, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := core.HomerConfig{
+		Version: 1,
+		Adapters: map[string]core.AdapterConfig{
+			"pi": {
+				Root: filepath.Join("~", "blocked", "agent"),
+				Categories: map[string]core.CategoryConfig{
+					"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
+				},
+			},
+		},
+	}
+	snapshot := core.AdapterSnapshot{AdapterID: "pi", Categories: []core.CategorySnapshot{{
+		AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror,
+		Files: core.SnapshotFiles{"settings.json": {Kind: "file", Content: "remote\n"}},
+	}}}
+	target := filepath.Join(root, "homer")
+	report := RunHome(HomeOptions{HomerHome: target, RepoURL: "fixture", Yes: true}, &HomeDeps{
+		Clone: func(_, dest string) error {
+			paths := core.GetHomerPaths(func(name string) string {
+				if name == "HOMER_HOME" {
+					return dest
+				}
+				return ""
+			})
+			if err := core.SaveConfig(paths, config); err != nil {
+				return err
+			}
+			return core.WriteSnapshotToStore(paths, snapshot)
+		},
+	})
+	warnings := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(warnings, "adapter root 不可读") {
+		t.Fatalf("root creation failure was silent: report=%#v", report)
+	}
+}
+
 func TestRunHomeConfigFailureNamesTargetAndRemovalHint(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "homer")

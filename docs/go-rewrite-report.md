@@ -190,7 +190,12 @@ $ /tmp/homer-tools/goreleaser release --snapshot --clean
 5. **config 声明序裁定（M5）**：`adapters/categories` 遍历序：TS 声明序 → Go 字典序；
    `init` 写入固定注册序故常规路径无差异；仅手工调整声明序后 `status --json` 数组顺序
    可观察不同。
-6. **搁置项**：pull prune 失败 → 结构化 error（NON-ISSUE 方向，Go 更诚实，保留）；
+6. **Docker 验证 P2-1 已修复**：空 HOME 下 `home` 会在首次对接应用前为缺失的 enabled
+   adapter root 创建目录；创建失败通过现有 adapter-root warning 通道报告，不再把
+   `homed` + 零写入作为唯一信号。
+7. **Docker 验证 P2-2 已修复**：`secret pull` 仍按 D4 不自动 ff 整仓，但成功输出现在会
+   明确提示同步工作区后再 `homer push`，避免用户直接 push 撞 non-fast-forward。
+8. **搁置项**：pull prune 失败 → 结构化 error（NON-ISSUE 方向，Go 更诚实，保留）；
    npm 版本号不联动（README 已说明）；e2e 共享 world 结构（与 TS 版同款叙事）；
    config 声明序如上仅文档化，不改代码。
 

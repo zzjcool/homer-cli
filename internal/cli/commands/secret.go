@@ -547,7 +547,7 @@ func RunSecretPull(options SecretPullOptions, deps *SecretDeps) SecretPullReport
 	report := newPullReport(SecretPullStatusApplied)
 	report.Pulled = append(report.Pulled, names...)
 	report.BackupDir = backupDir
-	report.Warnings = warnings
+	report.Warnings = append(warnings, secretPullWorkspaceHint(paths.Home))
 	return report
 }
 
@@ -698,6 +698,10 @@ func writeSecretDestination(destination string, plaintext []byte) error {
 		return err
 	}
 	return os.Chmod(destination, 0o600)
+}
+
+func secretPullWorkspaceHint(home string) string {
+	return fmt.Sprintf("提示: vault 已更新。若随后要 homer push，请先同步工作区：git -C %s fetch origin && git -C %s merge --ff-only origin/master", home, home)
 }
 
 func secretRelativePath(name string) string {

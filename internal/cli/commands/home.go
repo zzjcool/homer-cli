@@ -225,6 +225,36 @@ func homeScanLocal(config core.HomerConfig, remote []core.AdapterSnapshot, warni
 	return local
 }
 
+type homeRootEnsureResult struct {
+	Retried  bool
+	Warnings []string
+}
+
+// ensureHomeAdapterRoots creates missing enabled adapter roots before the
+// first-contact plan is applied. A missing root is otherwise treated as
+// unreadable by homeScanLocal and safely substituted with the remote snapshot;
+// creating it and rescanning lets the normal write actions materialize the
+// configuration without weakening the root-unreadable guard elsewhere.
+func ensureHomeAdapterRoots(config core.HomerConfig) homeRootEnsureResult {
+	result := homeRootEnsureResult{Warnings: []string{}}
+	for _, id := range homeEnabledAdapterIDs(config) {
+		root := core.ExpandHome(config.Adapters[id].Root)
+		if _, err := os.Stat(root); err == nil || !os.IsNotExist(err) {
+			continue
+		}
+
+		result.Retried = true
+		if err := os.MkdirAll(root, 0o777); err != nil {
+			like := core.ScanOutcomeLike{Errors: []core.ScanProblem{{
+				Path:    root,
+				Message: "创建 adapter root 失败: " + err.Error(),
+			}}}
+			result.Warnings = append(result.Warnings, core.ScanWarningMessages(id, like)...)
+		}
+	}
+	return result
+}
+
 func homeMode(options HomeOptions, deps *HomeDeps) (syncx.FirstContactMode, bool) {
 	if options.Mode != "" {
 		return options.Mode, true
@@ -452,13 +482,41 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		report.Errors = errorLines(err)
 		return report
 	}
-	local := homeScanLocal(*config, remote, &warnings)
+	scanWarnings := []string{}
+	local := homeScanLocal(*config, remote, &scanWarnings)
+	warnings = append(warnings, scanWarnings...)
 	mode, modeOK := homeMode(options, deps)
 	if !modeOK {
 		report.Errors = []string{"非交互环境无法选择首次对接模式", "请显式给出 `--mode pull|merge|skip`，或加 `--yes`（未给 --mode 时默认 merge）。"}
 		report.Warnings = warnings
 		return report
 	}
+
+	// A missing root is conservatively represented as local=remote by the
+	// scanner. For an actual first-contact apply, create the root first and
+	// rescan so that planFirstContact produces the expected remote writes.
+	if mode == syncx.FirstContactPull || mode == syncx.FirstContactMerge {
+		rootResult := ensureHomeAdapterRoots(*config)
+		if rootResult.Retried {
+			warnings = []string{}
+			refreshedWarnings := []string{}
+			local = homeScanLocal(*config, remote, &refreshedWarnings)
+			warnings = append(warnings, refreshedWarnings...)
+		}
+		for _, warning := range rootResult.Warnings {
+			seen := false
+			for _, existing := range warnings {
+				if existing == warning {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				warnings = append(warnings, warning)
+			}
+		}
+	}
+
 	plan := syncx.PlanFirstContact(*config, local, remote, mode)
 	names := agecrypto.SecretNames(config)
 	if !options.Yes && (len(plan.Actions) > 0 || len(names) > 0) {

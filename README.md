@@ -110,9 +110,10 @@ homer doctor --json
 homer status --json
 ```
 
-`home` 不安装工具依赖，只把配置写回工具目录；新设备没有 identity 时会安全地
-跳过密钥并给出补齐步骤。配置归位不覆盖本地冲突，受影响文件先备份。密钥目标
-与密钥备份分别保持 0600，备份目录保持 0700。
+`home` 不安装工具依赖；归位配置前会为 enabled adapter 自动创建缺失的工具根目录，
+再把配置写回工具目录。若创建根目录失败，会通过 warning 明确报告。新设备没有
+identity 时会安全地跳过密钥并给出补齐步骤。配置归位不覆盖本地冲突，受影响文件
+先备份。密钥目标与密钥备份分别保持 0600，备份目录保持 0700。
 
 `homer doctor` 按固定顺序检查 config、repo、store-clean、remote、adapters、age、
 machine、required 八项。warn（例如离线、工具未安装、`__REQUIRED__` 残留）不改变
@@ -156,8 +157,10 @@ sh -n install.sh
 - `home` 不替各工具安装依赖；依赖由 pi / herdr / opencode 自己管理。
 - `secrets/` 是 age 密文投递通道，不参与 store 的三路 merge；换设备需要追加
   recipient 后重新加密 push。
-- `secret pull` 不自动快进整个 store 工作区；doctor 会在需要时回落读取 upstream
-  密文进行可解性检查。
+- `secret pull` 按设计不自动快进整个 store 工作区；成功后会明确提示先执行
+  `git -C <home> fetch origin && git -C <home> merge --ff-only origin/master`，避免随后
+  `homer push` 遇到 non-fast-forward。doctor 会在需要时回落读取 upstream 密文进行
+  可解性检查。
 - 不包含 M4/M5 的 `sync`、`pair`、tailcat、插件机制与并发锁；真实 HOME / 真实远端
   不属于自动化测试对象。
 
