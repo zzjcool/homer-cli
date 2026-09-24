@@ -1,0 +1,68 @@
+{
+  "name": "exclude-remote-new-file-placeholder-stripped",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "models": {
+              "paths": [
+                "models.json"
+              ],
+              "mode": "merge",
+              "excludeKeys": [
+                "apiKeys"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "base": [],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {}
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"__REQUIRED__\",\"provider\":\"test-provider\",\"model\":\"new\"}"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "models",
+        "relPath": "models.json",
+        "content": "{\"provider\":\"test-provider\",\"model\":\"new\"}"
+      }
+    ]
+  }
+}

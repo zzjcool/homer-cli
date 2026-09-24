@@ -1,0 +1,24 @@
+{
+  "name": "extra-local-only-new-key",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "keep": 1
+    },
+    "local": {
+      "keep": 1,
+      "localOnly": "yes"
+    },
+    "remote": {
+      "keep": 1
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "keep": 1,
+      "localOnly": "yes"
+    },
+    "conflicts": []
+  }
+}

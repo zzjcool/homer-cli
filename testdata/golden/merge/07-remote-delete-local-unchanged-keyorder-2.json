@@ -1,0 +1,28 @@
+{
+  "name": "07-remote-delete-local-unchanged-keyorder-2",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "keep": "same",
+      "marker": 1,
+      "deleteMe": true
+    },
+    "local": {
+      "marker": 1,
+      "deleteMe": true,
+      "keep": "same"
+    },
+    "remote": {
+      "marker": 1,
+      "keep": "same"
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "marker": 1,
+      "keep": "same"
+    },
+    "conflicts": []
+  }
+}

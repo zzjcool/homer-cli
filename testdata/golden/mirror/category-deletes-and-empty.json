@@ -1,0 +1,28 @@
+{
+  "name": "category-deletes-and-empty",
+  "operation": "compareCategory",
+  "input": {
+    "base": {
+      "gone.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "also-gone.md": {
+        "kind": "file",
+        "content": "v1"
+      }
+    },
+    "local": {},
+    "remote": {}
+  },
+  "output": [
+    {
+      "type": "noop",
+      "path": "also-gone.md"
+    },
+    {
+      "type": "noop",
+      "path": "gone.md"
+    }
+  ]
+}

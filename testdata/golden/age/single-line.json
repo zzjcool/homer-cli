@@ -1,0 +1,22 @@
+{
+  "name": "single-line",
+  "operation": "TS AgeCryptoPort.encrypt",
+  "input": {
+    "plaintext": "golden age plaintext one\n",
+    "recipients": [
+      "age1l7uq7xnadqcejen2m76hwtw55vveqdrvgdwdh6qqev4q8jdcwsys9m5cag"
+    ]
+  },
+  "output": {
+    "name": "single-line",
+    "format": "age-v1-binary-base64",
+    "plaintext": "golden age plaintext one\n",
+    "ciphertextBase64": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBLbXpsczlkSnhFTVVPR2xZY1FPU2tKTmdmSWtZRHhrU0piRitaYjlkUDNZCkQyTElpbktnOWNPaS9yOWhTV05kTVkrOXJBK21TRlNUL2RHejdyUUFuQncKLS0tIC9nRllGdis1L1NaWmZPT0xMVzZObFdNR3krQXVIMS9wYnhCT0lPZXdjMjQKfFz34rCGg9pwkVA/jqocdgh1cTe84gnmBjPJ6g5EMEJMZxD+nX406bZAtSWg1zcLmvr06NGVH4vF",
+    "recipients": [
+      "age1l7uq7xnadqcejen2m76hwtw55vveqdrvgdwdh6qqev4q8jdcwsys9m5cag"
+    ],
+    "identities": [
+      "AGE-SECRET-KEY-1N66RS534QC04LJC2E8JH59SQZAVYR2TZ84Z4DCALP0AKYVZTQL3S8LKNJG"
+    ]
+  }
+}

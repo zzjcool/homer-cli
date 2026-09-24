@@ -1,0 +1,23 @@
+{
+  "name": "matrix-changed-same",
+  "operation": "compareFile",
+  "input": {
+    "base": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "local": {
+      "kind": "file",
+      "content": "v2"
+    },
+    "remote": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "relPath": "skills/golden.md"
+  },
+  "output": {
+    "type": "push",
+    "path": "skills/golden.md"
+  }
+}

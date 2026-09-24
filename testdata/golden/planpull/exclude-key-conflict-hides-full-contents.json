@@ -1,0 +1,93 @@
+{
+  "name": "exclude-key-conflict-hides-full-contents",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "models": {
+              "paths": [
+                "models.json"
+              ],
+              "mode": "merge",
+              "excludeKeys": [
+                "apiKeys"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "base": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"__REQUIRED__\",\"provider\":\"test-provider\",\"model\":\"x\"}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"local-test-key\",\"model\":\"local\"}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"__REQUIRED__\",\"model\":\"remote\"}"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "conflict",
+        "adapterId": "pi",
+        "category": "models",
+        "relPath": "models.json",
+        "reason": "merge-keys",
+        "keyPaths": [
+          "model"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "08-same-key-both-modified-keyorder-1",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "theme": "base",
+      "keep": 1,
+      "marker": true
+    },
+    "local": {
+      "keep": 1,
+      "marker": true,
+      "theme": "local"
+    },
+    "remote": {
+      "marker": true,
+      "theme": "remote",
+      "keep": 1
+    }
+  },
+  "output": {
+    "status": "conflict",
+    "merged": {
+      "theme": "local",
+      "keep": 1,
+      "marker": true
+    },
+    "conflicts": [
+      {
+        "keyPath": "theme",
+        "reason": "both-modified",
+        "base": "base",
+        "local": "local",
+        "remote": "remote"
+      }
+    ]
+  }
+}

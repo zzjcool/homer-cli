@@ -1,0 +1,90 @@
+{
+  "name": "exclude-local-key-planted-after-remote-model-change",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "models": {
+              "paths": [
+                "models.json"
+              ],
+              "mode": "merge",
+              "excludeKeys": [
+                "apiKeys"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "base": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"__REQUIRED__\",\"provider\":\"test-provider\",\"model\":\"x\"}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"local-test-key\",\"provider\":\"test-provider\",\"model\":\"x\"}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "models",
+            "mode": "merge",
+            "files": {
+              "models.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"__REQUIRED__\",\"provider\":\"test-provider\",\"model\":\"y\"}"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "models",
+        "relPath": "models.json",
+        "content": "{\n  \"provider\": \"test-provider\",\n  \"model\": \"y\",\n  \"apiKeys\": \"local-test-key\"\n}\n"
+      }
+    ]
+  }
+}

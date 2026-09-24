@@ -1,0 +1,41 @@
+{
+  "name": "category-base-missing-new-files",
+  "operation": "compareCategory",
+  "input": {
+    "base": {},
+    "local": {
+      "local-only.md": {
+        "kind": "file",
+        "content": "v2"
+      },
+      "same.md": {
+        "kind": "file",
+        "content": "v2"
+      }
+    },
+    "remote": {
+      "remote-only.md": {
+        "kind": "file",
+        "content": "v3"
+      },
+      "same.md": {
+        "kind": "file",
+        "content": "v2"
+      }
+    }
+  },
+  "output": [
+    {
+      "type": "push",
+      "path": "local-only.md"
+    },
+    {
+      "type": "pull",
+      "path": "remote-only.md"
+    },
+    {
+      "type": "noop",
+      "path": "same.md"
+    }
+  ]
+}

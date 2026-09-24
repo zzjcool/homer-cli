@@ -1,0 +1,81 @@
+{
+  "name": "merge-remote-file-deleted-local-unchanged",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge"
+            }
+          }
+        }
+      }
+    },
+    "base": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "json",
+                "content": "{\"a\":1}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "json",
+                "content": "{\"a\":1}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {}
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "delete",
+        "adapterId": "pi",
+        "category": "settings",
+        "relPath": "settings.json"
+      }
+    ]
+  }
+}

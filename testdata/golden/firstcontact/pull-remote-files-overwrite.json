@@ -1,0 +1,106 @@
+{
+  "name": "pull-remote-files-overwrite",
+  "operation": "planFirstContact",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "skills": {
+              "paths": [
+                "skills/"
+              ],
+              "mode": "mirror"
+            },
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge"
+            }
+          }
+        }
+      }
+    },
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "local/SKILL.md": {
+                "kind": "file",
+                "content": "local"
+              }
+            }
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "json",
+                "content": "{\"theme\":\"light\",\"localOnly\":true}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "remote/SKILL.md": {
+                "kind": "file",
+                "content": "remote"
+              }
+            }
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "json",
+                "content": "{\"theme\":\"dark\"}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "mode": "pull"
+  },
+  "output": {
+    "mode": "pull",
+    "actions": [
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "skills",
+        "relPath": "remote/SKILL.md",
+        "content": "remote"
+      },
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "settings",
+        "relPath": "settings.json",
+        "content": "{\"theme\":\"dark\"}"
+      }
+    ]
+  }
+}

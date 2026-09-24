@@ -1,0 +1,23 @@
+{
+  "name": "matrix-same-same",
+  "operation": "compareFile",
+  "input": {
+    "base": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "local": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "remote": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "relPath": "skills/golden.md"
+  },
+  "output": {
+    "type": "noop",
+    "path": "skills/golden.md"
+  }
+}

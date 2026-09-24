@@ -1,0 +1,74 @@
+{
+  "name": "merge-excluded-placeholder-does-not-flow",
+  "operation": "planFirstContact",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge",
+              "excludeKeys": [
+                "apiKeys"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"local-test-key\",\"local\":1}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "json",
+                "content": "{\"apiKeys\":\"__REQUIRED__\",\"remote\":2}"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "mode": "merge"
+  },
+  "output": {
+    "mode": "merge",
+    "actions": [
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "settings",
+        "relPath": "settings.json",
+        "content": "{\n  \"local\": 1,\n  \"remote\": 2,\n  \"apiKeys\": \"local-test-key\"\n}\n"
+      }
+    ]
+  }
+}

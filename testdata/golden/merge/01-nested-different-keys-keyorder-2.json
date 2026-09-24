@@ -1,0 +1,38 @@
+{
+  "name": "01-nested-different-keys-keyorder-2",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "marker": "same",
+      "profile": {
+        "name": "base",
+        "theme": "light"
+      }
+    },
+    "local": {
+      "profile": {
+        "theme": "light",
+        "name": "local"
+      },
+      "marker": "same"
+    },
+    "remote": {
+      "marker": "same",
+      "profile": {
+        "name": "base",
+        "theme": "dark"
+      }
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "marker": "same",
+      "profile": {
+        "name": "local",
+        "theme": "dark"
+      }
+    },
+    "conflicts": []
+  }
+}

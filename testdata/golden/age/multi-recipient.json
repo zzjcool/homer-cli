@@ -1,0 +1,25 @@
+{
+  "name": "multi-recipient",
+  "operation": "TS AgeCryptoPort.encrypt",
+  "input": {
+    "plaintext": "multi recipient interoperability sample",
+    "recipients": [
+      "age1l7uq7xnadqcejen2m76hwtw55vveqdrvgdwdh6qqev4q8jdcwsys9m5cag",
+      "age12te5667pqcjh72kcdekgnpfmn7ff8qv8nd29r3kyz4x73jvtn9zqdd5jtl"
+    ]
+  },
+  "output": {
+    "name": "multi-recipient",
+    "format": "age-v1-binary-base64",
+    "plaintext": "multi recipient interoperability sample",
+    "ciphertextBase64": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBFcmdBMnlYd0NkWmNEbnlJeCt5WWNZbWlZTWJjRFRteHBNOTBidWZ0WGdnClMzYlhLbjdQYmhWMGdYa2x0VkFrM00zRlZLNDJzTUFId29Rem9JcDBucU0KLT4gWDI1NTE5IFVnM2JoQTY0RTVXN1lUOERzbTE2QUVpRXo2RGlTb2IyRFF0S1VNM2VCa3MKNmZqYmFjK1VzLy81UEh1TDhnbDcrQXRLV2p6NXJEM0d2M0hFUElrOXhxWQotLS0gMGtvRnZzU0h2a0pwN05pUjJsUWtrN1owcWN5WE1tS3llM0xFc0J5cWlrOAooLCKF0Ke5J2aQlWyFHkttSMYauWs86c67o//pss2X17l6QefMz+7Lcp1IA2q4R21cOw1nEJVHDaLa+4v4R22T3NcA7S8Kog==",
+    "recipients": [
+      "age1l7uq7xnadqcejen2m76hwtw55vveqdrvgdwdh6qqev4q8jdcwsys9m5cag",
+      "age12te5667pqcjh72kcdekgnpfmn7ff8qv8nd29r3kyz4x73jvtn9zqdd5jtl"
+    ],
+    "identities": [
+      "AGE-SECRET-KEY-1N66RS534QC04LJC2E8JH59SQZAVYR2TZ84Z4DCALP0AKYVZTQL3S8LKNJG",
+      "AGE-SECRET-KEY-1TKXGHZGCXY062CTSPSG9CDLE4SCWF4TQ2U38P378HRADSSYZLDYSRCVKNX"
+    ]
+  }
+}

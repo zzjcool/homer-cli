@@ -1,0 +1,81 @@
+{
+  "name": "skip-empty-actions",
+  "operation": "planFirstContact",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "skills": {
+              "paths": [
+                "skills/"
+              ],
+              "mode": "mirror"
+            },
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge"
+            }
+          }
+        }
+      }
+    },
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "local/SKILL.md": {
+                "kind": "file",
+                "content": "local"
+              }
+            }
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {}
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "remote/SKILL.md": {
+                "kind": "file",
+                "content": "remote"
+              }
+            }
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {}
+          }
+        ]
+      }
+    ],
+    "mode": "skip"
+  },
+  "output": {
+    "mode": "skip",
+    "actions": []
+  }
+}

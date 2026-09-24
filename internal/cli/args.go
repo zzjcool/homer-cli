@@ -1,0 +1,291 @@
+package cli
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Command is a top-level homer command. The command set is deliberately small
+// in P0; later waves add behavior behind the same dispatch points.
+type Command string
+
+const (
+	CommandInit   Command = "init"
+	CommandStatus Command = "status"
+	CommandDiff   Command = "diff"
+	CommandPush   Command = "push"
+	CommandPull   Command = "pull"
+	CommandMerge  Command = "merge"
+	CommandHome   Command = "home"
+	CommandDoctor Command = "doctor"
+	CommandSecret Command = "secret"
+	CommandHelp   Command = "help"
+)
+
+// COMMANDS is the frozen top-level command order shown by --help.
+var COMMANDS = []Command{
+	CommandInit,
+	CommandStatus,
+	CommandDiff,
+	CommandPush,
+	CommandPull,
+	CommandMerge,
+	CommandHome,
+	CommandDoctor,
+	CommandSecret,
+	CommandHelp,
+}
+
+// Commands is the idiomatic alias for callers that prefer Go naming.
+var Commands = COMMANDS
+
+// ParsedArgs separates the command word from its arguments. It intentionally
+// does not parse flags; each command owns its flag contract in later waves.
+type ParsedArgs struct {
+	Command Command
+	Rest    []string
+}
+
+// SplitCommand recognizes a command from argv after the executable name.
+// --help and -h are aliases for the top-level help command.
+func SplitCommand(argv []string) ParsedArgs {
+	if len(argv) == 0 {
+		return ParsedArgs{}
+	}
+	first := argv[0]
+	if first == "--help" || first == "-h" {
+		return ParsedArgs{Command: CommandHelp, Rest: append([]string(nil), argv[1:]...)}
+	}
+	for _, command := range COMMANDS {
+		if string(command) == first {
+			return ParsedArgs{Command: command, Rest: append([]string(nil), argv[1:]...)}
+		}
+	}
+	return ParsedArgs{Rest: append([]string(nil), argv...)}
+}
+
+// USAGE is the top-level CLI help text. Keep this stable: scripts and the
+// release smoke test use `homer --help` as the first post-install check.
+const USAGE = `homer — dotfiles for humans and their AI agents
+
+用法:
+  homer <command> [options]
+
+命令:
+  init      扫描 adapter 并生成 homer.json + store 快照
+  status    显示本地/仓库之间的漂移概览
+  diff      显示漂移的详细差异
+  push      密钥扫描后推送本地快照到 store 并提交（+ 推送远端）
+  pull      拉取远端快照，备份后应用到工具目录
+  merge     逐项裁决本地/远端冲突
+  home      新机器一键归位：clone 配置仓库 → 应用配置 → 解密密钥 → doctor
+  doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
+  secret    密钥投递：keygen | push | pull | list
+
+全局选项:
+  --home <dir>  homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
+  -h, --help    显示本帮助
+
+退出码:
+  0  成功（包括 help；后续实现中信息性漂移也不视为错误）
+  1  用法错误或命令失败
+
+当前状态: P0 脚手架命令尚未实现
+
+示例:
+  homer init
+  homer status --json
+  homer diff --category settings
+  homer push --yes
+  homer pull --yes
+  homer merge --accept-remote
+  homer home <repo-url> --yes
+  homer doctor --json
+  homer secret keygen
+`
+
+// CommandOptions is the common, intentionally permissive P0 flag shape. The
+// values are parsed now so that later waves can replace only the command body,
+// not the command-line contract.
+type CommandOptions struct {
+	Home         string
+	JSON         bool
+	Help         bool
+	Yes          bool
+	NoPush       bool
+	AcceptLocal  bool
+	AcceptRemote bool
+	Offline      bool
+	Verbose      bool
+	Force        bool
+	Adapters     []string
+	Adapter      string
+	Category     string
+	Mode         string
+	Positionals  []string
+}
+
+type argumentError struct{ message string }
+
+func (e *argumentError) Error() string { return e.message }
+
+func usageArgumentError(message string) error {
+	return &argumentError{message: message}
+}
+
+func isFlag(arg string) bool { return strings.HasPrefix(arg, "-") }
+
+func splitLongFlag(arg string) (name, value string, hasValue bool) {
+	if !strings.HasPrefix(arg, "--") {
+		return arg, "", false
+	}
+	if index := strings.IndexByte(arg, '='); index >= 0 {
+		return arg[:index], arg[index+1:], true
+	}
+	return arg, "", false
+}
+
+func takeOptionValue(args []string, index *int, name string, inline string, hasInline bool) (string, error) {
+	if hasInline {
+		if inline == "" {
+			return "", usageArgumentError(fmt.Sprintf("选项 %s 需要一个值", name))
+		}
+		return inline, nil
+	}
+	if *index+1 >= len(args) {
+		return "", usageArgumentError(fmt.Sprintf("选项 %s 缺少值", name))
+	}
+	*index++
+	value := args[*index]
+	if value == "" {
+		return "", usageArgumentError(fmt.Sprintf("选项 %s 需要一个值", name))
+	}
+	return value, nil
+}
+
+func appendAdapters(options *CommandOptions, value string) {
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			options.Adapters = append(options.Adapters, item)
+		}
+	}
+}
+
+// parseOptions validates the P0 command flag surface. It is deliberately
+// private: command implementations in later waves can add typed parsers while
+// preserving Run's stable entry point.
+func parseOptions(command Command, args []string, allowPositionals bool) (CommandOptions, error) {
+	var options CommandOptions
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			if !allowPositionals && index+1 < len(args) {
+				return options, usageArgumentError(fmt.Sprintf("命令 %s 不接受位置参数", command))
+			}
+			options.Positionals = append(options.Positionals, args[index+1:]...)
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			options.Help = true
+			continue
+		}
+		if !isFlag(arg) {
+			if !allowPositionals {
+				return options, usageArgumentError(fmt.Sprintf("命令 %s 不接受位置参数: %s", command, arg))
+			}
+			options.Positionals = append(options.Positionals, arg)
+			continue
+		}
+
+		name, inline, hasInline := splitLongFlag(arg)
+		switch name {
+		case "--home":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			options.Home = value
+		case "--json":
+			if hasInline {
+				return options, usageArgumentError("选项 --json 不接受值")
+			}
+			options.JSON = true
+		case "--yes":
+			if hasInline {
+				return options, usageArgumentError("选项 --yes 不接受值")
+			}
+			options.Yes = true
+		case "--no-push":
+			if hasInline {
+				return options, usageArgumentError("选项 --no-push 不接受值")
+			}
+			options.NoPush = true
+		case "--accept-local":
+			if hasInline {
+				return options, usageArgumentError("选项 --accept-local 不接受值")
+			}
+			options.AcceptLocal = true
+		case "--accept-remote":
+			if hasInline {
+				return options, usageArgumentError("选项 --accept-remote 不接受值")
+			}
+			options.AcceptRemote = true
+		case "--offline":
+			if hasInline {
+				return options, usageArgumentError("选项 --offline 不接受值")
+			}
+			options.Offline = true
+		case "--verbose", "-v":
+			if hasInline {
+				return options, usageArgumentError(fmt.Sprintf("选项 %s 不接受值", name))
+			}
+			options.Verbose = true
+		case "--force":
+			if hasInline {
+				return options, usageArgumentError("选项 --force 不接受值")
+			}
+			options.Force = true
+		case "--adapters":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			appendAdapters(&options, value)
+		case "--adapter":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			options.Adapter = value
+		case "--category":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			options.Category = value
+		case "--mode":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			options.Mode = value
+		default:
+			return options, usageArgumentError(fmt.Sprintf("未知选项: %s", arg))
+		}
+	}
+	return options, nil
+}
+
+func commandUsage(command Command) string {
+	switch command {
+	case CommandHome:
+		return "用法: homer home <repo-url> [options]\n\n首次对接模式: --mode pull|merge|skip；--yes 默认 merge。\n\n选项: --home <dir> --mode <mode> --yes --json -h, --help"
+	case CommandDoctor:
+		return "用法: homer doctor [options]\n\n八项体检（P0 占位）。\n\n选项: --home <dir> --offline --json -h, --help"
+	case CommandSecret:
+		return "用法: homer secret <keygen|push|pull|list> [options]\n\n选项: --home <dir> --yes --no-push --json -h, --help"
+	default:
+		return fmt.Sprintf("用法: homer %s [options]\n\n当前命令尚未实现。\n\n选项: --home <dir> --json -h, --help", command)
+	}
+}

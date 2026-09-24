@@ -1,0 +1,22 @@
+{
+  "name": "unicode-and-newlines",
+  "operation": "TS AgeCryptoPort.encrypt",
+  "input": {
+    "plaintext": "自造测试明文\nline two\nline three\n",
+    "recipients": [
+      "age12te5667pqcjh72kcdekgnpfmn7ff8qv8nd29r3kyz4x73jvtn9zqdd5jtl"
+    ]
+  },
+  "output": {
+    "name": "unicode-and-newlines",
+    "format": "age-v1-binary-base64",
+    "plaintext": "自造测试明文\nline two\nline three\n",
+    "ciphertextBase64": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBSNFo0RW1FQlkvMHJxV0Y5anFwanpWZ2RyMDhyWlFYbUcrVGg1TTUzTFdBCjJLcFFiakp0WWp3bUowekdERmVJRUlSNWt3ZHN5Tm5UdEdaT1dVR2ZsM1EKLS0tIGlwM2FTU3hqcTFzSFkwZHh1dEZSU2VFNlhudncvYXBqVmlNdVY4T21lQ2cKpjII4A6opEr88UzfcAsS6U9mQTX9mqMEvBy3dGXXzH+N54gURIFpWVxstUQZU/2ap4MZJmMc0vOABxNDOOOofYRyvg3OlkA=",
+    "recipients": [
+      "age12te5667pqcjh72kcdekgnpfmn7ff8qv8nd29r3kyz4x73jvtn9zqdd5jtl"
+    ],
+    "identities": [
+      "AGE-SECRET-KEY-1TKXGHZGCXY062CTSPSG9CDLE4SCWF4TQ2U38P378HRADSSYZLDYSRCVKNX"
+    ]
+  }
+}

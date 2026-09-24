@@ -1,0 +1,48 @@
+{
+  "name": "05-array-both-changed-different-keyorder-2",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "marker": "same",
+      "list": [
+        1
+      ]
+    },
+    "local": {
+      "list": [
+        2
+      ],
+      "marker": "same"
+    },
+    "remote": {
+      "marker": "same",
+      "list": [
+        3
+      ]
+    }
+  },
+  "output": {
+    "status": "conflict",
+    "merged": {
+      "marker": "same",
+      "list": [
+        2
+      ]
+    },
+    "conflicts": [
+      {
+        "keyPath": "list",
+        "reason": "array-both-changed",
+        "base": [
+          1
+        ],
+        "local": [
+          2
+        ],
+        "remote": [
+          3
+        ]
+      }
+    ]
+  }
+}

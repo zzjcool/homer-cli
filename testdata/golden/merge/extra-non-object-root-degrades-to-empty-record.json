@@ -1,0 +1,14 @@
+{
+  "name": "extra-non-object-root-degrades-to-empty-record",
+  "operation": "mergeJson",
+  "input": {
+    "base": null,
+    "local": "plain test text",
+    "remote": null
+  },
+  "output": {
+    "status": "clean",
+    "merged": {},
+    "conflicts": []
+  }
+}

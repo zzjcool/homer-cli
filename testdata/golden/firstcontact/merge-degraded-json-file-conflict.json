@@ -1,0 +1,91 @@
+{
+  "name": "merge-degraded-json-file-conflict",
+  "operation": "planFirstContact",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "skills": {
+              "paths": [
+                "skills/"
+              ],
+              "mode": "mirror"
+            },
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge"
+            }
+          }
+        }
+      }
+    },
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {}
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "file",
+                "content": "local text"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {}
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "file",
+                "content": "remote text"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "mode": "merge"
+  },
+  "output": {
+    "mode": "merge",
+    "actions": [
+      {
+        "type": "conflict",
+        "adapterId": "pi",
+        "category": "settings",
+        "relPath": "settings.json",
+        "reason": "modify-vs-modify",
+        "localContent": "local text",
+        "remoteContent": "remote text"
+      }
+    ]
+  }
+}

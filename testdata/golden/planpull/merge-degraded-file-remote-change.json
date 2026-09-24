@@ -1,0 +1,87 @@
+{
+  "name": "merge-degraded-file-remote-change",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge"
+            }
+          }
+        }
+      }
+    },
+    "base": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "file",
+                "content": "not-json-v1"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "file",
+                "content": "not-json-v1"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {
+              "settings.json": {
+                "kind": "file",
+                "content": "not-json-v2"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "settings",
+        "relPath": "settings.json",
+        "content": "not-json-v2"
+      }
+    ]
+  }
+}

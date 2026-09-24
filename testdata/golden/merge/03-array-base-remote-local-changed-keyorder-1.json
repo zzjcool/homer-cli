@@ -1,0 +1,36 @@
+{
+  "name": "03-array-base-remote-local-changed-keyorder-1",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "list": [
+        1,
+        2
+      ],
+      "marker": "same"
+    },
+    "local": {
+      "marker": "same",
+      "list": [
+        "local"
+      ]
+    },
+    "remote": {
+      "list": [
+        1,
+        2
+      ],
+      "marker": "same"
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "marker": "same",
+      "list": [
+        "local"
+      ]
+    },
+    "conflicts": []
+  }
+}

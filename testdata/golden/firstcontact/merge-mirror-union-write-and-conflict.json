@@ -1,0 +1,106 @@
+{
+  "name": "merge-mirror-union-write-and-conflict",
+  "operation": "planFirstContact",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "skills": {
+              "paths": [
+                "skills/"
+              ],
+              "mode": "mirror"
+            },
+            "settings": {
+              "paths": [
+                "settings.json"
+              ],
+              "mode": "merge"
+            }
+          }
+        }
+      }
+    },
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "local/SKILL.md": {
+                "kind": "file",
+                "content": "local-only"
+              },
+              "both/SKILL.md": {
+                "kind": "file",
+                "content": "local-version"
+              }
+            }
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {}
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "remote/SKILL.md": {
+                "kind": "file",
+                "content": "remote-only"
+              },
+              "both/SKILL.md": {
+                "kind": "file",
+                "content": "remote-version"
+              }
+            }
+          },
+          {
+            "adapterId": "pi",
+            "category": "settings",
+            "mode": "merge",
+            "files": {}
+          }
+        ]
+      }
+    ],
+    "mode": "merge"
+  },
+  "output": {
+    "mode": "merge",
+    "actions": [
+      {
+        "type": "conflict",
+        "adapterId": "pi",
+        "category": "skills",
+        "relPath": "both/SKILL.md",
+        "reason": "modify-vs-modify",
+        "localContent": "local-version",
+        "remoteContent": "remote-version"
+      },
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "skills",
+        "relPath": "remote/SKILL.md",
+        "content": "remote-only"
+      }
+    ]
+  }
+}

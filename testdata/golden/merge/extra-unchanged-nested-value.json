@@ -1,0 +1,50 @@
+{
+  "name": "extra-unchanged-nested-value",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "a": 1,
+      "nested": {
+        "list": [
+          1,
+          2
+        ],
+        "text": "same"
+      }
+    },
+    "local": {
+      "a": 1,
+      "nested": {
+        "list": [
+          1,
+          2
+        ],
+        "text": "same"
+      }
+    },
+    "remote": {
+      "a": 1,
+      "nested": {
+        "list": [
+          1,
+          2
+        ],
+        "text": "same"
+      }
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "a": 1,
+      "nested": {
+        "list": [
+          1,
+          2
+        ],
+        "text": "same"
+      }
+    },
+    "conflicts": []
+  }
+}

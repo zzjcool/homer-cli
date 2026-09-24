@@ -1,0 +1,26 @@
+{
+  "name": "extra-both-new-same-value",
+  "operation": "mergeJson",
+  "input": {
+    "base": {},
+    "local": {
+      "newKey": {
+        "value": "same"
+      }
+    },
+    "remote": {
+      "newKey": {
+        "value": "same"
+      }
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "newKey": {
+        "value": "same"
+      }
+    },
+    "conflicts": []
+  }
+}

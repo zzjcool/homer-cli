@@ -1,0 +1,20 @@
+{
+  "name": "matrix-same-deleted",
+  "operation": "compareFile",
+  "input": {
+    "base": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "local": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "remote": null,
+    "relPath": "skills/golden.md"
+  },
+  "output": {
+    "type": "pull-delete",
+    "path": "skills/golden.md"
+  }
+}

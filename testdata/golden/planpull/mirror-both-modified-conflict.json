@@ -1,0 +1,89 @@
+{
+  "name": "mirror-both-modified-conflict",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "skills": {
+              "paths": [
+                "skills/"
+              ],
+              "mode": "mirror"
+            }
+          }
+        }
+      }
+    },
+    "base": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "foo/golden.md": {
+                "kind": "file",
+                "content": "v1"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "foo/golden.md": {
+                "kind": "file",
+                "content": "local"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "foo/golden.md": {
+                "kind": "file",
+                "content": "remote"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "conflict",
+        "adapterId": "pi",
+        "category": "skills",
+        "relPath": "foo/golden.md",
+        "reason": "modify-vs-modify",
+        "localContent": "local",
+        "remoteContent": "remote"
+      }
+    ]
+  }
+}

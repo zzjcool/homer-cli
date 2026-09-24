@@ -1,0 +1,91 @@
+{
+  "name": "category-mixed-actions",
+  "operation": "compareCategory",
+  "input": {
+    "base": {
+      "push.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "pull.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "delete-local.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "conflict.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "quiet.md": {
+        "kind": "file",
+        "content": "v1"
+      }
+    },
+    "local": {
+      "push.md": {
+        "kind": "file",
+        "content": "v2"
+      },
+      "pull.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "conflict.md": {
+        "kind": "file",
+        "content": "v2"
+      },
+      "quiet.md": {
+        "kind": "file",
+        "content": "v1"
+      }
+    },
+    "remote": {
+      "push.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "pull.md": {
+        "kind": "file",
+        "content": "v3"
+      },
+      "delete-local.md": {
+        "kind": "file",
+        "content": "v1"
+      },
+      "conflict.md": {
+        "kind": "file",
+        "content": "remote"
+      },
+      "quiet.md": {
+        "kind": "file",
+        "content": "v1"
+      }
+    }
+  },
+  "output": [
+    {
+      "type": "conflict",
+      "path": "conflict.md",
+      "reason": "modify-vs-modify"
+    },
+    {
+      "type": "push-delete",
+      "path": "delete-local.md"
+    },
+    {
+      "type": "pull",
+      "path": "pull.md"
+    },
+    {
+      "type": "push",
+      "path": "push.md"
+    },
+    {
+      "type": "noop",
+      "path": "quiet.md"
+    }
+  ]
+}

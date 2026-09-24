@@ -1,0 +1,22 @@
+{
+  "name": "empty-plaintext",
+  "operation": "TS AgeCryptoPort.encrypt",
+  "input": {
+    "plaintext": "",
+    "recipients": [
+      "age1l297j2lry7kn7404gdknsn8zg2fefjf24w0us42vnrh5tec3pf6qvf42n6"
+    ]
+  },
+  "output": {
+    "name": "empty-plaintext",
+    "format": "age-v1-binary-base64",
+    "plaintext": "",
+    "ciphertextBase64": "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBQQkpxblJYRUVkUTJuYlZKT0V4QXZSTllZZ3RPUmk5R25LYndtSURrNlRZCkVHVC9PS1JneEpoS3l6a1ZqMTRBL29ZOXA4UXRhazdnVkdvZURZUFFWTkEKLS0tIFVzZ3pCNTBNb2s0ZmxMVnBzeHFCTVNsektLTW13ZFRaUmdxckI5SlJDZmMKYVRrVtZnv5rKJJMsYa3fkYsQpthzO9O4SC17QfF6b8o=",
+    "recipients": [
+      "age1l297j2lry7kn7404gdknsn8zg2fefjf24w0us42vnrh5tec3pf6qvf42n6"
+    ],
+    "identities": [
+      "AGE-SECRET-KEY-1JKAZQCYF0FZ50XUQ2AH0KJU0Q42EAYU4ZWFM8AYTYYUVY66P7GMS46LKHW"
+    ]
+  }
+}

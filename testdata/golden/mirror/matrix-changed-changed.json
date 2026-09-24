@@ -1,0 +1,24 @@
+{
+  "name": "matrix-changed-changed",
+  "operation": "compareFile",
+  "input": {
+    "base": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "local": {
+      "kind": "file",
+      "content": "v2"
+    },
+    "remote": {
+      "kind": "file",
+      "content": "v3"
+    },
+    "relPath": "skills/golden.md"
+  },
+  "output": {
+    "type": "conflict",
+    "path": "skills/golden.md",
+    "reason": "modify-vs-modify"
+  }
+}

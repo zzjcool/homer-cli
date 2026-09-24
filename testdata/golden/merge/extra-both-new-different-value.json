@@ -1,0 +1,27 @@
+{
+  "name": "extra-both-new-different-value",
+  "operation": "mergeJson",
+  "input": {
+    "base": {},
+    "local": {
+      "newKey": "local"
+    },
+    "remote": {
+      "newKey": "remote"
+    }
+  },
+  "output": {
+    "status": "conflict",
+    "merged": {
+      "newKey": "local"
+    },
+    "conflicts": [
+      {
+        "keyPath": "newKey",
+        "reason": "both-modified",
+        "local": "local",
+        "remote": "remote"
+      }
+    ]
+  }
+}

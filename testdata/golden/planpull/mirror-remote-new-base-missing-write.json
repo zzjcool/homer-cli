@@ -1,0 +1,65 @@
+{
+  "name": "mirror-remote-new-base-missing-write",
+  "operation": "planPull",
+  "input": {
+    "config": {
+      "version": 1,
+      "adapters": {
+        "pi": {
+          "root": "/tmp/homer-golden/pi",
+          "categories": {
+            "skills": {
+              "paths": [
+                "skills/"
+              ],
+              "mode": "mirror"
+            }
+          }
+        }
+      }
+    },
+    "base": [],
+    "local": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {}
+          }
+        ]
+      }
+    ],
+    "remote": [
+      {
+        "adapterId": "pi",
+        "categories": [
+          {
+            "adapterId": "pi",
+            "category": "skills",
+            "mode": "mirror",
+            "files": {
+              "new/golden.md": {
+                "kind": "file",
+                "content": "remote-new"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "actions": [
+      {
+        "type": "write",
+        "adapterId": "pi",
+        "category": "skills",
+        "relPath": "new/golden.md",
+        "content": "remote-new"
+      }
+    ]
+  }
+}

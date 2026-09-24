@@ -1,0 +1,28 @@
+{
+  "name": "extra-remote-only-new-nested-key",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "keep": 1
+    },
+    "local": {
+      "keep": 1
+    },
+    "remote": {
+      "keep": 1,
+      "remoteOnly": {
+        "value": 2
+      }
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "keep": 1,
+      "remoteOnly": {
+        "value": 2
+      }
+    },
+    "conflicts": []
+  }
+}

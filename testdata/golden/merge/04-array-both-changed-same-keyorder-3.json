@@ -1,0 +1,37 @@
+{
+  "name": "04-array-both-changed-same-keyorder-3",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "list": [
+        1
+      ],
+      "marker": "same"
+    },
+    "local": {
+      "marker": "same",
+      "list": [
+        9,
+        8
+      ]
+    },
+    "remote": {
+      "list": [
+        9,
+        8
+      ],
+      "marker": "same"
+    }
+  },
+  "output": {
+    "status": "clean",
+    "merged": {
+      "marker": "same",
+      "list": [
+        9,
+        8
+      ]
+    },
+    "conflicts": []
+  }
+}

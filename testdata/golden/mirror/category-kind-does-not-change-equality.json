@@ -1,0 +1,30 @@
+{
+  "name": "category-kind-does-not-change-equality",
+  "operation": "compareCategory",
+  "input": {
+    "base": {
+      "same.md": {
+        "kind": "file",
+        "content": "v1"
+      }
+    },
+    "local": {
+      "same.md": {
+        "kind": "file",
+        "content": "v1"
+      }
+    },
+    "remote": {
+      "same.md": {
+        "kind": "json",
+        "content": "v1"
+      }
+    }
+  },
+  "output": [
+    {
+      "type": "noop",
+      "path": "same.md"
+    }
+  ]
+}

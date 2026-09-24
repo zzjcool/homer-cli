@@ -1,0 +1,21 @@
+{
+  "name": "matrix-deleted-changed",
+  "operation": "compareFile",
+  "input": {
+    "base": {
+      "kind": "file",
+      "content": "v1"
+    },
+    "local": null,
+    "remote": {
+      "kind": "file",
+      "content": "v3"
+    },
+    "relPath": "skills/golden.md"
+  },
+  "output": {
+    "type": "conflict",
+    "path": "skills/golden.md",
+    "reason": "local-delete-vs-remote-modify"
+  }
+}

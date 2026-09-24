@@ -1,0 +1,10 @@
+{
+  "name": "category-all-empty",
+  "operation": "compareCategory",
+  "input": {
+    "base": {},
+    "local": {},
+    "remote": {}
+  },
+  "output": []
+}

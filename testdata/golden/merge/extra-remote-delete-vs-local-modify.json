@@ -1,0 +1,40 @@
+{
+  "name": "extra-remote-delete-vs-local-modify",
+  "operation": "mergeJson",
+  "input": {
+    "base": {
+      "settings": {
+        "model": "base",
+        "keep": true
+      }
+    },
+    "local": {
+      "settings": {
+        "model": "local",
+        "keep": true
+      }
+    },
+    "remote": {
+      "settings": {
+        "keep": true
+      }
+    }
+  },
+  "output": {
+    "status": "conflict",
+    "merged": {
+      "settings": {
+        "model": "local",
+        "keep": true
+      }
+    },
+    "conflicts": [
+      {
+        "keyPath": "settings.model",
+        "reason": "modify-vs-delete",
+        "base": "base",
+        "local": "local"
+      }
+    ]
+  }
+}
