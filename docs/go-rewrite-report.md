@@ -3,7 +3,7 @@
 > 基线：`a00f0cd`（master）  
 > 分支：`w11-integrator`  
 > 目标：按 `docs/go-rewrite-plan.md` §6 / §7 / §9 完成 Go 版 MVP e2e、发布管线与文档收官。  
-> 最终 commit：见本分支最后一个 commit（提交后回填）
+> 实现 commit：`581a505`（收官验收报告随后单独提交）
 
 ## 一句话结论
 
@@ -59,75 +59,94 @@ binary 形态安装。
 ### Go 全量 build / vet / format / test
 
 ```text
-$ go build ./... && go vet ./... && test -z "$(gofmt -l . | grep -v '^vendor/' || true)" && go test ./... -count=1
+$ go build ./... && go vet ./... && if [ -n "$(gofmt -l . | grep -v vendor || true)" ]; then gofmt -l . | grep -v vendor; exit 1; fi && go test ./... -count=1
 ?    github.com/zzjcool/homer-cli/cmd/homer [no test files]
-ok   github.com/zzjcool/homer-cli/internal/adapter 0.012s
-ok   github.com/zzjcool/homer-cli/internal/adapter/herdr 0.002s [no tests to run]
-ok   github.com/zzjcool/homer-cli/internal/adapter/opencode 0.003s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/adapter 0.013s
+ok   github.com/zzjcool/homer-cli/internal/adapter/herdr 0.003s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/adapter/opencode 0.002s [no tests to run]
 ok   github.com/zzjcool/homer-cli/internal/adapter/pi 0.002s [no tests to run]
-ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.054s
+ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.047s
 ok   github.com/zzjcool/homer-cli/internal/backup 0.005s
-ok   github.com/zzjcool/homer-cli/internal/cli 0.254s
-ok   github.com/zzjcool/homer-cli/internal/cli/commands 0.901s
-ok   github.com/zzjcool/homer-cli/internal/core 0.018s
-ok   github.com/zzjcool/homer-cli/internal/doctor 0.192s
-ok   github.com/zzjcool/homer-cli/internal/engine 0.008s
-ok   github.com/zzjcool/homer-cli/internal/gitx 0.918s
-ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.012s
-ok   github.com/zzjcool/homer-cli/internal/secretscan 0.004s
-ok   github.com/zzjcool/homer-cli/internal/sync 0.145s
-ok   github.com/zzjcool/homer-cli/internal/testutil 0.004s
-ok   github.com/zzjcool/homer-cli/tests/e2e 1.096s
+ok   github.com/zzjcool/homer-cli/internal/cli 0.238s
+ok   github.com/zzjcool/homer-cli/internal/cli/commands 0.905s
+ok   github.com/zzjcool/homer-cli/internal/core 0.014s
+ok   github.com/zzjcool/homer-cli/internal/doctor 0.189s
+ok   github.com/zzjcool/homer-cli/internal/engine 0.007s
+ok   github.com/zzjcool/homer-cli/internal/gitx 0.879s
+ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.006s
+ok   github.com/zzjcool/homer-cli/internal/secretscan 0.003s
+ok   github.com/zzjcool/homer-cli/internal/sync 0.156s
+ok   github.com/zzjcool/homer-cli/internal/testutil 0.002s [no tests to run]
+ok   github.com/zzjcool/homer-cli/tests/e2e 1.087s
 ```
 
 ### 四平台交叉编译（GoReleaser 未安装时的冻结 fallback）
 
 ```text
-$ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do GOOS=... GOARCH=... CGO_ENABLED=0 go build ...; printf '%s OK\n' "$target"; done
+$ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+>   GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o "/tmp/homer-w11-cross-final/homer-${target%/*}-${target#*/}" ./cmd/homer
+>   test -s "/tmp/homer-w11-cross-final/homer-${target%/*}-${target#*/}"
+>   printf '%s OK\\n' "$target"
+> done
 linux/amd64 OK
 linux/arm64 OK
 darwin/amd64 OK
 darwin/arm64 OK
 total 26M
--rwxr-xr-x 1 root root 6.6M ... homer-darwin-amd64
--rwxr-xr-x 1 root root 6.4M ... homer-darwin-arm64
--rwxr-xr-x 1 root root 6.7M ... homer-linux-amd64
--rwxr-xr-x 1 root root 6.5M ... homer-linux-arm64
+-rwxr-xr-x 1 root root 6.6M Sep 24 13:22 homer-darwin-amd64
+-rwxr-xr-x 1 root root 6.4M Sep 24 13:22 homer-darwin-arm64
+-rwxr-xr-x 1 root root 6.7M Sep 24 13:22 homer-linux-amd64
+-rwxr-xr-x 1 root root 6.5M Sep 24 13:22 homer-linux-arm64
 ```
 
 ### Installer / npm 语法与 e2e
 
 ```text
-$ sh -n install.sh && node --check npm/install.js && node --check npm/bin/homer.js
+$ sh -n install.sh && node --check npm/install.js && node --check npm/bin/homer.js && echo 'release/npm syntax OK'
 release/npm syntax OK
 
 $ go test ./tests/e2e -run TestMVPSevenGroups -count=1 -v
---- PASS: TestMVPSevenGroups (1.07s)
+=== RUN   TestMVPSevenGroups
+=== RUN   TestMVPSevenGroups/01-machine-A-assembly
+=== RUN   TestMVPSevenGroups/02-machine-B-home-restore
+=== RUN   TestMVPSevenGroups/03-device-rotation
+=== RUN   TestMVPSevenGroups/04-required-placeholder-doctor
+=== RUN   TestMVPSevenGroups/05-allowEscape-snapshot
+=== RUN   TestMVPSevenGroups/06-install-sh-smoke
+=== RUN   TestMVPSevenGroups/07-isolated-read-only-smoke
+--- PASS: TestMVPSevenGroups (1.09s)
     --- PASS: TestMVPSevenGroups/01-machine-A-assembly (0.07s)
     --- PASS: TestMVPSevenGroups/02-machine-B-home-restore (0.00s)
     --- PASS: TestMVPSevenGroups/03-device-rotation (0.06s)
     --- PASS: TestMVPSevenGroups/04-required-placeholder-doctor (0.03s)
     --- PASS: TestMVPSevenGroups/05-allowEscape-snapshot (0.05s)
-    --- PASS: TestMVPSevenGroups/06-install-sh-smoke (0.10s)
+    --- PASS: TestMVPSevenGroups/06-install-sh-smoke (0.09s)
     --- PASS: TestMVPSevenGroups/07-isolated-read-only-smoke (0.02s)
 PASS
-ok   github.com/zzjcool/homer-cli/tests/e2e 1.077s
+ok   github.com/zzjcool/homer-cli/tests/e2e 1.097s
 
-$ HOMER_INSTALL_PACKAGE=/tmp/homer-w11-release/homer_linux_amd64.tar.gz HOMER_INSTALL_PREFIX=/tmp/... sh install.sh
-✓ homer 安装完成 (/tmp/.../homer)
+$ HOME=$(mktemp -d) HOMER_INSTALL_PACKAGE=/tmp/homer-w11-release-final/homer_linux_amd64.tar.gz HOMER_INSTALL_PREFIX=$(mktemp -d) sh install.sh
+✓ homer 安装完成（/tmp/tmp.sr8liujL7L/homer）
+
+下一步：
+  1. 新机器一键归位 : homer home <你的配置仓库 url> --yes
+  2. 首次建立仓库   : homer init && homer push --yes
+  3. 密钥投递       : homer secret keygen / push / pull
+  4. 环境体检       : homer doctor
+install archive e2e OK
 
 $ bad checksums.txt
 checksum rejection OK
 homer install: error: checksum mismatch for homer_linux_amd64.tar.gz
 
-$ (cd npm && npm pack --pack-destination /tmp/homer-w11-npm-pack)
+$ (cd npm && npm pack --pack-destination /tmp/homer-w11-npm-pack-final)
 npm notice name: homer-cli
 npm notice version: 1.0.0
 npm notice total files: 4
 homer-cli-1.0.0.tgz
 
-$ HOMER_INSTALL_PACKAGE=/tmp/homer-w11-cross/homer-linux-amd64 npm install --prefix /tmp/homer-w11-npm-test /tmp/homer-w11-npm-pack/homer-cli-1.0.0.tgz
-added 1 package in 415ms
+$ HOMER_INSTALL_PACKAGE=/tmp/homer-w11-cross-final/homer-linux-amd64 npm install --prefix /tmp/homer-w11-npm-test-final /tmp/homer-w11-npm-pack-final/homer-cli-1.0.0.tgz
+added 1 package in 436ms
 homer — dotfiles for humans and their AI agents
 ```
 
@@ -142,7 +161,7 @@ goreleaser: unavailable (using go build cross-compile fallback)
 
 - 分支已准备：`w11-integrator`
 - PR 创建入口：<https://github.com/zzjcool/homer-cli/pull/new/w11-integrator>
-- 实际 PR URL：提交并 push 后回填；若当前环境不能创建 GitHub PR，则以上入口是可直接打开的 MR/PR 链接。
+- 实际 PR URL：<https://github.com/zzjcool/homer-cli/pull/new/w11-integrator>（分支 push 后可直接创建）。
 
 ## 已知限制 / 未决问题
 
