@@ -173,8 +173,9 @@ $ /tmp/homer-tools/goreleaser release --snapshot --clean
 
 ## MR / PR
 
-- 分支已准备：`pi-subagent/review-fix`
-- PR 创建入口：<https://github.com/zzjcool/homer-cli/pull/new/pi-subagent/review-fix>（push 后可直接创建）。
+- v1.1 分支：`fix/v1.1-audit`
+- 实现 commit：`1b45dcb`（完整 hash 见交付 git log）
+- PR 创建入口：<https://github.com/zzjcool/homer-cli/pull/new/fix/v1.1-audit>（分支已 push；当前环境无 gh/API token，需在该入口确认创建）。
 
 ## 已知限制 / 未决问题
 
@@ -326,5 +327,5 @@ MANUAL_ROOT=/tmp/homer-v11-manual-final2.TbALVw
 ```
 
 手动闭环结果：bare origin 含 `homer.json` 与 `.gitignore`，新机器 `home --yes` 返回
-`status=homed` / `doctor.ok=true`，版本命令和 ldflags 注入均通过。实现 commit hash 与
-PR URL 在交付后回填；当前工作分支为 `fix/v1.1-audit`。
+`status=homed` / `doctor.ok=true`，版本命令和 ldflags 注入均通过。实现 commit 为
+`1b45dcb`；当前工作分支为 `fix/v1.1-audit`，PR 创建入口见上。
