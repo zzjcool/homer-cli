@@ -2,6 +2,7 @@
 
 > 计划：`docs/go-rewrite-plan.md` §2.6、§3-P3-W9  
 > 分支：`p3-w9-doctor-secret`  
+> 实现 commit：`f83ba64`  
 > 独立 worktree：`/root/code/homer-cli-w9`
 
 ## 做了什么
@@ -59,7 +60,7 @@ $ gofmt -l internal/doctor/checks.go internal/doctor/checks_test.go internal/cli
 
 ## MR / PR 链接
 
-- 分支推送后：`https://github.com/zzjcool/homer-cli/pull/new/p3-w9-doctor-secret`
+- GitHub PR 创建入口（分支已推送）：`https://github.com/zzjcool/homer-cli/pull/new/p3-w9-doctor-secret`
 
 ## 未决问题
 
