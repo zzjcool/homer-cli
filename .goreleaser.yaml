@@ -1,1 +1,46 @@
-# P0 placeholder. Release packaging is scheduled for W11.
+version: 2
+
+project_name: homer
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: homer
+    main: ./cmd/homer
+    binary: homer
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: homer
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: zzjcool
+    name: homer-cli
+  mode: replace
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
