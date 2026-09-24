@@ -34,7 +34,13 @@ const (
 	maxErrorBytes = 8 * 1024
 )
 
-var requiredGitignoreLines = [...]string{"state.json", "backups/", "keys/"}
+var (
+	requiredGitignoreLines = [...]string{"state.json", "backups/", "keys/"}
+	// syncPathspecs is the complete configuration-center commit boundary. The
+	// root config and gitignore are part of the portable repository contract;
+	// state/backups/keys remain excluded by .gitignore.
+	syncPathspecs = []string{storePathspec, "homer.json", ".gitignore"}
+)
 
 // commandOutput keeps the byte form around for the two readers that need it.
 type commandOutput struct {
@@ -227,7 +233,9 @@ func EnsureGitRepo(home string) error {
 	}
 
 	if !IsGitRepo(home) {
-		result := Exec(home, []string{"init"}, 0)
+		// Keep the first-push branch deterministic. Existing repositories are
+		// never renamed; this only affects the repository created by Homer.
+		result := Exec(home, []string{"init", "-b", "master"}, 0)
 		if !result.OK {
 			return gitFailure("git init", result)
 		}
@@ -256,26 +264,98 @@ func HasUpstream(home string) bool {
 	return UpstreamRef(home) != ""
 }
 
-// HasPushTarget is deliberately a little broader than HasUpstream.  A branch
-// can have branch.<name>.remote configured while its remote-tracking ref is
-// temporarily absent (for example after a failed fetch).  S3 requires that
-// configuration alone to count as a push target.
+// HasRemote reports whether at least one named remote is configured. A remote
+// without an upstream is still a valid first-push target: Push will establish
+// the branch tracking relationship with `git push -u`.
+func HasRemote(home string) bool {
+	result := Exec(home, []string{"remote"}, 0)
+	return result.OK && strings.TrimSpace(result.Stdout) != ""
+}
+
+func currentBranch(home string) string {
+	result := Exec(home, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, 0)
+	if !result.OK {
+		return ""
+	}
+	return strings.TrimSpace(result.Stdout)
+}
+
+func configuredBranchRemote(home string) string {
+	branch := currentBranch(home)
+	if branch == "" {
+		return ""
+	}
+	result := Exec(home, []string{"config", "--get", "branch." + branch + ".remote"}, 0)
+	if !result.OK {
+		return ""
+	}
+	return strings.TrimSpace(result.Stdout)
+}
+
+func preferredRemote(home string) string {
+	remotes := Exec(home, []string{"remote"}, 0)
+	if !remotes.OK {
+		return ""
+	}
+	items := strings.Fields(remotes.Stdout)
+	if len(items) == 0 {
+		return ""
+	}
+	for _, item := range items {
+		if item == "origin" {
+			return item
+		}
+	}
+	return items[0]
+}
+
+// HasPushTarget is deliberately broader than HasUpstream. A configured branch
+// remote and a plain named remote both count: the latter is the common state
+// immediately after `git remote add origin URL`, before the first push has
+// established @{upstream}.
 func HasPushTarget(home string) bool {
-	if HasUpstream(home) {
+	if HasUpstream(home) || configuredBranchRemote(home) != "" {
 		return true
 	}
+	return HasRemote(home)
+}
 
-	branchResult := Exec(home, []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, 0)
-	if !branchResult.OK {
-		return false
+// PushHint returns the exact first-push command for the current repository.
+// It is intentionally a display-only helper; callers must still use Push for
+// the actual operation so all argv stays inside the git boundary.
+func PushHint(home string) string {
+	remote := preferredRemote(home)
+	if remote == "" {
+		remote = "origin"
 	}
-	branch := strings.TrimSpace(branchResult.Stdout)
+	branch := currentBranch(home)
 	if branch == "" {
-		return false
+		branch = "master"
 	}
+	return fmt.Sprintf("git -C %s push -u %s %s", home, remote, branch)
+}
 
-	remoteResult := Exec(home, []string{"config", "--get", "branch." + branch + ".remote"}, 0)
-	return remoteResult.OK && strings.TrimSpace(remoteResult.Stdout) != ""
+// AddOrSetRemote idempotently wires origin to url. The URL is rejected before
+// being passed to git so a leading dash can never become an option.
+func AddOrSetRemote(home, url string) error {
+	if err := AssertCloneableRepoURL(url); err != nil {
+		return err
+	}
+	if !IsGitRepo(home) {
+		return fmt.Errorf("%s 不是 git 仓库", home)
+	}
+	if existing := Exec(home, []string{"remote", "get-url", "origin"}, 0); existing.OK {
+		result := Exec(home, []string{"remote", "set-url", "origin", url}, 0)
+		if !result.OK {
+			return gitFailure("git remote set-url origin", result)
+		}
+		return nil
+	}
+	result := Exec(home, []string{"remote", "add", "origin", url}, 0)
+	if !result.OK {
+		return gitFailure("git remote add origin", result)
+	}
+	return nil
 }
 
 // Fetch runs git fetch using the repository's configured remotes and refspecs.
@@ -286,8 +366,18 @@ func Fetch(home string) ExecResult {
 // GitFetch is the explicit git-prefixed spelling used by command-layer ports.
 func GitFetch(home string) ExecResult { return Fetch(home) }
 
-// Push runs git push using the current branch's configured push target.
+// Push runs git push using the current branch's configured push target. When a
+// remote was only added by name, establish upstream on the first push so a
+// fresh Homer workspace can complete the promised one-command bootstrap.
 func Push(home string) ExecResult {
+	if UpstreamRef(home) != "" || configuredBranchRemote(home) != "" {
+		return Exec(home, []string{"push"}, 0)
+	}
+	remote := preferredRemote(home)
+	branch := currentBranch(home)
+	if remote != "" && branch != "" {
+		return Exec(home, []string{"push", "-u", remote, branch}, 0)
+	}
 	return Exec(home, []string{"push"}, 0)
 }
 
@@ -318,20 +408,47 @@ func pathspecStatus(home string, pathspecs []string) (bool, bool) {
 	return strings.TrimSpace(result.Stdout) != "", true
 }
 
-// CommitAllStore stages and commits only store/.  An empty or unobservable
-// store change returns an empty string and never creates an empty commit.
+func syncPathspecsFor(home string) []string {
+	paths := make([]string, 0, len(syncPathspecs))
+	for _, pathspec := range syncPathspecs {
+		if _, err := os.Stat(filepath.Join(home, filepath.FromSlash(pathspec))); err == nil {
+			paths = append(paths, pathspec)
+			continue
+		}
+		// A tracked path may be absent from the work tree (for example after a
+		// user deletes homer.json); retain it so git can stage the deletion.
+		if Exec(home, []string{"ls-files", "--error-unmatch", "--", pathspec}, 0).OK {
+			paths = append(paths, pathspec)
+		}
+	}
+	return paths
+}
+
+// IsPushClean checks the complete configuration-center commit boundary used
+// by Homer push. It intentionally does not include state.json, backups/, or
+// keys/, all of which are local-only and ignored.
+func IsPushClean(home string) bool {
+	changed, statusOK := pathspecStatus(home, syncPathspecsFor(home))
+	return statusOK && !changed
+}
+
+// CommitAllStore stages and commits the complete portable configuration
+// center: store/, homer.json, and .gitignore. An empty or unobservable change
+// returns an empty string and never creates an empty commit. The historical
+// function name remains for additive API compatibility with the sync layer.
 func CommitAllStore(home, message string) string {
-	changed, statusOK := pathspecStatus(home, []string{storePathspec})
+	pathspecs := syncPathspecsFor(home)
+	changed, statusOK := pathspecStatus(home, pathspecs)
 	if !statusOK || !changed {
 		return ""
 	}
 
-	add := Exec(home, []string{"add", "-A", "--", storePathspec}, 0)
-	if !add.OK {
+	addArgs := append([]string{"add", "-A", "--"}, pathspecs...)
+	if add := Exec(home, addArgs, 0); !add.OK {
 		return ""
 	}
-	commit := Exec(home, []string{"commit", "-m", message, "--", storePathspec}, 0)
-	if !commit.OK {
+	commitArgs := append([]string{"commit", "-m", message, "--"}, pathspecs...)
+	if commit := Exec(home, commitArgs, 0); !commit.OK {
 		return ""
 	}
 	return HeadCommit(home)

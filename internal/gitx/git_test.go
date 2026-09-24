@@ -134,27 +134,40 @@ func TestEnsureGitRepoIsIdempotentAndMaintainsPrivateLines(t *testing.T) {
 	}
 }
 
-func TestCommitAllStoreScopesChangesAndNoopIsEmpty(t *testing.T) {
+func TestCommitAllStoreScopesConfigurationCenterAndNoopIsEmpty(t *testing.T) {
 	repo := testRepo(t)
-	if got := CommitAllStore(repo, "nothing"); got != "" {
-		t.Fatalf("empty store commit = %q, want empty", got)
+	// EnsureGitRepo creates .gitignore before the first baseline. It is part of
+	// the configuration center, so this is intentionally a real (non-empty)
+	// initial commit even before store content exists.
+	initial := CommitAllStore(repo, "nothing")
+	if initial == "" {
+		t.Fatal("initial .gitignore commit = empty")
 	}
+	if got := strings.TrimSpace(mustExec(t, repo, "show", "--name-only", "--format=", "HEAD")); got != ".gitignore" {
+		t.Fatalf("initial paths = %q", got)
+	}
+	writeTestFile(t, filepath.Join(repo, "homer.json"), "{\"version\":1}\n")
 	first := commitTestStore(t, repo, "{\"model\":\"sonnet\"}\n", "store one")
-	if HeadCommit(repo) != first || !IsStoreClean(repo) {
-		t.Fatalf("store commit did not produce a clean HEAD")
+	if HeadCommit(repo) != first || !IsStoreClean(repo) || !IsPushClean(repo) {
+		t.Fatalf("configuration-center commit did not produce a clean HEAD")
 	}
-	writeTestFile(t, filepath.Join(repo, "homer.json"), "{}\n")
+	firstPaths := strings.TrimSpace(mustExec(t, repo, "show", "--name-only", "--format=", "HEAD"))
+	if firstPaths != "homer.json\nstore/pi/settings.json" {
+		t.Fatalf("initial configuration-center paths = %q", firstPaths)
+	}
+
+	writeTestFile(t, filepath.Join(repo, "homer.json"), "{\"version\":2}\n")
 	writeTestFile(t, filepath.Join(repo, "store", "pi", "settings.json"), "{\"model\":\"opus\"}\n")
 	second := CommitAllStore(repo, "store two")
 	if second == "" || second == first {
 		t.Fatalf("second store commit = %q, first = %q", second, first)
 	}
 	changed := strings.TrimSpace(mustExec(t, repo, "show", "--name-only", "--format=", "HEAD"))
-	if changed != "store/pi/settings.json" {
-		t.Fatalf("store commit included unexpected paths: %q", changed)
+	if changed != "homer.json\nstore/pi/settings.json" {
+		t.Fatalf("configuration-center commit paths = %q", changed)
 	}
-	if !strings.Contains(mustExec(t, repo, "status", "--porcelain"), "homer.json") {
-		t.Fatal("non-store change was unexpectedly committed")
+	if !IsPushClean(repo) {
+		t.Fatal("configuration-center paths remained dirty after commit")
 	}
 	if got := CommitAllStore(repo, "again"); got != "" {
 		t.Fatalf("noop store commit = %q, want empty", got)

@@ -93,6 +93,7 @@ func fakeWriteGitWithPushFailures(pushFailures int, heads ...string) GitPort {
 		MergeFFUpstream:        func(string) gitx.ExecResult { return gitx.ExecResult{OK: true} },
 		HeadCommit:             head,
 		IsStoreClean:           func(string) bool { return true },
+		IsPushClean:            func(string) bool { return true },
 		CommitStoreIfNeeded: func(_ core.HomerPaths, _ string) string {
 			if len(heads) > 0 {
 				return heads[0]
@@ -186,7 +187,7 @@ func TestPushCreatesInitialBaselineOnEmptyRemote(t *testing.T) {
 	_ = config
 }
 
-func TestPushUnbornRepositoryRemainsNoDrift(t *testing.T) {
+func TestPushUnbornRepositoryCreatesInitialBaseline(t *testing.T) {
 	home := t.TempDir()
 	paths := core.GetHomerPaths(func(name string) string {
 		if name == "HOMER_HOME" {
@@ -209,11 +210,14 @@ func TestPushUnbornRepositoryRemainsNoDrift(t *testing.T) {
 	}
 
 	report := RunPush(PushOptions{HomerHome: home, Yes: true}, nil)
-	if report.Status != PushStatusNoDrift || report.ExitCode() != 0 {
+	if report.Status != PushStatusPushed || report.ExitCode() != 0 || report.Commit == "" {
 		t.Fatalf("unborn push report = %#v", report)
 	}
-	if got := gitx.HeadCommit(home); got != "" {
-		t.Fatalf("unborn push created commit %q", got)
+	if got := gitx.HeadCommit(home); got == "" {
+		t.Fatal("unborn push did not create initial baseline")
+	}
+	if !gitx.IsPushClean(home) {
+		t.Fatal("unborn baseline left configuration-center paths dirty")
 	}
 	_ = config
 }

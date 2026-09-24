@@ -23,8 +23,9 @@ func prepareStoreSnapshot(local []core.AdapterSnapshot, config core.HomerConfig)
 	return PrepareStoreSnapshot(local, config)
 }
 
-// CommitStoreIfNeeded commits only store/ and returns the new HEAD, or an
-// empty string when there is no observable store change or git cannot commit.
+// CommitStoreIfNeeded commits the portable configuration center (store/,
+// homer.json, and .gitignore) and returns the new HEAD, or an empty string
+// when there is no observable change or git cannot commit.
 func CommitStoreIfNeeded(paths core.HomerPaths, message string) string {
 	return gitx.CommitAllStore(paths.Home, message)
 }

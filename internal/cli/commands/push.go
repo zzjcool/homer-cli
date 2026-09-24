@@ -28,6 +28,8 @@ type GitPort struct {
 	IsGitRepo              func(home string) bool
 	HasUpstream            func(home string) bool
 	HasPushTarget          func(home string) bool
+	HasRemote              func(home string) bool
+	PushHint               func(home string) string
 	UpstreamRef            func(home string) string
 	Fetch                  func(home string) gitx.ExecResult
 	GitFetch               func(home string) gitx.ExecResult
@@ -35,6 +37,7 @@ type GitPort struct {
 	GitPush                func(home string) gitx.ExecResult
 	HeadCommit             func(home string) string
 	IsStoreClean           func(home string) bool
+	IsPushClean            func(home string) bool
 	IsAncestorOf           func(home, ancestor, descendant string) bool
 	MergeFFUpstream        func(home string) gitx.ExecResult
 	EnsureGitRepo          func(home string) error
@@ -133,6 +136,20 @@ func (p GitPort) hasPushTarget(home string) bool {
 	return gitx.HasPushTarget(home)
 }
 
+func (p GitPort) hasRemote(home string) bool {
+	if p.HasRemote != nil {
+		return p.HasRemote(home)
+	}
+	return gitx.HasRemote(home)
+}
+
+func (p GitPort) pushHint(home string) string {
+	if p.PushHint != nil {
+		return p.PushHint(home)
+	}
+	return gitx.PushHint(home)
+}
+
 func (p GitPort) upstreamRef(home string) string {
 	if p.UpstreamRef != nil {
 		return p.UpstreamRef(home)
@@ -172,6 +189,13 @@ func (p GitPort) isStoreClean(home string) bool {
 		return p.IsStoreClean(home)
 	}
 	return gitx.IsStoreClean(home)
+}
+
+func (p GitPort) isPushClean(home string) bool {
+	if p.IsPushClean != nil {
+		return p.IsPushClean(home)
+	}
+	return gitx.IsPushClean(home)
 }
 
 func (p GitPort) isAncestorOf(home, ancestor, descendant string) bool {
@@ -507,11 +531,12 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 	}
 
 	changedFiles := append([]syncx.FileRef(nil), check.ChangedFiles...)
-	// A baseline is needed only when git already has a commit and store is not
-	// clean relative to it. An unborn repository has no historical baseline;
-	// preserve the TS behavior and report no-drift rather than creating a
-	// commit that cannot yet be based on an existing HEAD.
-	needsBaseline := git.headCommit(paths.Home) != "" && !git.isStoreClean(paths.Home)
+	// A first push is itself a sync operation even when the adapter snapshot has
+	// no drift: the repository, .gitignore, homer.json, and store need a
+	// portable baseline. This is the v1.1 upgrade from the old M1 no-op for a
+	// non-git ~/.homer. An unborn repository and an existing repository with an
+	// uncommitted configuration-center path use the same baseline path.
+	needsBaseline := !git.isGitRepo(paths.Home) || git.headCommit(paths.Home) == "" || !git.isPushClean(paths.Home)
 	if len(changedFiles) == 0 && !needsBaseline {
 		if localAhead && !options.NoPush {
 			if retry, ok := retryPush(paths.Home, git, warnings); ok {
@@ -523,7 +548,10 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		return report
 	}
 	if len(changedFiles) == 0 {
-		warnings = append(warnings, "本地快照已在 store 中，本次不重写 store 内容；仅把 store 补进 git 历史（建立同步基线）")
+		warnings = append(warnings, "本地快照已在 store 中，本次不重写 store 内容；将提交 store + homer.json + .gitignore，建立同步基线")
+	}
+	if !git.isGitRepo(paths.Home) {
+		warnings = append(warnings, "~/.homer 尚未建立 git 仓库，本次将自动 git init 并建立同步基线")
 	}
 
 	var ui selectPrompter
@@ -561,7 +589,7 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		return report
 	}
 	commit := git.commitStore(paths, pushCommitMessage(len(changedFiles)))
-	if commit == "" && !git.isStoreClean(paths.Home) {
+	if commit == "" && !git.isPushClean(paths.Home) {
 		report = newPushCommandReport(PushStatusError)
 		report.ChangedFiles = changedFiles
 		report.Warnings = warnings
@@ -593,10 +621,11 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		pushed := git.push(paths.Home)
 		if !pushed.OK {
 			reason := firstLine(pushed.Stderr)
+			hint := git.pushHint(paths.Home)
 			report = newPushCommandReport(PushStatusError)
 			report.ChangedFiles = changedFiles
 			report.Commit = commit
-			report.Warnings = warnings
+			report.Warnings = append(warnings, "远端未推送；请运行 `"+hint+"`")
 			report.Errors = []string{fmt.Sprintf("本地 commit 已成功（%s），远端推送失败: %s", shortCommit(commit), reason)}
 			return report
 		}
@@ -614,8 +643,10 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 	report.Warnings = warnings
 	if options.NoPush {
 		report.Warnings = append(report.Warnings, "--no-push: 只做本地 commit，未推送远端")
+	} else if git.hasRemote(paths.Home) {
+		report.Warnings = append(report.Warnings, "已配置 remote 但本次未推送；请运行 `"+git.pushHint(paths.Home)+"`")
 	} else if !git.hasPushTarget(paths.Home) {
-		report.Warnings = append(report.Warnings, "未配置 git push target，仅本地 commit（local-only 模式；如需推送请 `git push -u <remote> <branch>`）")
+		report.Warnings = append(report.Warnings, "未配置 git remote，仅本地 commit（local-only 模式；如需推送请先运行 `homer remote <url>`）")
 	}
 	return report
 }
@@ -646,7 +677,7 @@ func retryPush(home string, git GitPort, warnings []string) (PushReport, bool) {
 	if !pushed.OK {
 		report := newPushCommandReport(PushStatusError)
 		report.Commit = head
-		report.Warnings = warnings
+		report.Warnings = append(warnings, "远端未推送；请运行 `"+git.pushHint(home)+"`")
 		report.Errors = []string{fmt.Sprintf("本地 commit 已成立（%s），重试推送远端仍失败: %s", shortCommit(head), firstLine(pushed.Stderr))}
 		return report, true
 	}
