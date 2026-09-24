@@ -643,6 +643,9 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 	report.Warnings = warnings
 	if options.NoPush {
 		report.Warnings = append(report.Warnings, "--no-push: 只做本地 commit，未推送远端")
+		if git.hasRemote(paths.Home) {
+			report.Warnings = append(report.Warnings, "如需推送请运行 `"+git.pushHint(paths.Home)+"`")
+		}
 	} else if git.hasRemote(paths.Home) {
 		report.Warnings = append(report.Warnings, "已配置 remote 但本次未推送；请运行 `"+git.pushHint(paths.Home)+"`")
 	} else if !git.hasPushTarget(paths.Home) {

@@ -366,7 +366,7 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 		if options.Force {
 			return usageArgumentError("命令 merge 不支持选项 --force")
 		}
-		if len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
+		if len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" || options.Remote != "" {
 			return usageArgumentError("命令 merge 不支持该选项")
 		}
 		if options.AcceptLocal && options.AcceptRemote {
@@ -420,7 +420,7 @@ func runSecret(args []string, out, errOut io.Writer) int {
 }
 
 func validateSecretOptions(subcommand string, options CommandOptions) error {
-	if options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" {
+	if options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" || options.Remote != "" {
 		return usageArgumentError(fmt.Sprintf("secret %s 不支持该选项", subcommand))
 	}
 	switch subcommand {

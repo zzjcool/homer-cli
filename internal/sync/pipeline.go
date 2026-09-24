@@ -34,8 +34,8 @@ func commitStoreIfNeeded(paths core.HomerPaths, message string) string {
 	return CommitStoreIfNeeded(paths, message)
 }
 
-const NOT_A_REPO_HINT = "请先运行 `homer push` 建立 git 历史与 remote。"
-const NO_UPSTREAM_HINT = "请先 `git push -u <remote> <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）配置远端。"
+const NOT_A_REPO_HINT = "请先运行 `homer push` 建立 git 历史；如需远端请再运行 `homer remote <url>` 并按提示 `git push -u`。"
+const NO_UPSTREAM_HINT = "请先 `homer remote <url>` 配置 origin，再运行 `git -C <home> push -u origin <branch>`（或在 `~/.homer` 内 `git branch --set-upstream-to`）。"
 const NO_UPSTREAM_MESSAGE = "未配置 git upstream，无法确定远端"
 
 func NotAGitRepoMessage(home string) string {
