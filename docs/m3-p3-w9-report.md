@@ -29,34 +29,49 @@
 ```text
 $ go test ./... -count=1
 ?    github.com/zzjcool/homer-cli/cmd/homer [no test files]
-ok   github.com/zzjcool/homer-cli/internal/adapter 0.016s
-ok   github.com/zzjcool/homer-cli/internal/adapter/herdr 0.003s [no tests to run]
-ok   github.com/zzjcool/homer-cli/internal/adapter/opencode 0.002s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/adapter 0.013s
+ok   github.com/zzjcool/homer-cli/internal/adapter/herdr 0.002s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/adapter/opencode 0.003s [no tests to run]
 ok   github.com/zzjcool/homer-cli/internal/adapter/pi 0.002s [no tests to run]
-ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.052s
+ok   github.com/zzjcool/homer-cli/internal/agecrypto 0.049s
 ok   github.com/zzjcool/homer-cli/internal/backup 0.004s
-ok   github.com/zzjcool/homer-cli/internal/cli 0.002s [no test files]
-ok   github.com/zzjcool/homer-cli/internal/cli/commands 0.745s
-ok   github.com/zzjcool/homer-cli/internal/core 0.009s
-ok   github.com/zzjcool/homer-cli/internal/doctor 0.181s
-ok   github.com/zzjcool/homer-cli/internal/engine 0.010s
-ok   github.com/zzjcool/homer-cli/internal/gitx 0.883s
-ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.007s
-ok   github.com/zzjcool/homer-cli/internal/secretscan 0.004s
-ok   github.com/zzjcool/homer-cli/internal/sync 0.135s
-ok   github.com/zzjcool/homer-cli/internal/testutil 0.003s [no test files]
+ok   github.com/zzjcool/homer-cli/internal/cli 0.003s [no tests to run]
+ok   github.com/zzjcool/homer-cli/internal/cli/commands 0.776s
+ok   github.com/zzjcool/homer-cli/internal/core 0.011s
+ok   github.com/zzjcool/homer-cli/internal/doctor 0.164s
+ok   github.com/zzjcool/homer-cli/internal/engine 0.006s
+ok   github.com/zzjcool/homer-cli/internal/gitx 0.878s
+ok   github.com/zzjcool/homer-cli/internal/orderedjson 0.006s
+ok   github.com/zzjcool/homer-cli/internal/secretscan 0.003s
+ok   github.com/zzjcool/homer-cli/internal/sync 0.125s
+ok   github.com/zzjcool/homer-cli/internal/testutil 0.002s [no tests to run]
 
 $ go vet ./...
-# (no output; exit 0)
+# no output; exit 0
 
 $ go build ./...
-# (no output; exit 0)
+# no output; exit 0
 
-$ gofmt -l internal/doctor/checks.go internal/doctor/checks_test.go internal/cli/commands/doctor.go internal/cli/commands/doctor_test.go internal/cli/commands/secret.go internal/cli/commands/secret_test.go
-# (no output; exit 0)
+$ gofmt -l . | grep -v vendor
+# no output; exit 0
 ```
 
-本仓库已经切换为 Go 布局，根目录没有 `package.json`，因此通用 TS 命令 `npm run typecheck && npm test` 不适用；Go 的 `go test`、`go vet`、`go build` 已作为对应验证执行。
+通用命令原样验证：
+
+```text
+$ npm run typecheck && npm test
+npm error code ENOENT
+npm error syscall open
+npm error path /root/code/homer-cli-w9/package.json
+npm error errno -2
+npm error enoent Could not read package.json: Error: ENOENT: no such file or directory, open '/root/code/homer-cli-w9/package.json'
+npm error enoent This is related to npm not being able to find the package.json file.
+npm error enoent
+npm error A complete log of this run can be found in: /root/.npm/_logs/2026-09-24T12_18_10_166Z-debug-0.log
+npm_exit=254
+```
+
+本仓库已经切换为 Go 布局，根目录没有 `package.json`，因此通用 TS 命令不适用；Go 的 `go test`、`go vet`、`go build` 已作为对应验证执行。
 
 ## MR / PR 链接
 
