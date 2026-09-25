@@ -222,6 +222,14 @@ func validateCategory(raw any, where string, validationErrors *[]string) {
 	checkOptionalStringArray(exclude, excludePresent, where+".exclude", validationErrors)
 	excludeKeys, excludeKeysPresent := object["excludeKeys"]
 	checkOptionalStringArray(excludeKeys, excludeKeysPresent, where+".excludeKeys", validationErrors)
+	if kind == CategoryKindManifest {
+		if excludePresent {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.exclude 在 kind=manifest 时无效（manifest 只有虚拟清单文件）", where))
+		}
+		if excludeKeysPresent {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.excludeKeys 在 kind=manifest 时无效（manifest 只有虚拟清单文件）", where))
+		}
+	}
 }
 
 func validateAdapter(raw any, where string, validationErrors *[]string) {

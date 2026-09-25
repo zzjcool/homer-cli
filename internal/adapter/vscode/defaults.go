@@ -1,22 +1,40 @@
 package vscode
 
-import "github.com/zzjcool/homer-cli/internal/core"
+import (
+	"runtime"
+
+	"github.com/zzjcool/homer-cli/internal/core"
+)
 
 // VSCodeAdapterID is the stable adapter identifier written to snapshots and
 // homer.json.
 const VSCodeAdapterID = "vscode"
 
-const VSCODE_ADAPTER_ID = VSCodeAdapterID
+const (
+	DefaultVSCodeRootLinux  = "~/.config/Code"
+	DefaultVSCodeRootDarwin = "~/Library/Application Support/Code"
+)
+
+// DefaultVSCodeRoot selects the per-platform VS Code user-data root. The
+// explicit argument keeps both supported release platforms testable without
+// mutating runtime.GOOS.
+func DefaultVSCodeRoot(goos string) string {
+	if goos == "darwin" {
+		return DefaultVSCodeRootDarwin
+	}
+	return DefaultVSCodeRootLinux
+}
 
 func boolPtr(value bool) *bool { return &value }
 
 func kindPtr(value core.CategoryKind) *core.CategoryKind { return &value }
 
-// DefaultVSCodeAdapter is the Linux VS Code user-data configuration. Settings
-// and keybindings are ordinary file categories; extensions are represented by
-// a manifest command pair and have no paths on disk.
+// DefaultVSCodeAdapter is the platform-specific VS Code user-data
+// configuration. Settings and keybindings are ordinary file categories;
+// extensions are represented by a manifest command pair and have no paths on
+// disk.
 var DefaultVSCodeAdapter = core.AdapterConfig{
-	Root:    "~/.config/Code",
+	Root:    DefaultVSCodeRoot(runtime.GOOS),
 	Enabled: boolPtr(true),
 	Categories: map[string]core.CategoryConfig{
 		"settings": {

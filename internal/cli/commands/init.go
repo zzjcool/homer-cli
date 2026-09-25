@@ -78,9 +78,6 @@ var KNOWN_ADAPTERS = map[string]core.AdapterConfig{
 	vscode.VSCodeAdapterID:     vscode.DefaultVSCodeAdapter,
 }
 
-// KnownAdapters is the idiomatic alias for KNOWN_ADAPTERS.
-var KnownAdapters = KNOWN_ADAPTERS
-
 var knownAdapterOrder = []string{pi.PIAdapterID, herdr.HerdrAdapterID, opencode.OpencodeAdapterID, vscode.VSCodeAdapterID}
 
 const INIT_USAGE = `用法: homer init [options]
@@ -349,7 +346,7 @@ func runInteractiveInit(
 	enableWizardScan(&scanConfig)
 	ids := selectedAdapterIDs(scanConfig.Adapters)
 	outcomes := scanInitAdapters(scanConfig, ids, scan, true)
-	state := buildWizardState(config, outcomes, reInit)
+	state := buildWizardState(config, outcomes)
 	port := deps.Wizard
 	if port == nil {
 		port = NewDefaultWizardPort(isTTY())
@@ -443,6 +440,9 @@ func buildInitReport(outcomes []adapter.ScanOutcome, snapshots []core.AdapterSna
 		Errors:    make([]string, 0),
 	}
 	for _, outcome := range outcomes {
+		if len(outcome.Warnings) > 0 {
+			report.Warnings = append(report.Warnings, outcome.Warnings...)
+		}
 		if len(outcome.Errors) > 0 {
 			report.Errors = append(report.Errors, sourceErrorMessages(SnapshotSourceErrors{
 				{
@@ -607,12 +607,6 @@ func initializeRemote(paths core.HomerPaths, remote string) error {
 		))
 	}
 	return nil
-}
-
-// RunInitWithDefaults is a convenience spelling for callers that do not need
-// the force option.
-func RunInitWithDefaults(opts InitOptions) (InitReport, error) {
-	return RunInit(opts, InitRunOptions{})
 }
 
 func runInit(opts InitOptions, runOptions ...InitRunOptions) (InitReport, error) {

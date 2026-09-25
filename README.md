@@ -99,13 +99,15 @@ homer push --yes                          # 首次建立基线；有 remote 自�
 master`（分支名按实际仓库显示）确认无误后运行即可。`homer init --remote` 则会
 直接完成配置中心初始 commit 和首推。
 
-三 adapter 的默认范围：
+四个内置 adapter 的默认范围：
 
 - **pi**：`settings.json` / `models.json`（merge），skills、extensions、agents、
   prompts、themes（mirror）；运行时 sessions、auth、日志等忽略。
 - **herdr**：仅同步 `~/.config/herdr/config.toml`。
 - **opencode**：`opencode.json` / `package.json`（merge），lock 文件（mirror），
   `node_modules` 与运行时文件忽略。
+- **vscode**：`settings.json` / `keybindings.json` 与扩展 manifest；macOS 根目录为
+  `~/Library/Application Support/Code`，Linux 根目录为 `~/.config/Code`。
 
 ### 自定义 adapter（v1.2 起）
 
@@ -146,8 +148,9 @@ adapter ID 使用小写字母、数字和连字符（例如 `my-tool`）。下�
 `root` 是工具配置根目录；普通分类按 `paths` 读取文件或目录。manifest 分类不写
 `paths`：`listCmd` 的标准输出必须是每行一个 ID，`applyCmd` 会在确认后逐个安装远端
 缺少的 ID（v1.2 只装不卸）。`ignore` 规则相对 `root` 生效；`allowEscape` 只应列出
-确实需要允许的具体 symlink 路径，不能写 `*`、`**` 等裸通配。来自远端仓库的
-manifest `listCmd` / `applyCmd` 会在 `home` 时触发安全确认，请只信任自己的配置仓库。
+确实需要允许的具体 symlink 路径，不能写 `*`、`**` 等裸通配。`home` 会触发安全确认：
+远端 manifest 的 `listCmd` 与 `applyCmd` 都在确认后才执行；`--yes` 放行并在 report
+中留痕。请只信任自己的配置仓库。
 
 ### init 选择向导（v1.2 起）
 
@@ -171,10 +174,12 @@ homer init --adapters pi,vscode --json
 
 ### VS Code 与 manifest 分类（v1.2 起）
 
-内置 `vscode` adapter 默认启用，根目录为 `~/.config/Code`，同步
-`settings.json`、`keybindings.json`，并把 `code --list-extensions` 的输出保存为
-`store/vscode/extensions/extensions.manifest.txt` 这一虚拟文件。每行一个扩展 ID；
-本机没有 `code` 或 VS Code 根目录时会降级为空快照，不会把缺失的工具误判成删除。
+内置 `vscode` adapter 默认启用，Linux 根目录为 `~/.config/Code`，macOS 根目录为
+`~/Library/Application Support/Code`，同步 `settings.json`、`keybindings.json`，并把
+`code --list-extensions` 的输出保存为 `store/vscode/extensions/extensions.manifest.txt`
+这一虚拟文件。每行一个扩展 ID；本机没有 `code` 或 VS Code 根目录时会降级为空快照，不会
+把缺失的工具误判成删除。CLI 缺失会在 status/pull/home 的 warning 中说明：本机按空清单
+处理，pull 时远端清单将视为全量待装，安装失败会逐条进入 `manifest.failed`。
 
 manifest 是集合并集语义：归位或 pull 时只对“远端有、本机 listCmd 没有”的 ID
 逐个执行 `applyCmd`，**只装不卸**，本机已经安装的扩展以及本机多出的扩展都会保留。
@@ -182,9 +187,11 @@ manifest 是集合并集语义：归位或 pull 时只对“远端有、本机 l
 shell 执行且 manifest ID 必须通过安全字符集校验。
 
 `homer home` 发现远端 manifest 安装任务时，会在预览中列出 `listCmd` /
-`applyCmd` 并显示远端命令门禁。TTY 需要确认，非 TTY 没有 `--yes` 会以
+`applyCmd` 并显示远端命令门禁；未给 `--yes` 时 manifest 分类会延迟到确认后才执行
+`listCmd`，因此确认前不会运行远端命令。TTY 需要确认，非 TTY 没有 `--yes` 会以
 `aborted` 结束；`--yes` 才会放行，并在 `report.warnings` 记录已按 `--yes` 确认
-执行远端声明的命令。请只使用自己信任的配置仓库。
+执行远端声明的命令。pull 在 fast-forward 前发现远端 manifest 命令变更时也会把
+旧命令与新命令写入 warning 并纳入确认预览。请只使用自己信任的配置仓库。
 
 ### 机器 B：一键归位与换设备
 
@@ -233,13 +240,16 @@ homer --version
   只能显式豁免确知安全的路径。`__REQUIRED__` 只表示需要在本机补全的排除键。
 - repo URL 会作为 `git clone -- <url>` argv 传入，并拒绝以 `-` 开头的值，防止
   `--upload-pack=<cmd>` 形式的选项注入。
+- `listCmd` 的标准输出会进入 store，并在 `homer push` 时随仓库上传；请勿配置会读取
+  敏感文件的命令。
 - `allowEscape` 只放行明确的 symlink 路径；`*`、`*/`、`**`、`**/` 等裸通配会被
   配置校验拒绝，默认仍禁止 root 外逃逸。
 - **D4 残余向量（v1.2 已知限制）**：`homer pull` 的 fast-forward 可能把新的
-  `homer.json` 一并带入工作区；如果该配置新增或改写了 manifest 的 `listCmd` /
-  `applyCmd`，下一次 `status` 扫描就会执行新的 `listCmd`。`home` 的远端命令门禁
-  覆盖新机归位，但不能替代 pull 后的信任判断。v1.3 将用 `state.json` 中的
-  `trustedManifests` 命令指纹库收口；在此之前请先审阅远端 diff，再运行 pull。
+  `homer.json` 一并带入工作区；本版本会在 fast-forward 前比较并警告新增/改写的
+  manifest `kind` / `listCmd` / `applyCmd`，但 `--yes` 仍按语义放行，且下一次
+  `status` 仍可能执行新的 `listCmd`。`home` 的远端命令门禁覆盖新机归位，但不能替代
+  pull 后的信任判断。v1.3 将用 `state.json` 中的 `trustedManifests` 命令指纹库收口；
+  在此之前请先审阅远端 diff，再运行 pull。
 
 ## 验收与文档
 

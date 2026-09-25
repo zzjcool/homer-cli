@@ -126,36 +126,6 @@ func rootUnreadable(outcome adapter.ScanOutcome) bool {
 
 func enabled(value *bool) bool { return value == nil || *value }
 
-// statusCategoryOrder keeps disabled summaries in the same stable order as
-// adapter scans.  CategoryConfig is a map in the frozen config shape, so
-// built-in categories need an explicit preference and custom names fall back
-// to lexical order.
-func statusCategoryOrder(adapterID string, categories map[string]core.CategoryConfig) []string {
-	preferred := map[string][]string{
-		"pi":       {"settings", "skills", "extensions", "agents", "models", "prompts", "themes"},
-		"herdr":    {"config"},
-		"opencode": {"config", "plugins", "locks"},
-		"vscode":   {"settings", "keybindings", "extensions"},
-	}[adapterID]
-
-	ordered := make([]string, 0, len(categories))
-	seen := make(map[string]struct{}, len(categories))
-	for _, name := range preferred {
-		if _, ok := categories[name]; ok {
-			ordered = append(ordered, name)
-			seen[name] = struct{}{}
-		}
-	}
-	rest := make([]string, 0, len(categories)-len(ordered))
-	for name := range categories {
-		if _, ok := seen[name]; !ok {
-			rest = append(rest, name)
-		}
-	}
-	sort.Strings(rest)
-	return append(ordered, rest...)
-}
-
 // DisabledSummaries returns the disabled adapter/category paths used by the
 // status report.  A disabled adapter is represented by just its adapter ID;
 // its disabled categories are intentionally not repeated because the adapter
@@ -174,7 +144,7 @@ func DisabledSummaries(config core.HomerConfig) []string {
 			disabled = append(disabled, adapterID)
 			continue
 		}
-		for _, category := range statusCategoryOrder(adapterID, adapterConfig.Categories) {
+		for _, category := range adapter.CategoryOrder(adapterID, adapterConfig.Categories) {
 			if !enabled(adapterConfig.Categories[category].Enabled) {
 				disabled = append(disabled, adapterID+"/"+category)
 			}
@@ -223,6 +193,7 @@ func CollectSnapshotSources(paths core.HomerPaths, config *core.HomerConfig) (Dr
 
 	local := make([]core.AdapterSnapshot, 0, len(config.Adapters))
 	scanErrors := make(SnapshotSourceErrors, 0)
+	warnings := make([]string, 0)
 	adapterIDs := make([]string, 0, len(config.Adapters))
 	for adapterID := range config.Adapters {
 		adapterIDs = append(adapterIDs, adapterID)
@@ -234,6 +205,7 @@ func CollectSnapshotSources(paths core.HomerPaths, config *core.HomerConfig) (Dr
 			continue
 		}
 		outcome := adapter.ScanAdapter(adapterID, adapterConfig)
+		warnings = append(warnings, outcome.Warnings...)
 		if len(outcome.Errors) > 0 {
 			scanErrors = append(scanErrors, SnapshotSourceError{
 				AdapterID:      adapterID,
@@ -256,7 +228,6 @@ func CollectSnapshotSources(paths core.HomerPaths, config *core.HomerConfig) (Dr
 		local = append(local, engine.StripExcludeKeys(outcome.Snapshot, excludeKeysByCategory(*config, adapterID)))
 	}
 
-	warnings := make([]string, 0)
 	if gitx.IsGitRepo(paths.Home) && !gitx.IsStoreClean(paths.Home) {
 		warnings = append(warnings, "store 工作区有未提交的改动（漂移计数以 git 基线为准，可能未反映刚直改的内容）；如需提交请运行 `homer push`")
 	}

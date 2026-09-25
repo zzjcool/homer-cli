@@ -2,7 +2,9 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,14 +71,15 @@ func TestRunHomeManifestGatePreviewAbortAndYesWarning(t *testing.T) {
 	if aborted.Status != HomeStatusAborted || aborted.ExitCode() != 1 {
 		t.Fatalf("home confirm=false report = %#v", aborted)
 	}
-	if len(commands.applyIDs) != 0 {
-		t.Fatalf("home confirm=false executed manifest IDs: %#v", commands.applyIDs)
+	if len(commands.outputCmds) != 0 || len(commands.applyIDs) != 0 {
+		t.Fatalf("home confirm=false executed manifest commands before confirmation: outputs=%#v applies=%#v", commands.outputCmds, commands.applyIDs)
 	}
 	for _, want := range []string{
 		"+ pub.remote",
 		"⚠ 远端配置声明了 manifest 分类，将执行外部命令",
 		"listCmd: remote-list --raw",
 		"applyCmd: remote-install --plugin",
+		"manifest 分类待确认后才会扫描",
 		"manifest",
 	} {
 		if !strings.Contains(ui.message, want) {
@@ -101,6 +104,9 @@ func TestRunHomeManifestGatePreviewAbortAndYesWarning(t *testing.T) {
 	}
 	if homed.Manifest == nil || len(homed.Manifest.Installed) != 1 || homed.Manifest.Installed[0] != "remote/plugins:pub.remote" {
 		t.Fatalf("home manifest report = %#v", homed.Manifest)
+	}
+	if len(commands.outputCmds) == 0 {
+		t.Fatal("home --yes did not run manifest listCmd")
 	}
 	if !strings.Contains(strings.Join(homed.Warnings, "\n"), "已按 --yes 确认执行远端声明的 manifest 命令") {
 		t.Fatalf("home --yes gate warning missing: %#v", homed.Warnings)
@@ -127,12 +133,28 @@ func TestRunHomeManifestNonTTYWithoutYesAborts(t *testing.T) {
 	if report.Status != HomeStatusAborted {
 		t.Fatalf("non-TTY home report = %#v", report)
 	}
-	if len(commands.applyIDs) != 0 {
-		t.Fatalf("non-TTY home executed manifest IDs: %#v", commands.applyIDs)
+	if len(commands.outputCmds) != 0 || len(commands.applyIDs) != 0 {
+		t.Fatalf("non-TTY home executed manifest commands: outputs=%#v applies=%#v", commands.outputCmds, commands.applyIDs)
 	}
 	message := strings.Join(report.Errors, "\n")
 	if !strings.Contains(message, "manifest") {
 		t.Fatalf("non-TTY error lacks manifest hint: %q", message)
+	}
+}
+
+func TestRunHomeCarriesMissingManifestCLIWarning(t *testing.T) {
+	config, snapshot, root := w4ManifestHomeFixture(t)
+	commands := &w4ManifestCommandFake{outputErr: &exec.Error{Name: "code", Err: errors.New("executable file not found")}}
+	report := RunHome(HomeOptions{HomerHome: filepath.Join(root, "missing-cli"), RepoURL: "fixture", Mode: syncx.FirstContactPull, Yes: true}, &HomeDeps{
+		Commands: commands,
+		Clone: func(_, dest string) error {
+			w4WriteManifestHomeClone(t, config, snapshot, dest)
+			return nil
+		},
+	})
+	joined := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(joined, "remote: remote-list 未安装") || !strings.Contains(joined, "pull 时远端清单将视为全量待装") {
+		t.Fatalf("home missing CLI warning = %#v", report.Warnings)
 	}
 }
 
@@ -152,8 +174,8 @@ func TestRunHomeManifestSkipHasNoTaskOrApply(t *testing.T) {
 	if report.Manifest != nil {
 		t.Fatalf("home skip unexpectedly reported manifest task: %#v", report.Manifest)
 	}
-	if len(commands.applyIDs) != 0 {
-		t.Fatalf("home skip executed manifest IDs: %#v", commands.applyIDs)
+	if len(commands.outputCmds) != 0 || len(commands.applyIDs) != 0 {
+		t.Fatalf("home skip executed manifest commands: outputs=%#v applies=%#v", commands.outputCmds, commands.applyIDs)
 	}
 	if strings.Contains(strings.Join(report.Warnings, "\n"), "远端声明") {
 		t.Fatalf("home skip emitted remote manifest warning: %#v", report.Warnings)

@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/backup"
@@ -19,6 +20,17 @@ type PullOptions struct {
 	Home      string
 	JSON      bool
 	Yes       bool
+}
+
+// PullDeps contains pull-specific injection points. Shared git behavior stays
+// in GitPort, while manifest command execution belongs to this command's seam.
+type PullDeps struct {
+	UI       any
+	Sources  any
+	NoFetch  bool
+	NoApply  bool
+	Git      any
+	Commands manifest.CommandPort
 }
 
 type PullStatus string
@@ -96,13 +108,6 @@ func manifestFailureRef(tasks []manifest.Task, failure manifest.Failure) string 
 		}
 	}
 	return fmt.Sprintf("%s: %s", failure.ID, failure.Message)
-}
-
-func pullManifestCommands(deps *PullDeps) manifest.CommandPort {
-	if deps == nil {
-		return nil
-	}
-	return deps.Commands
 }
 
 func (report PullReport) ExitCode() int {
@@ -239,12 +244,102 @@ func BuildPullPreview(sources syncx.SyncSources, plan syncx.PullPlan) string {
 }
 
 func pullConfirmationPreview(sources syncx.SyncSources, plan syncx.PullPlan, tasks []manifest.Task) string {
+	return pullConfirmationPreviewWithWarnings(sources, plan, tasks, nil)
+}
+
+func pullConfirmationPreviewWithWarnings(sources syncx.SyncSources, plan syncx.PullPlan, tasks []manifest.Task, manifestCommandWarnings []string) string {
 	preview := BuildPullPreview(sources, plan)
 	manifestPreview := syncx.BuildManifestPreview(tasks)
-	if manifestPreview == "" {
-		return preview
+	if manifestPreview != "" {
+		preview += "\n" + manifestPreview
 	}
-	return preview + "\n" + manifestPreview
+	if len(manifestCommandWarnings) > 0 {
+		preview += "\n\n" + strings.Join(manifestCommandWarnings, "\n")
+	}
+	return preview
+}
+
+type manifestCommandDeclaration struct {
+	Kind     core.CategoryKind
+	ListCmd  string
+	ApplyCmd string
+}
+
+func manifestCommandDeclarations(config core.HomerConfig) map[string]manifestCommandDeclaration {
+	declarations := make(map[string]manifestCommandDeclaration)
+	for adapterID, adapterConfig := range config.Adapters {
+		for categoryName, category := range adapterConfig.Categories {
+			declaration := manifestCommandDeclaration{ListCmd: category.ListCmd, ApplyCmd: category.ApplyCmd}
+			if category.Kind != nil {
+				declaration.Kind = *category.Kind
+			}
+			if declaration.Kind == "" && declaration.ListCmd == "" && declaration.ApplyCmd == "" {
+				continue
+			}
+			declarations[adapterID+"/"+categoryName] = declaration
+		}
+	}
+	return declarations
+}
+
+func manifestCommandDeclarationText(declaration manifestCommandDeclaration, present bool) string {
+	if !present {
+		return "<缺省>"
+	}
+	kind := string(declaration.Kind)
+	if kind == "" {
+		kind = "<缺省>"
+	}
+	return fmt.Sprintf("kind=%s, listCmd=%q, applyCmd=%q", kind, declaration.ListCmd, declaration.ApplyCmd)
+}
+
+// manifestCommandChangeWarnings compares the checked-out homer.json with the
+// upstream blob before fast-forward. The new command is not executed here;
+// the warning is retained in the report and shown in the confirmation preview.
+func manifestCommandChangeWarnings(home string, config core.HomerConfig, git GitPort) []string {
+	ref := git.upstreamRef(home)
+	if ref == "" {
+		return nil
+	}
+	remote := git.exec(home, []string{"show", ref + ":homer.json"})
+	if !remote.OK || strings.TrimSpace(remote.Stdout) == "" {
+		return nil
+	}
+	remoteConfig, validationErrors := core.ValidateConfig([]byte(remote.Stdout))
+	if remoteConfig == nil || len(validationErrors) > 0 {
+		return nil
+	}
+
+	localDeclarations := manifestCommandDeclarations(config)
+	remoteDeclarations := manifestCommandDeclarations(*remoteConfig)
+	keys := make([]string, 0, len(localDeclarations)+len(remoteDeclarations))
+	seen := make(map[string]struct{}, len(localDeclarations)+len(remoteDeclarations))
+	for key := range localDeclarations {
+		keys = append(keys, key)
+		seen[key] = struct{}{}
+	}
+	for key := range remoteDeclarations {
+		if _, exists := seen[key]; !exists {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+
+	warnings := make([]string, 0)
+	for _, key := range keys {
+		local, localOK := localDeclarations[key]
+		remote, remoteOK := remoteDeclarations[key]
+		if localOK == remoteOK && local == remote {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"⚠ 远端配置变更了 manifest 命令：%s：%s → %s",
+			key,
+			manifestCommandDeclarationText(local, localOK),
+			manifestCommandDeclarationText(remote, remoteOK),
+		))
+	}
+	return warnings
 }
 
 // RunPull implements the frozen pull sequence. In particular, all four
@@ -312,14 +407,18 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		sourceInput = deps.Sources
 	}
 	// The precondition fetch above has already refreshed the remote-tracking
-	// ref. Reading with fetch=false avoids a second network operation.
+	// ref. Reading with fetch=false avoids a second network operation. Compare
+	// homer.json before ff so a newly introduced manifest command is visible
+	// before any future scan can use the fast-forwarded config.
+	manifestCommandWarnings := manifestCommandChangeWarnings(paths.Home, *config, git)
 	sources := collectSources(sourceInput, paths, *config, false)
 	warnings := append([]string{}, sources.Warnings...)
+	warnings = append(warnings, manifestCommandWarnings...)
 	sourceErrors := append([]string{}, sources.Errors...)
 	plan := syncx.PlanPull(*config, sources.Base, sources.Local, sources.Remote)
 	remainingPlan, manifestTasks, manifestWarnings := syncx.SplitManifestActions(*config, plan, sources.Local)
 	warnings = append(warnings, manifestWarnings...)
-	if len(remainingPlan.Actions) == 0 && len(manifestTasks) == 0 {
+	if len(remainingPlan.Actions) == 0 && len(manifestTasks) == 0 && len(manifestCommandWarnings) == 0 {
 		report = newPullCommandReport(PullStatusNoDrift)
 		report.Warnings = warnings
 		report.Errors = sourceErrors
@@ -331,7 +430,7 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		manifestReport = emptyManifestApplyReport()
 	}
 	if !options.Yes {
-		confirmed := promptConfirm(depsUI(deps), pullConfirmationPreview(sources, remainingPlan, manifestTasks)+"\n\n以上变更将应用到本机工具目录（受影响文件会先备份）。是否继续？", false)
+		confirmed := promptConfirm(depsUI(deps), pullConfirmationPreviewWithWarnings(sources, remainingPlan, manifestTasks, manifestCommandWarnings)+"\n\n以上变更将应用到本机工具目录（受影响文件会先备份）。是否继续？", false)
 		if !confirmed {
 			if depsUI(deps) == nil && !isTTY() {
 				warnings = append(warnings, "非交互环境无法确认，已中止；如需自动应用请加 --yes")
@@ -363,7 +462,11 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 			keep = *config.Backup.Keep
 		}
 		if len(manifestTasks) > 0 {
-			manifestReport = applyManifestTasks(manifestTasks, pullManifestCommands(deps), &warnings)
+			var commands manifest.CommandPort
+			if deps != nil {
+				commands = deps.Commands
+			}
+			manifestReport = applyManifestTasks(manifestTasks, commands, &warnings)
 		}
 		if _, pruneErr := backup.PruneBackups(paths, keep); pruneErr != nil {
 			report = newPullCommandReport(PullStatusError)
@@ -555,8 +658,3 @@ func pullActionsValue(actions []syncx.PullConflictAction) orderedjson.Value {
 func orderedObjectJSON(keys []string, values map[string]orderedJSONValue) string {
 	return string(orderedjson.Serialize(&orderedjson.Object{Keys: keys, M: values}))
 }
-
-// Lower-case aliases mirror the archived command naming used by migration
-// tests and keep the public RunPull spelling idiomatic Go.
-func runPull(options PullOptions, deps *PullDeps) PullReport { return RunPull(options, deps) }
-func renderPullReport(report PullReport) string              { return RenderPullReport(report) }

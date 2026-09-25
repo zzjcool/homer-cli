@@ -90,6 +90,8 @@ func TestValidateConfigTable(t *testing.T) {
 		{"kind dir", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"skills":{"paths":["skills/"],"mode":"mirror","kind":"dir"}}}}}`, true},
 		{"kind manifest without paths", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","listCmd":"code --list-extensions","applyCmd":"code --install-extension"}}}}}`, true},
 		{"kind manifest empty paths", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"paths":[],"mode":"mirror","kind":"manifest","listCmd":"list","applyCmd":"apply"}}}}}`, true},
+		{"kind manifest exclude rejected", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","listCmd":"list","applyCmd":"apply","exclude":["cache"]}}}}}`, false},
+		{"kind manifest excludeKeys rejected", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","listCmd":"list","applyCmd":"apply","excludeKeys":["token"]}}}}}`, false},
 		{"kind manifest paths rejected", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"paths":["extensions/"],"mode":"mirror","kind":"manifest","listCmd":"list","applyCmd":"apply"}}}}}`, false},
 		{"kind manifest wrong mode", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"merge","kind":"manifest","listCmd":"list","applyCmd":"apply"}}}}}`, false},
 		{"kind manifest missing list command", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","applyCmd":"apply"}}}}}`, false},

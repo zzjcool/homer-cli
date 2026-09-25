@@ -2,8 +2,12 @@ package manifest
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/zzjcool/homer-cli/internal/core"
 )
@@ -112,6 +116,54 @@ func TestScanCategorySuccessAndProblems(t *testing.T) {
 type contextDeadlineError struct{}
 
 func (contextDeadlineError) Error() string { return "context deadline exceeded" }
+
+func writeExecutable(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "manifest-command.sh")
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestDefaultPortUsesMinimalEnvironment(t *testing.T) {
+	t.Setenv("HOMER_TEST_SECRET", "must-not-cross-boundary")
+	t.Setenv("HOME", "/tmp/homer-manifest-home")
+	t.Setenv("PATH", "/bin")
+	script := writeExecutable(t, `#!/bin/sh
+printf '%s\n' "${HOMER_TEST_SECRET-unset}"
+printf '%s\n' "$HOME"
+printf '%s\n' "$PATH"
+`)
+	output, err := DefaultPort().Output(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(output)
+	if strings.Contains(text, "must-not-cross-boundary") || !strings.Contains(text, "unset\n") {
+		t.Fatalf("manifest command inherited HOMER_* environment: %q", text)
+	}
+	if !strings.Contains(text, "/tmp/homer-manifest-home\n") || !strings.Contains(text, "/bin\n") {
+		t.Fatalf("minimal PATH/HOME environment missing: %q", text)
+	}
+}
+
+func TestDefaultPortBoundsStdoutAndKillsProcessGroupOnTimeout(t *testing.T) {
+	large := writeExecutable(t, "#!/bin/sh\n/usr/bin/dd if=/dev/zero bs=16777217 count=1 2>/dev/null\n")
+	if _, err := DefaultPort().Output(large); err == nil || !strings.Contains(err.Error(), "16 MiB") {
+		t.Fatalf("large stdout error = %v, want 16 MiB limit", err)
+	}
+
+	slow := writeExecutable(t, "#!/bin/sh\n(/bin/sleep 30) &\n/bin/sleep 30\n")
+	started := time.Now()
+	_, err := run([]string{slow}, 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("process group was not killed promptly: %s", elapsed)
+	}
+}
 
 func TestApplyTasksAllSuccessFailureAndInvalidIDs(t *testing.T) {
 	port := &fakePort{applyErrs: map[string]error{"bad": errors.New("installer failed")}}

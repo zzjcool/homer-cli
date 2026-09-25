@@ -511,6 +511,9 @@ func TestScanManifestMissingCLIDegradesQuietly(t *testing.T) {
 	if len(outcome.Errors) != 0 {
 		t.Fatalf("missing CLI must degrade quietly, got errors: %+v", outcome.Errors)
 	}
+	if got, want := outcome.Warnings, []string{"vscode: definitely-not-a-real-cli-xyz 未安装，extensions 已按空清单处理；pull 时远端清单将视为全量待装"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("missing CLI warning = %#v, want %#v", got, want)
+	}
 	var found bool
 	for _, cat := range outcome.Snapshot.Categories {
 		if cat.Category == "extensions" {
@@ -522,5 +525,22 @@ func TestScanManifestMissingCLIDegradesQuietly(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("extensions category missing from snapshot")
+	}
+}
+
+func TestScanManifestExitErrorIsNotMissingCLI(t *testing.T) {
+	root := t.TempDir()
+	port := &fakeManifestPort{outputErr: errors.New("executable file not found")}
+	outcome := adapter.ScanAdapter("vscode", core.AdapterConfig{
+		Root: root,
+		Categories: map[string]core.CategoryConfig{
+			"extensions": {Kind: manifestKind(), Mode: core.SyncModeMirror, ListCmd: "code --list-extensions"},
+		},
+	}, adapter.ScanDeps{Commands: port})
+	if len(outcome.Errors) != 1 || outcome.Errors[0].Message != "executable file not found" {
+		t.Fatalf("exit-like scan error = %#v", outcome.Errors)
+	}
+	if len(outcome.Warnings) != 0 {
+		t.Fatalf("exit-like error was misclassified as missing CLI: %#v", outcome.Warnings)
 	}
 }

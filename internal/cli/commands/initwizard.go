@@ -51,7 +51,6 @@ type WizardAdapter struct {
 // WizardState is the immutable input to RunSelectionWizard.
 type WizardState struct {
 	Adapters []WizardAdapter
-	ReInit   bool
 }
 
 // WizardSelection is the complete checked subset returned by the three
@@ -370,14 +369,14 @@ func firstPathSegment(path string) string {
 // buildWizardState creates a stable state from the config and pre-wizard scan
 // outcomes. Missing categories remain visible with zero files so a disabled or
 // missing-root category can still be selected/re-enabled.
-func buildWizardState(config core.HomerConfig, outcomes []adapter.ScanOutcome, reInit bool) WizardState {
+func buildWizardState(config core.HomerConfig, outcomes []adapter.ScanOutcome) WizardState {
 	outcomeByAdapter := make(map[string]core.AdapterSnapshot, len(outcomes))
 	for _, outcome := range outcomes {
 		snapshot := outcome.Snapshot
 		outcomeByAdapter[snapshot.AdapterID] = snapshot
 	}
 	adapterIDs := orderedConfigIDs(config.Adapters)
-	state := WizardState{Adapters: make([]WizardAdapter, 0, len(adapterIDs)), ReInit: reInit}
+	state := WizardState{Adapters: make([]WizardAdapter, 0, len(adapterIDs))}
 	for _, adapterID := range adapterIDs {
 		adapterConfig := config.Adapters[adapterID]
 		snapshot := outcomeByAdapter[adapterID]

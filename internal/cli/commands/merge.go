@@ -25,6 +25,15 @@ type MergeOptions struct {
 	AcceptRemote bool
 }
 
+// MergeDeps contains merge-specific injection points. Shared repository
+// operations are provided by GitPort in push.go.
+type MergeDeps struct {
+	UI      any
+	Sources any
+	NoFetch bool
+	Git     any
+}
+
 type MergeStatus string
 
 const (

@@ -1,8 +1,10 @@
 package adapter
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,6 +25,7 @@ type ScanError struct {
 type ScanOutcome struct {
 	Snapshot core.AdapterSnapshot
 	Errors   []ScanError
+	Warnings []string
 }
 
 // ScanDeps contains injectable side effects for scanning. A nil Commands
@@ -279,14 +282,21 @@ func resolveConfiguredPath(abs, rootReal, rootRel string, allowEscape []string, 
 	return configuredPath{Real: real, Info: info}, true
 }
 
-func scanCategory(root, rootReal, category string, cfg core.CategoryConfig, ignore, allowEscape []string, port manifest.CommandPort, errors *[]ScanError) core.CategorySnapshot {
+func scanCategory(adapterID, root, rootReal string, category string, cfg core.CategoryConfig, ignore, allowEscape []string, port manifest.CommandPort, errors *[]ScanError, warnings *[]string) core.CategorySnapshot {
 	if cfg.IsManifest() {
-		snapshot, problems := manifest.ScanCategory("", category, cfg, port)
+		snapshot, problems := manifest.ScanCategory(adapterID, category, cfg, port)
 		for _, problem := range problems {
 			// A tool CLI that is not installed (e.g. `code` missing on a
 			// fresh machine) is a normal machine state, not a scan failure:
-			// degrade quietly to an empty manifest so status stays clean.
-			if isCommandMissing(problem.Message) {
+			// degrade to an empty manifest, but make the union fallback visible
+			// to every command that consumes this outcome.
+			if isCommandMissing(problem.Err) {
+				if warnings != nil {
+					*warnings = append(*warnings, fmt.Sprintf(
+						"%s: %s 未安装，%s 已按空清单处理；pull 时远端清单将视为全量待装",
+						adapterID, manifestCommandName(problem.Command), category,
+					))
+				}
 				continue
 			}
 			addScanError(errors, problem.Command, problem.Message)
@@ -355,11 +365,11 @@ func scanCategory(root, rootReal, category string, cfg core.CategoryConfig, igno
 	}
 }
 
-// categoryOrder makes snapshots deterministic despite CategoryConfig being a
-// map in the frozen Go interface.  For the three built-in adapters it follows
-// the insertion order of the frozen TypeScript defaults; custom categories are
-// appended in lexical order.
-func categoryOrder(adapterID string, categories map[string]core.CategoryConfig) []string {
+// CategoryOrder makes snapshots deterministic despite CategoryConfig being a
+// map in the frozen Go interface. For the three built-in adapters it follows
+// the insertion order of the frozen defaults; custom categories are appended
+// in lexical order. Status reuses this same ordering for disabled summaries.
+func CategoryOrder(adapterID string, categories map[string]core.CategoryConfig) []string {
 	preferred := map[string][]string{
 		"pi":       {"settings", "skills", "extensions", "agents", "models", "prompts", "themes"},
 		"herdr":    {"config"},
@@ -423,28 +433,34 @@ func ScanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) 
 		rootReal = root
 	}
 
-	for _, category := range categoryOrder(adapterID, config.Categories) {
+	for _, category := range CategoryOrder(adapterID, config.Categories) {
 		cfg := config.Categories[category]
 		if cfg.Enabled != nil && !*cfg.Enabled {
 			continue
 		}
-		cat := scanCategory(root, rootReal, category, cfg, config.Ignore, config.AllowEscape, port, &outcome.Errors)
+		cat := scanCategory(adapterID, root, rootReal, category, cfg, config.Ignore, config.AllowEscape, port, &outcome.Errors, &outcome.Warnings)
 		cat.AdapterID = adapterID
 		outcome.Snapshot.Categories = append(outcome.Snapshot.Categories, cat)
 	}
 	return outcome
 }
 
-// Lower-case aliases are useful to tests kept in package adapter and mirror
-// the original TypeScript naming without duplicating implementation.
-func scanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) ScanOutcome {
-	return ScanAdapter(adapterID, config, deps...)
+func manifestCommandName(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "命令"
+	}
+	name := strings.Trim(fields[0], "\\\"'")
+	if base := filepath.Base(name); base != "." && base != string(filepath.Separator) && base != "" {
+		return base
+	}
+	return name
 }
 
-// isCommandMissing reports whether a manifest list failure was caused by the
-// tool CLI simply not being installed on this machine.
-func isCommandMissing(message string) bool {
-	return strings.Contains(message, "executable file not found") ||
-		strings.Contains(message, "no such file or directory") ||
-		strings.Contains(message, "command not found")
+// isCommandMissing reports only an exec lookup failure. In particular, an
+// executable that ran and returned a non-zero exit status is not a missing
+// CLI: that failure must remain a visible ScanError.
+func isCommandMissing(err error) bool {
+	var execErr *exec.Error
+	return err != nil && errors.As(err, &execErr)
 }

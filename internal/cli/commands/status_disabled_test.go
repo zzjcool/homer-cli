@@ -56,6 +56,37 @@ func TestStatusDisabledSummariesMixedAdapterAndCategory(t *testing.T) {
 	}
 }
 
+func TestStatusCarriesMissingManifestCLIWarning(t *testing.T) {
+	homerHome := t.TempDir()
+	toolRoot := filepath.Join(homerHome, "tool")
+	if err := os.MkdirAll(toolRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kind := core.CategoryKindManifest
+	paths := core.GetHomerPaths(func(key string) string {
+		if key == "HOMER_HOME" {
+			return homerHome
+		}
+		return os.Getenv(key)
+	})
+	config := core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{
+		"vscode": {Root: toolRoot, Categories: map[string]core.CategoryConfig{
+			"extensions": {Kind: &kind, Mode: core.SyncModeMirror, ListCmd: "definitely-not-installed-code --list", ApplyCmd: "code --install-extension"},
+		}},
+	}}
+	if err := core.SaveConfig(paths, config); err != nil {
+		t.Fatal(err)
+	}
+	report, err := commands.RunStatus(commands.StatusOptions{HomerHome: homerHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(report.Warnings, "\\n")
+	if !strings.Contains(joined, "vscode: definitely-not-installed-code 未安装") || !strings.Contains(joined, "pull 时远端清单将视为全量待装") {
+		t.Fatalf("status missing CLI warning = %#v", report.Warnings)
+	}
+}
+
 func TestStatusRunCarriesDisabledSummaries(t *testing.T) {
 	homerHome := t.TempDir()
 	paths := core.GetHomerPaths(func(key string) string {

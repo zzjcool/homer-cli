@@ -202,16 +202,16 @@ func homeEnabledAdapterIDs(config core.HomerConfig) []string {
 	return ids
 }
 
-func homeScanLocal(config core.HomerConfig, remote []core.AdapterSnapshot, warnings *[]string) []core.AdapterSnapshot {
-	return homeScanLocalWithCommands(config, remote, warnings, nil)
-}
-
-func homeScanLocalWithCommands(config core.HomerConfig, remote []core.AdapterSnapshot, warnings *[]string, commands manifest.CommandPort) []core.AdapterSnapshot {
+// homeScanLocalWithCommandsMode scans ordinary categories immediately. When
+// deferManifest is true, it adds empty manifest snapshots without invoking
+// listCmd; the caller may scan those categories only after confirmation.
+func homeScanLocalWithCommandsMode(config core.HomerConfig, remote []core.AdapterSnapshot, warnings *[]string, commands manifest.CommandPort, deferManifest bool) []core.AdapterSnapshot {
 	ids := homeEnabledAdapterIDs(config)
 	local := make([]core.AdapterSnapshot, 0, len(ids))
 	for _, id := range ids {
 		cfg := config.Adapters[id]
-		outcome := adapter.ScanAdapter(id, cfg, adapter.ScanDeps{Commands: commands})
+		outcome := homeScanAdapter(id, cfg, commands, deferManifest)
+		*warnings = append(*warnings, outcome.Warnings...)
 		problems := make([]core.ScanProblem, len(outcome.Errors))
 		for i, item := range outcome.Errors {
 			problems[i] = core.ScanProblem{Path: item.Path, Message: item.Message}
@@ -232,6 +232,56 @@ func homeScanLocalWithCommands(config core.HomerConfig, remote []core.AdapterSna
 	return local
 }
 
+func homeScanAdapter(adapterID string, config core.AdapterConfig, commands manifest.CommandPort, deferManifest bool) adapter.ScanOutcome {
+	if !deferManifest {
+		return adapter.ScanAdapter(adapterID, config, adapter.ScanDeps{Commands: commands})
+	}
+
+	scanConfig := config
+	scanConfig.Categories = make(map[string]core.CategoryConfig, len(config.Categories))
+	deferred := make(map[string]struct{})
+	for name, category := range config.Categories {
+		if category.IsManifest() {
+			if category.Enabled == nil || *category.Enabled {
+				deferred[name] = struct{}{}
+			}
+			continue
+		}
+		scanConfig.Categories[name] = category
+	}
+	outcome := adapter.ScanAdapter(adapterID, scanConfig, adapter.ScanDeps{Commands: commands})
+	// Preserve root-unreadable semantics: an empty snapshot plus a root error
+	// must still fall back to the remote snapshot, not be padded with empty
+	// deferred categories.
+	if len(outcome.Snapshot.Categories) == 0 && len(outcome.Errors) > 0 {
+		return outcome
+	}
+	for _, name := range adapter.CategoryOrder(adapterID, config.Categories) {
+		if _, ok := deferred[name]; !ok {
+			continue
+		}
+		category := config.Categories[name]
+		outcome.Snapshot.Categories = append(outcome.Snapshot.Categories, core.CategorySnapshot{
+			AdapterID: adapterID,
+			Category:  name,
+			Mode:      category.Mode,
+			Files:     core.SnapshotFiles{},
+		})
+	}
+	return outcome
+}
+
+func hasEnabledManifestCategory(config core.HomerConfig) bool {
+	for _, adapterConfig := range config.Adapters {
+		for _, category := range adapterConfig.Categories {
+			if category.IsManifest() && (category.Enabled == nil || *category.Enabled) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type homeRootEnsureResult struct {
 	Retried  bool
 	Warnings []string
@@ -239,7 +289,7 @@ type homeRootEnsureResult struct {
 
 // ensureHomeAdapterRoots creates missing enabled adapter roots before the
 // first-contact plan is applied. A missing root is otherwise treated as
-// unreadable by homeScanLocal and safely substituted with the remote snapshot;
+// unreadable by homeScanLocalWithCommandsMode and safely substituted with the remote snapshot;
 // creating it and rescanning lets the normal write actions materialize the
 // configuration without weakening the root-unreadable guard elsewhere.
 func ensureHomeAdapterRoots(config core.HomerConfig) homeRootEnsureResult {
@@ -260,13 +310,6 @@ func ensureHomeAdapterRoots(config core.HomerConfig) homeRootEnsureResult {
 		}
 	}
 	return result
-}
-
-func homeManifestCommands(deps *HomeDeps) manifest.CommandPort {
-	if deps == nil {
-		return nil
-	}
-	return deps.Commands
 }
 
 func homeMode(options HomeOptions, deps *HomeDeps) (syncx.FirstContactMode, bool) {
@@ -356,15 +399,22 @@ func homeManifestGatePreview(tasks []manifest.Task) string {
 }
 
 func homeConfirmationPreview(config core.HomerConfig, plan syncx.FirstContactPlan, tasks []manifest.Task, secretNames []string) string {
+	return homeConfirmationPreviewWithScanState(config, plan, tasks, secretNames, false)
+}
+
+func homeConfirmationPreviewWithScanState(config core.HomerConfig, plan syncx.FirstContactPlan, tasks []manifest.Task, secretNames []string, manifestScanDeferred bool) string {
 	preview := BuildHomePreview(config, plan, secretNames)
 	manifestPreview := syncx.BuildManifestPreview(tasks)
 	gate := homeManifestGatePreview(tasks)
-	if manifestPreview == "" && gate == "" {
+	if !manifestScanDeferred && manifestPreview == "" && gate == "" {
 		return preview
 	}
 	lines := strings.Split(preview, "\n")
 	question := lines[len(lines)-1]
 	lines = lines[:len(lines)-1]
+	if manifestScanDeferred {
+		lines = append(lines, "⚠ manifest 分类待确认后才会扫描（确认后才执行 listCmd）")
+	}
 	if manifestPreview != "" {
 		lines = append(lines, manifestPreview)
 	}
@@ -530,16 +580,25 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		report.Errors = errorLines(err)
 		return report
 	}
-	scanWarnings := []string{}
-	commands := homeManifestCommands(deps)
-	local := homeScanLocalWithCommands(*config, remote, &scanWarnings, commands)
-	warnings = append(warnings, scanWarnings...)
 	mode, modeOK := homeMode(options, deps)
 	if !modeOK {
 		report.Errors = []string{"非交互环境无法选择首次对接模式", "请显式给出 `--mode pull|merge|skip`，或加 `--yes`（未给 --mode 时默认 merge）。"}
 		report.Warnings = warnings
 		return report
 	}
+
+	var commands manifest.CommandPort
+	if deps != nil {
+		commands = deps.Commands
+	}
+	// A manifest list command is an external command from the remote config.
+	// Before an explicit confirmation, and in skip mode, represent each
+	// enabled manifest category as an empty local snapshot without invoking it.
+	deferManifestScan := mode == syncx.FirstContactSkip || !options.Yes
+	manifestScanDeferred := deferManifestScan && mode != syncx.FirstContactSkip && hasEnabledManifestCategory(*config)
+	scanWarnings := []string{}
+	local := homeScanLocalWithCommandsMode(*config, remote, &scanWarnings, commands, deferManifestScan)
+	warnings = append(warnings, scanWarnings...)
 
 	// A missing root is conservatively represented as local=remote by the
 	// scanner. For an actual first-contact apply, create the root first and
@@ -549,7 +608,7 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		if rootResult.Retried {
 			warnings = []string{}
 			refreshedWarnings := []string{}
-			local = homeScanLocalWithCommands(*config, remote, &refreshedWarnings, commands)
+			local = homeScanLocalWithCommandsMode(*config, remote, &refreshedWarnings, commands, deferManifestScan)
 			warnings = append(warnings, refreshedWarnings...)
 		}
 		for _, warning := range rootResult.Warnings {
@@ -576,6 +635,9 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 	}
 	warnings = append(warnings, manifestWarnings...)
 	plan.Actions = remainingPlan.Actions
+	if manifestScanDeferred {
+		warnings = append(warnings, "manifest 分类待确认后才会扫描")
+	}
 	manifestReport := (*ManifestApplyReport)(nil)
 	if len(manifestTasks) > 0 {
 		manifestReport = emptyManifestApplyReport()
@@ -583,8 +645,9 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 	if options.Yes && len(manifestTasks) > 0 {
 		warnings = append(warnings, fmt.Sprintf("已按 --yes 确认执行远端声明的 manifest 命令（%d 条）", len(manifestTasks)))
 	}
+	manifestScanConfirmed := options.Yes || !manifestScanDeferred
 	if !options.Yes && (len(plan.Actions) > 0 || len(names) > 0 || len(manifestTasks) > 0) {
-		if !promptConfirm(depsHomeUI(deps), homeConfirmationPreview(*config, plan, manifestTasks, names), false) {
+		if !promptConfirm(depsHomeUI(deps), homeConfirmationPreviewWithScanState(*config, plan, manifestTasks, names, manifestScanDeferred), false) {
 			if depsHomeUI(deps) == nil && !isTTY() {
 				warnings = append(warnings, "非交互环境无法确认，已中止；如需自动归位请加 --yes")
 			}
@@ -600,6 +663,29 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 				report.Errors = []string{"已取消：未确认归位（未写入任何工具目录 / 密钥目标，未更新 state）"}
 			}
 			return report
+		}
+		manifestScanConfirmed = true
+	}
+
+	// The preview above deliberately used an empty local manifest. Once the
+	// user confirms, it is safe to run listCmd and recompute the union task so
+	// already-installed IDs are not redundantly applied.
+	if manifestScanDeferred && manifestScanConfirmed {
+		scanWarnings = []string{}
+		local = homeScanLocalWithCommandsMode(*config, remote, &scanWarnings, commands, false)
+		warnings = append(warnings, scanWarnings...)
+		plan = syncx.PlanFirstContact(*config, local, remote, mode)
+		remainingPlan = syncx.PullPlan{Actions: plan.Actions}
+		manifestTasks = []manifest.Task{}
+		manifestWarnings = []string{}
+		if mode != syncx.FirstContactSkip {
+			remainingPlan, manifestTasks, manifestWarnings = syncx.SplitManifestActions(*config, remainingPlan, local)
+		}
+		warnings = append(warnings, manifestWarnings...)
+		plan.Actions = remainingPlan.Actions
+		manifestReport = nil
+		if len(manifestTasks) > 0 {
+			manifestReport = emptyManifestApplyReport()
 		}
 	}
 
@@ -767,6 +853,3 @@ func RenderHomeJSON(report HomeReport) string {
 	values["errors"] = stringArrayValue(report.Errors)
 	return string(orderedjson.Serialize(&orderedjson.Object{Keys: keys, M: values}))
 }
-
-func runHome(options HomeOptions, deps *HomeDeps) HomeReport { return RunHome(options, deps) }
-func renderHomeReport(report HomeReport) string              { return RenderHomeReport(report) }

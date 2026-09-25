@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kballard/go-shellquote"
@@ -79,6 +82,7 @@ func ValidID(id string) bool { return validIDPattern.MatchString(id) }
 type ScanProblem struct {
 	Command string
 	Message string
+	Err     error
 }
 
 // ScanCategory runs listCmd and produces the virtual-file snapshot entry.
@@ -95,7 +99,7 @@ func ScanCategory(adapterID, category string, cfg core.CategoryConfig, port Comm
 	}
 	stdout, err := port.Output(cfg.ListCmd)
 	if err != nil {
-		return snapshot, []ScanProblem{{Command: cfg.ListCmd, Message: err.Error()}}
+		return snapshot, []ScanProblem{{Command: cfg.ListCmd, Message: err.Error(), Err: err}}
 	}
 	ids := ParseIDs(stdout)
 	snapshot.Files[VirtualFileName(category)] = core.SnapshotEntry{
@@ -200,23 +204,111 @@ func (defaultPort) Apply(command, id string) error {
 	return err
 }
 
+const maxCommandOutputBytes = 16 * 1024 * 1024
+
+type limitedReadResult struct {
+	data     []byte
+	exceeded bool
+	err      error
+}
+
+func readLimited(reader io.Reader, limit int) limitedReadResult {
+	data, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+	exceeded := len(data) > limit
+	if exceeded {
+		data = data[:limit]
+		// Keep draining the pipe after the cap so the child cannot block on a
+		// full stdout pipe while the parent waits for it to exit.
+		if _, drainErr := io.Copy(io.Discard, reader); err == nil {
+			err = drainErr
+		}
+	}
+	return limitedReadResult{data: data, exceeded: exceeded, err: err}
+}
+
+type limitedBuffer struct {
+	bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (buffer *limitedBuffer) Write(data []byte) (int, error) {
+	remaining := buffer.limit - buffer.Len()
+	if remaining > 0 {
+		if len(data) > remaining {
+			_, _ = buffer.Buffer.Write(data[:remaining])
+			buffer.exceeded = true
+		} else {
+			_, _ = buffer.Buffer.Write(data)
+		}
+	} else if len(data) > 0 {
+		buffer.exceeded = true
+	}
+	// Returning len(data) keeps os/exec draining stderr without retaining an
+	// unbounded diagnostic. The command's exit status remains authoritative.
+	return len(data), nil
+}
+
+func minimalCommandEnv() []string {
+	keys := []string{"PATH", "HOME", "TERM", "LANG"}
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value, _ := os.LookupEnv(key)
+		env = append(env, key+"="+value)
+	}
+	return env
+}
+
 func run(argv []string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	var stderr bytes.Buffer
+	cmd.Env = minimalCommandEnv()
+	// Manifest commands may spawn descendants. Keep the command in its own
+	// process group so timeout cancellation cannot leave a child holding the
+	// stdout pipe open indefinitely.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = time.Second
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr limitedBuffer
+	stderr.limit = maxCommandOutputBytes
 	cmd.Stderr = &stderr
-	stdout, err := cmd.Output()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	stdoutDone := make(chan limitedReadResult, 1)
+	go func() {
+		stdoutDone <- readLimited(stdoutPipe, maxCommandOutputBytes)
+	}()
+	waitErr := cmd.Wait()
+	stdout := <-stdoutDone
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("command timed out: %w", ctx.Err())
 	}
-	if err != nil {
-		message := err.Error()
+	if stdout.err != nil {
+		return nil, stdout.err
+	}
+	if stdout.exceeded {
+		return nil, fmt.Errorf("command output exceeds %d MiB limit", maxCommandOutputBytes/(1024*1024))
+	}
+	if waitErr != nil {
+		message := waitErr.Error()
 		if text := strings.TrimSpace(stderr.String()); text != "" {
 			message += ": " + text
 		}
 		return nil, errors.New(message)
 	}
-	return stdout, nil
+	return stdout.data, nil
 }

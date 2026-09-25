@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gitx"
 	"github.com/zzjcool/homer-cli/internal/manifest"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
@@ -97,6 +99,61 @@ func w4WriteManifestPullFixture(t *testing.T, listCmd, applyCmd string) (core.Ho
 		Base:   []core.AdapterSnapshot{w4ManifestSnapshot("fake", "plugins", "pub.one\n")},
 		Local:  []core.AdapterSnapshot{w4ManifestSnapshot("fake", "plugins", "pub.one\n")},
 		Remote: []core.AdapterSnapshot{w4ManifestSnapshot("fake", "plugins", "pub.one\npub.two\n")},
+	}
+}
+
+func TestRunPullWarnsBeforeFastForwardWhenManifestCommandChanges(t *testing.T) {
+	paths, _, sources := w4WriteManifestPullFixture(t, "fake list --remote", "fake install")
+	raw, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteConfig := strings.Replace(string(raw), "fake list --remote", "fake new-list --remote", 1)
+	git := fakeWriteGit("base-commit", "remote-commit")
+	git.Exec = func(_ string, args []string, _ time.Duration) gitx.ExecResult {
+		if len(args) == 2 && args[0] == "show" {
+			return gitx.ExecResult{OK: true, Stdout: remoteConfig}
+		}
+		return gitx.ExecResult{}
+	}
+	commands := &w4ManifestCommandFake{output: []byte("pub.one\n")}
+	report := RunPull(PullOptions{HomerHome: paths.Home, Yes: true}, &PullDeps{
+		Sources:  sources,
+		NoFetch:  true,
+		Git:      git,
+		Commands: commands,
+	})
+	joined := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(joined, "远端配置变更了 manifest 命令") || !strings.Contains(joined, "fake list --remote") || !strings.Contains(joined, "fake new-list --remote") {
+		t.Fatalf("manifest command warning = %#v", report.Warnings)
+	}
+	if !strings.Contains(RenderPullReport(report), "远端配置变更了 manifest 命令") {
+		t.Fatalf("pull output omitted manifest command warning: %s", RenderPullReport(report))
+	}
+}
+
+func TestRunPullCarriesMissingManifestCLIWarning(t *testing.T) {
+	paths := writeTestPaths(t)
+	root := filepath.Join(paths.Home, "tool")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kind := core.CategoryKindManifest
+	config := core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{
+		"vscode": {Root: root, Categories: map[string]core.CategoryConfig{
+			"extensions": {Kind: &kind, Mode: core.SyncModeMirror, ListCmd: "definitely-not-installed-code --list", ApplyCmd: "code --install-extension"},
+		}},
+	}}
+	if err := core.SaveConfig(paths, config); err != nil {
+		t.Fatal(err)
+	}
+	report := RunPull(PullOptions{HomerHome: paths.Home, Yes: true}, &PullDeps{
+		NoFetch: true,
+		Git:     fakeWriteGit("base-commit", "remote-commit"),
+	})
+	joined := strings.Join(report.Warnings, "\\n")
+	if !strings.Contains(joined, "vscode: definitely-not-installed-code 未安装") || !strings.Contains(joined, "pull 时远端清单将视为全量待装") {
+		t.Fatalf("pull missing CLI warning = %#v", report.Warnings)
 	}
 }
 
