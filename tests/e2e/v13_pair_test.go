@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -132,7 +131,7 @@ func TestV13PairCLIOptionMatrixAtProcessBoundary(t *testing.T) {
 	}
 }
 
-func TestV13PairFakeTailcatPrintsAddressAndCleansProcessGroup(t *testing.T) {
+func TestV13PairSIGINTCleansTailcatProcessGroupAndAddressFile(t *testing.T) {
 	binary := buildHomer(t)
 	root := t.TempDir()
 	global := filepath.Join(root, "gitconfig")
@@ -148,6 +147,7 @@ func TestV13PairFakeTailcatPrintsAddressAndCleansProcessGroup(t *testing.T) {
 	writeFile(t, fakeTailcat, `#!/bin/sh
 set -eu
 printf '%s\n' 'fake-p3-address' > "$TAILCAT_ADDR_FILE"
+printf '%s\n' "$TAILCAT_ADDR_FILE" > "$HOME/fake-tailcat.addrpath"
 printf '%s\n' "$$" > "$HOME/fake-tailcat.pid"
 trap 'exit 0' INT TERM HUP
 /bin/cat
@@ -198,8 +198,15 @@ trap 'exit 0' INT TERM HUP
 		process.kill()
 		t.Fatalf("fake tailcat did not publish its pid")
 	}
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("terminate fake tailcat process group: %v", err)
+	addressPathData := waitForV13File(t, filepath.Join(fakeHome, "fake-tailcat.addrpath"), time.Second)
+	addressPath := strings.TrimSpace(string(addressPathData))
+	if addressPath == "" {
+		process.kill()
+		t.Fatal("fake tailcat did not publish its address file path")
+	}
+	if err := process.cmd.Process.Signal(os.Interrupt); err != nil {
+		process.kill()
+		t.Fatalf("send SIGINT to homer pair: %v", err)
 	}
 
 	code, stdout, stderr := process.wait(5 * time.Second)
@@ -208,6 +215,9 @@ trap 'exit 0' INT TERM HUP
 	}
 	if !strings.Contains(stdout, "fake-p3-address") || !strings.Contains(stdout, "勿入 git") {
 		t.Fatalf("pair output lost address warning after cleanup:\n%s", stdout)
+	}
+	if _, err := os.Stat(addressPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tailcat address file remains after SIGINT: %s (err=%v)", addressPath, err)
 	}
 	assertV13NoTailcatProcess(t, fakeTailcat)
 }
@@ -480,6 +490,20 @@ func writePairProcessConfig(t *testing.T, home, name, plaintext string) core.Hom
 		t.Fatal(err)
 	}
 	return paths
+}
+
+func waitForV13File(t *testing.T, filename string, timeout time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(filename)
+		if err == nil && len(data) > 0 {
+			return data
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", filename)
+	return nil
 }
 
 func containsV13String(values []string, want string) bool {

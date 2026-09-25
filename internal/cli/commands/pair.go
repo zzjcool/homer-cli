@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/agecrypto"
@@ -102,6 +104,11 @@ func (report PairJoinReport) ExitCode() int {
 	return 1
 }
 
+const (
+	pairJoinAckUndeliveredWarning = "目标文件与 vault 已写入且验证通过，仅确认未送达 A；可重试 pair"
+	pairServePeerWriteWarning     = "B 端可能已完成写入；可检查目标文件与 vault，或重试 pair"
+)
+
 const PAIR_USAGE = `用法: homer pair [options]           （机器 A：serve，输出一次性地址并等待）
       homer pair <tc-addr> [options]  （机器 B：join，完成配对后退出）
 
@@ -136,7 +143,16 @@ const PAIR_USAGE = `用法: homer pair [options]           （机器 A：serve�
 // before the confirmation gate is the transport's ephemeral session; config
 // and state remain untouched when the local user refuses the peer.
 func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
+	return runPairServe(context.Background(), options, deps, nil)
+}
+
+func runPairServe(ctx context.Context, options PairOptions, deps *PairDeps, output io.Writer) PairServeReport {
 	report := newPairServeReport(PairServeStatusError)
+	ctx = nonNilPairContext(ctx)
+	if err := ctx.Err(); err != nil {
+		report.Errors = append(report.Errors, safeError(err))
+		return report
+	}
 	if !pairTailcatAvailable(deps) {
 		return noTailcatServeReport()
 	}
@@ -153,8 +169,10 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 		return report
 	}
 
-	serveContext, cancel := context.WithTimeout(context.Background(), pair.AcceptDeadline)
-	defer cancel()
+	// Serve owns the whole session, not just the accept window. A deadline
+	// here would kill a healthy DERP session after AcceptDeadline; the bounded
+	// child context below is only for waiting for the first peer connection.
+	serveContext := ctx
 	server, err := transport.Serve(serveContext)
 	if err != nil {
 		report.Errors = append(report.Errors, safeError(err))
@@ -170,12 +188,14 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 	if !options.JSON {
 		if deps != nil && deps.OnAddr != nil {
 			deps.OnAddr(report.Addr)
+		} else if output != nil {
+			_, _ = fmt.Fprintln(output, "🐈 pair 地址（一次性，仅带外交换，勿入 git/聊天记录）: "+report.Addr)
 		} else {
-			fmt.Fprintln(os.Stdout, "🐈 pair 地址（一次性，仅带外交换，勿入 git/聊天记录）: "+report.Addr)
+			_, _ = fmt.Fprintln(os.Stdout, "🐈 pair 地址（一次性，仅带外交换，勿入 git/聊天记录）: "+report.Addr)
 		}
 	}
 
-	acceptContext, acceptCancel := context.WithTimeout(context.Background(), pair.AcceptDeadline)
+	acceptContext, acceptCancel := context.WithTimeout(ctx, pair.AcceptDeadline)
 	conn, err := server.Accept(acceptContext)
 	acceptCancel()
 	if err != nil {
@@ -184,26 +204,37 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 	}
 	defer func() { _ = conn.Close() }()
 
-	frameType, payload, err := readPairFrame(conn, pair.StepDeadline)
+	// Accept only establishes the tailcat stream; it does not mean the peer
+	// has sent hello yet. Keep this first read on the full accept window.
+	frameType, payload, err := readPairFrameContext(ctx, conn, pair.AcceptDeadline)
 	if err != nil {
-		report.Errors = append(report.Errors, safeError(err))
+		if errors.Is(err, context.DeadlineExceeded) {
+			report.Errors = append(report.Errors, "等待对端 hello 超时")
+		} else {
+			report.Errors = append(report.Errors, safeError(err))
+		}
+		return report
+	}
+	if frameType == pair.FrameAbort || frameType == pair.FrameError {
+		report.Status = PairServeStatusPeerFailed
+		report.Errors = append(report.Errors, pairPeerFailureMessage("对端中止了配对", frameType, payload))
 		return report
 	}
 	if frameType != pair.FrameHello {
-		_ = sendPairAbort(conn, "expected peer hello")
+		failAbort(ctx, conn, "expected peer hello", nil, nil)
 		report.Status = PairServeStatusPeerFailed
 		report.Errors = append(report.Errors, "对端未发送 hello")
 		return report
 	}
 	hello, err := pair.DecodeHello(payload)
 	if err != nil {
-		_ = sendPairAbort(conn, "invalid peer hello")
+		failAbort(ctx, conn, "invalid peer hello", nil, nil)
 		report.Status = PairServeStatusPeerFailed
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
 	if err := pair.ValidateHello(hello); err != nil {
-		_ = sendPairAbort(conn, safeError(err))
+		failAbort(ctx, conn, safeError(err), nil, nil)
 		report.Status = PairServeStatusPeerFailed
 		report.Errors = append(report.Errors, safeError(err))
 		return report
@@ -212,10 +243,14 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 
 	confirmed := options.Yes
 	if !confirmed {
-		confirmed = promptConfirm(pairUI(deps), pair.PeerDisplay(hello)+"\n是否接受此设备并发送密钥？", false)
+		confirmed = promptConfirmContext(ctx, pairUI(deps), pair.PeerDisplay(hello)+"\n是否接受此设备并发送密钥？", false)
+	}
+	if err := ctx.Err(); err != nil {
+		report.Errors = append(report.Errors, safeError(err))
+		return report
 	}
 	if !confirmed {
-		if err := sendPairFrame(conn, pair.FrameDecline, pair.Decline{Reason: "本机用户拒绝了配对请求"}); err != nil {
+		if err := sendPairFrameContext(ctx, conn, pair.FrameDecline, pair.Decline{Reason: "本机用户拒绝了配对请求"}); err != nil {
 			report.Warnings = append(report.Warnings, "拒绝通知未能发送给对端")
 		}
 		report.Status = PairServeStatusAborted
@@ -225,8 +260,7 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 
 	updatedConfig, recipientAdded := configWithRecipient(config, hello.Recipient)
 	if err := core.SaveConfig(paths, updatedConfig); err != nil {
-		_ = sendPairAbort(conn, "无法保存配对 recipient")
-		report.Errors = append(report.Errors, safeError(err))
+		failAbort(ctx, conn, "无法保存配对 recipient", &report.Errors, err)
 		return report
 	}
 	report.RecipientAdded = recipientAdded
@@ -250,7 +284,7 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 		plaintexts[name] = plaintext
 	}
 	if len(missing) > 0 {
-		_ = sendPairAbort(conn, "源文件缺失")
+		failAbort(ctx, conn, "源文件缺失", nil, nil)
 		report.Status = PairServeStatusNoSource
 		report.Errors = append(report.Errors, fmt.Sprintf("以下目标文件不可读（%d/%d），已中止且未发送任何密文：", len(missing), len(names)))
 		report.Errors = append(report.Errors, missing...)
@@ -264,17 +298,17 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 	for _, name := range names {
 		ciphertext, encryptErr := crypto.Encrypt(plaintexts[name], recipients)
 		if encryptErr != nil {
-			_ = sendPairAbort(conn, "无法生成 age 密文")
+			failAbort(ctx, conn, "无法生成 age 密文", nil, nil)
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: %s", name, safeError(encryptErr)))
 			return report
 		}
 		if !agecrypto.CiphertextLooksSafe(ciphertext, plaintexts[name]) {
-			_ = sendPairAbort(conn, "age 密文完整性预检失败")
+			failAbort(ctx, conn, "age 密文完整性预检失败", nil, nil)
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: age 密文完整性预检失败", name))
 			return report
 		}
 		if len(ciphertext) > pair.MaxFrameBytes || totalBytes > pair.MaxTotalBundleBytes-len(ciphertext) {
-			_ = sendPairAbort(conn, "密钥 bundle 超过传输大小限制")
+			failAbort(ctx, conn, "密钥 bundle 超过传输大小限制", nil, nil)
 			report.Errors = append(report.Errors, "密钥 bundle 超过传输大小限制")
 			return report
 		}
@@ -286,51 +320,51 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 	for _, name := range names {
 		offer.Files = append(offer.Files, pair.OfferFile{Name: name, Size: len(ciphertexts[name])})
 	}
-	if err := sendPairFrame(conn, pair.FrameOffer, offer); err != nil {
+	if err := sendPairFrameContext(ctx, conn, pair.FrameOffer, offer); err != nil {
 		report.Status = PairServeStatusPeerFailed
+		report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
 	for _, name := range names {
-		if err := writePairPayload(conn, pair.FrameBlob, ciphertexts[name]); err != nil {
+		if err := writePairPayloadContext(ctx, conn, pair.FrameBlob, ciphertexts[name]); err != nil {
 			report.Status = PairServeStatusPeerFailed
+			report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
 			report.Errors = append(report.Errors, safeError(err))
 			return report
 		}
 		report.Sent = append(report.Sent, name)
 	}
 
-	frameType, payload, err = readPairFrame(conn, pair.StepDeadline)
+	frameType, payload, err = readPairFrameContext(ctx, conn, pair.StepDeadline)
 	if err != nil {
 		report.Status = PairServeStatusPeerFailed
+		report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
-	if frameType == pair.FrameAbort {
-		abort, decodeErr := decodePairAbort(payload)
+	if frameType == pair.FrameAbort || frameType == pair.FrameError {
 		report.Status = PairServeStatusPeerFailed
-		if decodeErr != nil {
-			report.Errors = append(report.Errors, "对端中止配对")
-		} else if abort.Reason != "" {
-			report.Errors = append(report.Errors, "对端中止配对: "+abort.Reason)
-		} else {
-			report.Errors = append(report.Errors, "对端中止配对")
-		}
+		report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
+		report.Errors = append(report.Errors, pairPeerFailureMessage("对端中止配对", frameType, payload))
 		return report
 	}
 	if frameType != pair.FrameAck {
 		report.Status = PairServeStatusPeerFailed
+		report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
 		report.Errors = append(report.Errors, "对端未发送 ack")
 		return report
 	}
 	ack, err := pair.DecodeAck(payload)
 	if err != nil {
 		report.Status = PairServeStatusPeerFailed
+		report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
 	if !ack.OK {
 		report.Status = PairServeStatusPeerFailed
+		report.Warnings = append(report.Warnings, pairServePeerWriteWarning)
 		if len(ack.Errors) > 0 {
 			report.Errors = append(report.Errors, ack.Errors...)
 		} else {
@@ -360,7 +394,16 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 // vault or destination until every offered blob has been received, decrypted,
 // and passed the ciphertext self-check.
 func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
+	return runPairJoin(context.Background(), options, deps, nil)
+}
+
+func runPairJoin(ctx context.Context, options PairOptions, deps *PairDeps, output io.Writer) PairJoinReport {
 	report := newPairJoinReport(PairJoinStatusError)
+	ctx = nonNilPairContext(ctx)
+	if err := ctx.Err(); err != nil {
+		report.Errors = append(report.Errors, safeError(err))
+		return report
+	}
 	if !pairTailcatAvailable(deps) {
 		return noTailcatJoinReport()
 	}
@@ -385,7 +428,7 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
-	connectContext, connectCancel := context.WithTimeout(context.Background(), pair.StepDeadline)
+	connectContext, connectCancel := context.WithTimeout(ctx, pair.StepDeadline)
 	conn, err := transport.Connect(connectContext, options.Addr)
 	connectCancel()
 	if err != nil {
@@ -404,19 +447,26 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
-	if err := sendPairFrame(conn, pair.FrameHello, hello); err != nil {
+	if err := sendPairFrameContext(ctx, conn, pair.FrameHello, hello); err != nil {
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
+	if !options.JSON && output != nil {
+		_, _ = fmt.Fprintf(output, "等待对端确认…（最长 %ds）\n", int(pair.StepDeadline/time.Second))
+	}
 
-	frameType, payload, err := readPairFrame(conn, pair.StepDeadline)
+	frameType, payload, err := readPairFrameContext(ctx, conn, pair.StepDeadline)
 	if err != nil {
-		report.Errors = append(report.Errors, safeError(err))
+		if errors.Is(err, context.DeadlineExceeded) {
+			report.Errors = append(report.Errors, "等待确认超时")
+		} else {
+			report.Errors = append(report.Errors, safeError(err))
+		}
 		return report
 	}
 	switch frameType {
 	case pair.FrameDecline:
-		decline, decodeErr := decodePairDecline(payload)
+		decline, decodeErr := pair.DecodeDecline(payload)
 		report.Status = PairJoinStatusDeclined
 		if decodeErr != nil || decline.Reason == "" {
 			report.Errors = append(report.Errors, "serve 端拒绝了配对请求")
@@ -424,26 +474,20 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 			report.Errors = append(report.Errors, "serve 端拒绝了配对请求: "+decline.Reason)
 		}
 		return report
-	case pair.FrameAbort:
-		abort, decodeErr := decodePairAbort(payload)
-		if decodeErr != nil || abort.Reason == "" {
-			report.Errors = append(report.Errors, "serve 端中止了配对")
-		} else {
-			report.Errors = append(report.Errors, "serve 端中止了配对: "+abort.Reason)
-		}
+	case pair.FrameAbort, pair.FrameError:
+		report.Errors = append(report.Errors, pairPeerFailureMessage("serve 端中止了配对", frameType, payload))
 		return report
 	case pair.FrameOffer:
 		// Continue below.
 	default:
-		_ = sendPairAbort(conn, "expected offer")
+		failAbort(ctx, conn, "expected offer", nil, nil)
 		report.Errors = append(report.Errors, "serve 端未发送 offer")
 		return report
 	}
 
 	offer, err := pair.DecodeOffer(payload)
 	if err != nil {
-		_ = sendPairAbort(conn, "invalid offer")
-		report.Errors = append(report.Errors, safeError(err))
+		failAbort(ctx, conn, "invalid offer", &report.Errors, err)
 		return report
 	}
 	unknown, offerErr := validatePairOffer(config, offer)
@@ -452,18 +496,17 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 		// sending Abort. This prevents a synchronous net.Pipe writer on the
 		// serve side from being stranded while the join side reports failure.
 		if offer.Version == pair.ProtocolVersion && offerFilesDrainable(offer) {
-			_ = drainPairBlobs(conn, offer)
+			_ = drainPairBlobsContext(ctx, conn, offer)
 		}
-		_ = sendPairAbort(conn, messageForPairError(offerErr))
-		report.Errors = append(report.Errors, safeError(offerErr))
+		failAbort(ctx, conn, messageForPairError(offerErr), &report.Errors, offerErr)
 		return report
 	}
 	if len(unknown) > 0 {
-		if err := drainPairBlobs(conn, offer); err != nil {
+		if err := drainPairBlobsContext(ctx, conn, offer); err != nil {
 			report.Errors = append(report.Errors, safeError(err))
 			return report
 		}
-		_ = sendPairAbort(conn, "offer 包含本机未配置的密钥")
+		failAbort(ctx, conn, "offer 包含本机未配置的密钥", nil, nil)
 		report.Status = PairJoinStatusUnknownSecret
 		report.Errors = append(report.Errors, "offer 包含本机未配置的密钥: "+strings.Join(unknown, ", "))
 		return report
@@ -475,9 +518,14 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 	failures := make([]string, 0)
 	allBlobsRead := true
 	for _, file := range offer.Files {
-		frameType, payload, err := readPairFrame(conn, pair.StepDeadline)
+		frameType, payload, err := readPairFrameContext(ctx, conn, pair.StepDeadline)
 		if err != nil {
 			failures = append(failures, file.Name+": "+safeError(err))
+			allBlobsRead = false
+			break
+		}
+		if frameType == pair.FrameAbort || frameType == pair.FrameError {
+			failures = append(failures, file.Name+": "+pairPeerFailureMessage("serve 端中止了配对", frameType, payload))
 			allBlobsRead = false
 			break
 		}
@@ -508,7 +556,7 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 	}
 	if len(failures) > 0 {
 		if allBlobsRead {
-			_ = sendPairAbort(conn, "密文无法用本机 identity 验证")
+			failAbort(ctx, conn, "密文无法用本机 identity 验证", nil, nil)
 		}
 		report.Status = PairJoinStatusUndecryptable
 		report.Errors = append(report.Errors, fmt.Sprintf("以下密文无法验证（%d/%d），未写入任何 vault 或目标文件：", len(failures), len(offer.Files)))
@@ -522,25 +570,25 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 	}
 	backupDir, backupErr := backupSecretDestinations(paths, config, names)
 	if backupErr != nil {
-		_ = sendPairAbort(conn, "无法备份现有目标文件")
+		failAbort(ctx, conn, "无法备份现有目标文件", nil, nil)
 		report.Errors = append(report.Errors, safeError(backupErr))
 		return report
 	}
 	report.BackupDir = backupDir
 	for _, name := range names {
 		if err := agecrypto.WriteVaultCiphertext(paths, name, ciphertexts[name]); err != nil {
-			_ = sendPairAbort(conn, "无法写入 vault")
+			failAbort(ctx, conn, "无法写入 vault", nil, nil)
 			report.Errors = append(report.Errors, safeError(err))
 			return report
 		}
 		destination, destinationErr := agecrypto.DestinationOf(config, name)
 		if destinationErr != nil {
-			_ = sendPairAbort(conn, "无法解析目标文件")
+			failAbort(ctx, conn, "无法解析目标文件", nil, nil)
 			report.Errors = append(report.Errors, safeError(destinationErr))
 			return report
 		}
 		if err := writeSecretDestination(destination, plaintexts[name]); err != nil {
-			_ = sendPairAbort(conn, "无法写入目标文件")
+			failAbort(ctx, conn, "无法写入目标文件", nil, nil)
 			report.Errors = append(report.Errors, safeError(err))
 			return report
 		}
@@ -548,7 +596,8 @@ func RunPairJoin(options PairOptions, deps *PairDeps) PairJoinReport {
 	}
 
 	ack := pair.Ack{OK: true, Applied: append([]string(nil), report.Applied...), BackupDir: report.BackupDir}
-	if err := sendPairFrame(conn, pair.FrameAck, ack); err != nil {
+	if err := sendPairFrameContext(ctx, conn, pair.FrameAck, ack); err != nil {
+		report.Warnings = append(report.Warnings, pairJoinAckUndeliveredWarning)
 		report.Errors = append(report.Errors, safeError(err))
 		return report
 	}
@@ -567,9 +616,11 @@ func ExecutePair(options PairOptions, deps *PairDeps, out, errOut io.Writer) int
 	if errOut == nil {
 		errOut = io.Discard
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if options.Addr == "" {
-		report := RunPairServe(options, deps)
+		report := runPairServe(ctx, options, deps, out)
 		if options.JSON {
 			_ = writeOrderedJSON(out, pairServeValue(report))
 		} else {
@@ -579,7 +630,7 @@ func ExecutePair(options PairOptions, deps *PairDeps, out, errOut io.Writer) int
 		return report.ExitCode()
 	}
 
-	report := RunPairJoin(options, deps)
+	report := runPairJoin(ctx, options, deps, out)
 	if options.JSON {
 		_ = writeOrderedJSON(out, pairJoinValue(report))
 	} else {
@@ -693,8 +744,6 @@ func pairTailcatAvailable(deps *PairDeps) bool {
 	return err == nil
 }
 
-var errPairTransportUnavailable = errors.New("tailcat transport adapter is unavailable")
-
 func pairTransportFor(deps *PairDeps) (pair.PairTransport, error) {
 	if deps != nil && deps.Transport != nil {
 		return deps.Transport, nil
@@ -704,14 +753,9 @@ func pairTransportFor(deps *PairDeps) (pair.PairTransport, error) {
 		Stderr: os.Stderr,
 	})
 	if err != nil {
-		return nil, errPairTransportUnavailable
+		return nil, fmt.Errorf("tailcat transport: %w", err)
 	}
 	return transport, nil
-}
-
-func pairConfigReady(home string) error {
-	_, err := loadPairConfig(resolveCommandPaths(home))
-	return err
 }
 
 func loadPairConfig(paths core.HomerPaths) (*core.HomerConfig, error) {
@@ -764,7 +808,14 @@ type pairFrameResult struct {
 	err       error
 }
 
-func readPairFrame(conn io.ReadWriteCloser, timeout time.Duration) (uint8, []byte, error) {
+func nonNilPairContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func readPairFrameContext(parent context.Context, conn io.ReadWriteCloser, timeout time.Duration) (uint8, []byte, error) {
 	if conn == nil {
 		return 0, nil, errors.New("pair connection is nil")
 	}
@@ -773,7 +824,7 @@ func readPairFrame(conn io.ReadWriteCloser, timeout time.Duration) (uint8, []byt
 		frameType, payload, err := pair.ReadFrame(conn, pair.MaxFrameBytes)
 		result <- pairFrameResult{frameType: frameType, payload: payload, err: err}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(nonNilPairContext(parent), timeout)
 	defer cancel()
 	select {
 	case result := <-result:
@@ -783,21 +834,21 @@ func readPairFrame(conn io.ReadWriteCloser, timeout time.Duration) (uint8, []byt
 	}
 }
 
-func writePairFrame(conn io.ReadWriteCloser, frameType uint8, value any) error {
+func writePairFrameContext(ctx context.Context, conn io.ReadWriteCloser, frameType uint8, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return writePairPayload(conn, frameType, payload)
+	return writePairPayloadContext(ctx, conn, frameType, payload)
 }
 
-func writePairPayload(conn io.ReadWriteCloser, frameType uint8, payload []byte) error {
+func writePairPayloadContext(parent context.Context, conn io.ReadWriteCloser, frameType uint8, payload []byte) error {
 	if conn == nil {
 		return errors.New("pair connection is nil")
 	}
 	result := make(chan error, 1)
 	go func() { result <- pair.WriteFrame(conn, frameType, payload) }()
-	ctx, cancel := context.WithTimeout(context.Background(), pair.StepDeadline)
+	ctx, cancel := context.WithTimeout(nonNilPairContext(parent), pair.StepDeadline)
 	defer cancel()
 	select {
 	case err := <-result:
@@ -807,48 +858,46 @@ func writePairPayload(conn io.ReadWriteCloser, frameType uint8, payload []byte) 
 	}
 }
 
-func sendPairFrame(conn io.ReadWriteCloser, frameType uint8, value any) error {
-	return writePairFrame(conn, frameType, value)
+func sendPairFrameContext(ctx context.Context, conn io.ReadWriteCloser, frameType uint8, value any) error {
+	return writePairFrameContext(ctx, conn, frameType, value)
 }
 
-func sendPairAbort(conn io.ReadWriteCloser, reason string) error {
-	return writePairFrame(conn, pair.FrameAbort, pair.Abort{Reason: reason})
+func sendPairAbortContext(ctx context.Context, conn io.ReadWriteCloser, reason string) error {
+	return sendPairFrameContext(ctx, conn, pair.FrameAbort, pair.Abort{Reason: reason})
 }
 
-func decodePairDecline(payload []byte) (pair.Decline, error) {
-	var message pair.Decline
-	if err := decodePairObject(payload, &message); err != nil {
-		return pair.Decline{}, err
+// failAbort is the common three-step protocol failure path: best-effort abort,
+// preserve the local cause, and let the caller's deferred Close tear down the
+// transport. It deliberately does not replace a useful local error with a
+// failed notification write.
+func failAbort(ctx context.Context, conn io.ReadWriteCloser, reason string, errorsOut *[]string, cause error) {
+	_ = sendPairAbortContext(ctx, conn, reason)
+	if errorsOut != nil && cause != nil {
+		*errorsOut = append(*errorsOut, safeError(cause))
 	}
-	return message, nil
 }
 
-func decodePairAbort(payload []byte) (pair.Abort, error) {
-	var message pair.Abort
-	if err := decodePairObject(payload, &message); err != nil {
-		return pair.Abort{}, err
+func pairPeerFailureMessage(prefix string, _ uint8, payload []byte) string {
+	abort, err := pair.DecodeAbort(payload)
+	if err != nil || strings.TrimSpace(abort.Reason) == "" {
+		return prefix
 	}
-	return message, nil
+	return prefix + ": " + abort.Reason
 }
 
-func decodePairObject(payload []byte, target any) error {
-	trimmed := strings.TrimSpace(string(payload))
-	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
-		return errors.New("pair message must be a JSON object")
+func promptConfirmContext(ctx context.Context, value any, message string, fallback bool) bool {
+	ctx = nonNilPairContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return false
 	}
-	decoder := json.NewDecoder(strings.NewReader(trimmed))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
+	result := make(chan bool, 1)
+	go func() { result <- promptConfirm(value, message, fallback) }()
+	select {
+	case confirmed := <-result:
+		return confirmed
+	case <-ctx.Done():
+		return false
 	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return errors.New("pair message has trailing JSON")
-		}
-		return err
-	}
-	return nil
 }
 
 func validatePairOffer(config *core.HomerConfig, offer pair.Offer) ([]string, error) {
@@ -902,11 +951,14 @@ func offerFilesDrainable(offer pair.Offer) bool {
 	return true
 }
 
-func drainPairBlobs(conn io.ReadWriteCloser, offer pair.Offer) error {
+func drainPairBlobsContext(ctx context.Context, conn io.ReadWriteCloser, offer pair.Offer) error {
 	for _, file := range offer.Files {
-		frameType, payload, err := readPairFrame(conn, pair.StepDeadline)
+		frameType, payload, err := readPairFrameContext(ctx, conn, pair.StepDeadline)
 		if err != nil {
 			return err
+		}
+		if frameType == pair.FrameAbort || frameType == pair.FrameError {
+			return errors.New(pairPeerFailureMessage("pair offer aborted by peer", frameType, payload))
 		}
 		if frameType != pair.FrameBlob || len(payload) != file.Size {
 			return errors.New("pair offer blob does not match its declared size")

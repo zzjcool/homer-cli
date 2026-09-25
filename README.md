@@ -256,7 +256,7 @@ age 密文，但仍应按敏感 bearer secret 处理。
 
 pair 需要可选的 tailcat CLI，不把 tailcat 作为 Go module 依赖。请按官方
 [INSTALL 指引](https://github.com/tailscale/tailcat)安装（建议 v0.7.0+），并确认
-两台机器的 `PATH` 都能找到 `tailcat`。Homer 会明确启动：
+两台机器的 `PATH` 都能找到 `tailcat`。PATH 中 `tailcat` 的来源校验由用户负责，Homer 不对 PATH 中的同名程序做来源背书。Homer 会明确启动：
 
 ```text
 tailcat --key=new
@@ -283,6 +283,7 @@ tailcat --key=new
   再确认；拒绝或非 TTY 未给 `--yes` 时不写 `homer.json` / `state.json`，不发送密文。
 - **S3 bundle 原子性**：A 先把全部 destination 明文读入内存，再用 A 现有 recipient
   加 B recipient 重新加密；B 全部解密验证成功后才备份、原子写 vault 和 0600 destination。
+  写盘阶段仍存在应用进程窗口；重试 pair 依靠备份与幂等写入收敛，不能把该窗口宣称为严格事务。
 - **S4 帧与路径防御**：单帧上限 16 MiB、bundle 上限 64 MiB；文件名必须属于本机
   `secrets.files`，目标路径只从本机配置解析，拒绝未知密钥名和路径穿越。
 - **S5 中断清理**：pair 连接、serve 和 tailcat 子进程组在退出/中断时统一关闭，

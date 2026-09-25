@@ -135,6 +135,20 @@ func TestValidateHelloBranchesAndDisplay(t *testing.T) {
 	}
 }
 
+func TestDecodeDeclineAndAbortHelpers(t *testing.T) {
+	decline, err := DecodeDecline([]byte(`{"reason":"拒绝"}`))
+	if err != nil || decline.Reason != "拒绝" {
+		t.Fatalf("DecodeDecline = %#v, %v", decline, err)
+	}
+	abort, err := DecodeAbort([]byte(`{"reason":"前向兼容错误"}`))
+	if err != nil || abort.Reason != "前向兼容错误" {
+		t.Fatalf("DecodeAbort = %#v, %v", abort, err)
+	}
+	if _, err := DecodeAbort([]byte(`[]`)); err == nil {
+		t.Fatal("DecodeAbort accepted an array")
+	}
+}
+
 func TestDecodeHelpersRejectNonObjectsAndWrongTypes(t *testing.T) {
 	if _, err := DecodeHello([]byte(`[]`)); err == nil {
 		t.Fatal("array hello was accepted")

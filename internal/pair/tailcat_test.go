@@ -196,8 +196,7 @@ func TestTailcatConnectUsesOptionTerminatorForAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTailcatTransport: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
 	stream, err := transport.Connect(ctx, "-address-looking-like-a-flag")
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -209,6 +208,9 @@ func TestTailcatConnectUsesOptionTerminatorForAddress(t *testing.T) {
 	if strings.Contains(string(waitForFile(t, envFile, time.Second)), "TAILCAT_ADDR_FILE=") {
 		t.Fatal("join unexpectedly received TAILCAT_ADDR_FILE")
 	}
+	// Cancelling the dial timeout after Connect returns must not tear down the
+	// established stream; its Close owns the child process lifetime.
+	cancel()
 	if _, err := stream.Write([]byte("join-echo")); err != nil {
 		t.Fatalf("join Write: %v", err)
 	}
@@ -221,6 +223,51 @@ func TestTailcatConnectUsesOptionTerminatorForAddress(t *testing.T) {
 	}
 	if err := stream.Close(); err != nil {
 		t.Fatalf("join Close: %v", err)
+	}
+}
+
+func TestTailcatServeContextCancellationAndCloseAreIdempotent(t *testing.T) {
+	_, argsFile, childPIDFile, _ := writeFakeTailcat(t)
+	transport, err := NewTailcatTransport(TailcatOptions{
+		ExtraEnv: []string{
+			"TAILCAT_MODE=serve",
+			"TAILCAT_ARGS_FILE=" + argsFile,
+			"TAILCAT_CHILD_PID_FILE=" + childPIDFile,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewTailcatTransport: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	server, err := transport.Serve(ctx)
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	impl := server.(*tailcatServer)
+	stream, err := server.Accept(context.Background())
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(waitForFile(t, childPIDFile, time.Second))))
+	if err != nil {
+		t.Fatalf("parse cancellation child pid: %v", err)
+	}
+	cancel()
+	waitForProcessGone(t, childPID)
+	if err := stream.Close(); err != nil {
+		t.Fatalf("stream Close after context cancellation: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("stream Close second call after context cancellation: %v", err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("server Close after context cancellation: %v", err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("server Close second call after context cancellation: %v", err)
+	}
+	if _, err := os.Stat(impl.addressPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("address file after cancellation cleanup: %v", err)
 	}
 }
 

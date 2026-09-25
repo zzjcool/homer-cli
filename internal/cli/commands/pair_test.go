@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -173,6 +174,62 @@ func TestPairFullLinkSuccessCopiesPlaintextAndRecordsPairing(t *testing.T) {
 	}
 	if ui.calls != 1 || !strings.Contains(ui.message, fixture.bIdentity.Recipient[:12]) || strings.Contains(ui.message, fixture.bIdentity.Recipient) {
 		t.Fatalf("confirmation message/calls = %q / %d", ui.message, ui.calls)
+	}
+}
+
+type delayedHelloTransport struct {
+	pair.PairTransport
+	delay time.Duration
+}
+
+func (transport delayedHelloTransport) Connect(ctx context.Context, addr string) (io.ReadWriteCloser, error) {
+	conn, err := transport.PairTransport.Connect(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	return &delayedFirstWriteConn{ReadWriteCloser: conn, delay: transport.delay}, nil
+}
+
+type delayedFirstWriteConn struct {
+	io.ReadWriteCloser
+	delay time.Duration
+	once  sync.Once
+}
+
+func (conn *delayedFirstWriteConn) Write(payload []byte) (int, error) {
+	conn.once.Do(func() { time.Sleep(conn.delay) })
+	return conn.ReadWriteCloser.(io.Writer).Write(payload)
+}
+
+func TestPairServeAcceptsSlowHelloWithinAcceptWindow(t *testing.T) {
+	fixture := newPairFixture(t, []string{"shared"}, []string{"shared"})
+	left, right := pairtest.NewPipePair()
+	addrCh := make(chan string, 1)
+	serveCh := make(chan PairServeReport, 1)
+	go func() {
+		serveCh <- RunPairServe(PairOptions{HomerHome: fixture.aHome, Yes: true}, &PairDeps{
+			Transport: left,
+			OnAddr:    func(addr string) { addrCh <- addr },
+		})
+	}()
+	select {
+	case <-addrCh:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not expose address")
+	}
+	join := RunPairJoin(PairOptions{HomerHome: fixture.bHome, Addr: "pipe-test"}, &PairDeps{
+		Transport: delayedHelloTransport{PairTransport: right, delay: 250 * time.Millisecond},
+	})
+	select {
+	case serve := <-serveCh:
+		if !serve.OK || serve.Status != PairServeStatusPaired {
+			t.Fatalf("slow hello serve report = %#v", serve)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("serve did not finish after slow hello; join report = %#v", join)
+	}
+	if !join.OK || join.Status != PairJoinStatusPaired {
+		t.Fatalf("slow hello join report = %#v", join)
 	}
 }
 
@@ -360,6 +417,18 @@ func TestPairAckFailureReportsPeerFailureAndRecipientWarning(t *testing.T) {
 	if !containsSubstring(serve.Warnings, "recipient") {
 		t.Fatalf("ack failure warnings = %#v", serve.Warnings)
 	}
+	if !containsSubstring(serve.Warnings, "B 端可能已完成写入") {
+		t.Fatalf("ack failure peer completion warning = %#v", serve.Warnings)
+	}
+	if !containsSubstring(join.Warnings, "目标文件与 vault 已写入且验证通过，仅确认未送达 A") {
+		t.Fatalf("ack failure join warning = %#v", join.Warnings)
+	}
+	if got, err := os.ReadFile(fixture.bFiles["shared"]); err != nil || !bytes.Equal(got, []byte("source-shared\nwith-enough-content-to-exercise-the-ciphertext-check")) {
+		t.Fatalf("B destination after ack failure = %q, %v", got, err)
+	}
+	if _, err := agecrypto.DecryptSecretFromFile(agecrypto.NewAgeCryptoPort(), fixture.bPath, "shared"); err != nil {
+		t.Fatalf("B vault after ack failure = %v", err)
+	}
 }
 
 func TestExecutePairNoTailcatPrintsInstallAndGitFallback(t *testing.T) {
@@ -465,6 +534,44 @@ func (immediateAcceptFailureServer) Accept(context.Context) (io.ReadWriteCloser,
 }
 func (immediateAcceptFailureServer) Close() error { return nil }
 
+type deadlineRecordingTransport struct {
+	serveHasDeadline  bool
+	acceptHasDeadline bool
+}
+
+func (transport *deadlineRecordingTransport) Serve(ctx context.Context) (pair.PairServer, error) {
+	_, transport.serveHasDeadline = ctx.Deadline()
+	return &deadlineRecordingServer{transport: transport}, nil
+}
+
+func (*deadlineRecordingTransport) Connect(context.Context, string) (io.ReadWriteCloser, error) {
+	return nil, errors.New("unexpected connect")
+}
+
+type deadlineRecordingServer struct{ transport *deadlineRecordingTransport }
+
+func (server *deadlineRecordingServer) Addr() string { return "deadline-test" }
+func (server *deadlineRecordingServer) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
+	_, server.transport.acceptHasDeadline = ctx.Deadline()
+	return nil, errors.New("stop after deadline inspection")
+}
+func (*deadlineRecordingServer) Close() error { return nil }
+
+func TestPairServeUsesUnboundedServeContextAndBoundedAcceptContext(t *testing.T) {
+	fixture := newPairFixture(t, []string{"shared"}, []string{"shared"})
+	transport := &deadlineRecordingTransport{}
+	report := RunPairServe(PairOptions{HomerHome: fixture.aHome}, &PairDeps{Transport: transport})
+	if report.OK || report.Status != PairServeStatusError {
+		t.Fatalf("deadline recording report = %#v", report)
+	}
+	if transport.serveHasDeadline {
+		t.Fatal("Serve received an AcceptDeadline; session context must remain unbounded")
+	}
+	if !transport.acceptHasDeadline {
+		t.Fatal("Accept did not receive a bounded context")
+	}
+}
+
 func fileMode(t *testing.T, name string) os.FileMode {
 	t.Helper()
 	info, err := os.Stat(name)
@@ -481,6 +588,161 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestPairTransportErrorPreservesTailcatCause(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := pairTransportFor(&PairDeps{})
+	if err == nil || !strings.Contains(err.Error(), "tailcat transport") {
+		t.Fatalf("pair transport error = %v, want wrapped transport context", err)
+	}
+	if !errors.Is(err, pair.ErrNoTailcat) {
+		t.Fatalf("pair transport error = %v, want ErrNoTailcat cause", err)
+	}
+}
+
+type blockingPairConn struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newBlockingPairConn() *blockingPairConn {
+	return &blockingPairConn{closed: make(chan struct{})}
+}
+
+func (conn *blockingPairConn) Read([]byte) (int, error) {
+	<-conn.closed
+	return 0, io.EOF
+}
+
+func (conn *blockingPairConn) Write(payload []byte) (int, error) {
+	select {
+	case <-conn.closed:
+		return 0, io.ErrClosedPipe
+	default:
+		return len(payload), nil
+	}
+}
+
+func (conn *blockingPairConn) Close() error {
+	conn.once.Do(func() { close(conn.closed) })
+	return nil
+}
+
+type singleConnTransport struct{ conn io.ReadWriteCloser }
+
+func (transport singleConnTransport) Serve(context.Context) (pair.PairServer, error) {
+	return nil, errors.New("unexpected Serve")
+}
+
+func (transport singleConnTransport) Connect(context.Context, string) (io.ReadWriteCloser, error) {
+	return transport.conn, nil
+}
+
+func TestPairJoinPrintsConfirmationWaitAndTimeoutText(t *testing.T) {
+	fixture := newPairFixture(t, []string{"shared"}, []string{"shared"})
+	conn := newBlockingPairConn()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	var output bytes.Buffer
+	report := runPairJoin(ctx, PairOptions{HomerHome: fixture.bHome, Addr: "pipe-test"}, &PairDeps{
+		Transport: singleConnTransport{conn: conn},
+	}, &output)
+	if report.OK || !containsSubstring(report.Errors, "等待确认超时") {
+		t.Fatalf("join timeout report = %#v", report)
+	}
+	if !strings.Contains(output.String(), "等待对端确认…（最长 120s）") {
+		t.Fatalf("join progress = %q", output.String())
+	}
+}
+
+type frameErrorConn struct {
+	reader *bytes.Reader
+}
+
+func (conn *frameErrorConn) Read(payload []byte) (int, error)  { return conn.reader.Read(payload) }
+func (conn *frameErrorConn) Write(payload []byte) (int, error) { return len(payload), nil }
+func (conn *frameErrorConn) Close() error                      { return nil }
+
+func TestPairJoinFrameErrorReportsPeerReason(t *testing.T) {
+	fixture := newPairFixture(t, []string{"shared"}, []string{"shared"})
+	var frame bytes.Buffer
+	if err := pair.WriteFrame(&frame, pair.FrameError, []byte(`{"reason":"DERP 中段断流"}`)); err != nil {
+		t.Fatal(err)
+	}
+	report := RunPairJoin(PairOptions{HomerHome: fixture.bHome, Addr: "pipe-test"}, &PairDeps{
+		Transport: singleConnTransport{conn: &frameErrorConn{reader: bytes.NewReader(frame.Bytes())}},
+	})
+	if report.OK || !containsSubstring(report.Errors, "DERP 中段断流") {
+		t.Fatalf("FrameError report = %#v", report)
+	}
+}
+
+type blockingConfirm struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (prompt blockingConfirm) Confirm(string, bool) bool {
+	close(prompt.started)
+	<-prompt.release
+	return false
+}
+
+func TestPairServeContextCancellationDuringConfirmClosesSession(t *testing.T) {
+	fixture := newPairFixture(t, []string{"shared"}, []string{"shared"})
+	left, right := pairtest.NewPipePair()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	addr := make(chan string, 1)
+	result := make(chan PairServeReport, 1)
+	go func() {
+		result <- runPairServe(ctx, PairOptions{HomerHome: fixture.aHome}, &PairDeps{
+			Transport: left,
+			UI:        blockingConfirm{started: started, release: release},
+			OnAddr:    func(value string) { addr <- value },
+		}, nil)
+	}()
+	select {
+	case <-addr:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not publish address")
+	}
+	client, err := right.Connect(context.Background(), "pipe-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	hello := pair.PeerHello{Version: pair.ProtocolVersion, Hostname: "cancel-peer", Recipient: fixture.bIdentity.Recipient}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- pair.WriteFrame(client, pair.FrameHello, mustJSON(t, hello)) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not enter confirmation")
+	}
+	cancel()
+	select {
+	case report := <-result:
+		if report.OK || !containsSubstring(report.Errors, "context canceled") {
+			t.Fatalf("cancelled serve report = %#v", report)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serve did not return after context cancellation")
+	}
+	_ = <-writeDone
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }
 
 func containsSubstring(values []string, want string) bool {

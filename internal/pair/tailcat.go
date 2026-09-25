@@ -143,8 +143,16 @@ func (transport *TailcatTransport) Connect(ctx context.Context, addr string) (io
 	if strings.TrimSpace(addr) == "" {
 		return nil, errors.New("tailcat address must not be empty")
 	}
-	proc, err := transport.start(ctx, []string{"--", addr}, transport.commandEnv(""))
+	// The context bounds dialing, not the lifetime of the established stream.
+	// RunPairJoin cancels its connect timeout as soon as Connect returns; tying
+	// the child watcher to that same context would kill a healthy session before
+	// the hello frame is sent.
+	proc, err := transport.start(context.Background(), []string{"--", addr}, transport.commandEnv(""))
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = proc.close()
 		return nil, err
 	}
 	return &tailcatStream{process: proc}, nil

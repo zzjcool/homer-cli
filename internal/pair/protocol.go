@@ -174,3 +174,22 @@ func DecodeAck(payload []byte) (Ack, error) {
 	}
 	return ack, nil
 }
+
+// DecodeDecline decodes a serve-side refusal message.
+func DecodeDecline(payload []byte) (Decline, error) {
+	var decline Decline
+	if err := decodeObject(payload, &decline); err != nil {
+		return Decline{}, err
+	}
+	return decline, nil
+}
+
+// DecodeAbort decodes a protocol failure message. FrameError uses the same
+// reason-only object shape, so readers can use this decoder for either frame.
+func DecodeAbort(payload []byte) (Abort, error) {
+	var abort Abort
+	if err := decodeObject(payload, &abort); err != nil {
+		return Abort{}, err
+	}
+	return abort, nil
+}
