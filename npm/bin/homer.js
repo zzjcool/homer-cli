@@ -13,9 +13,15 @@ const candidates = [
   path.join(packageRoot, 'vendor', 'homer'),
   path.join(os.homedir(), '.local', 'bin', 'homer'),
   '/usr/local/bin/homer',
-].filter(Boolean).map((candidate) => path.resolve(candidate));
+]
+  .filter(Boolean)
+  .map((candidate) => path.resolve(candidate))
+  // Guard against a candidate resolving to this wrapper itself (e.g.
+  // HOMER_BINARY pointing at bin/homer.js), which would spawn us
+  // recursively.
+  .filter((candidate) => candidate !== wrapper);
 
-const binary = candidates.find((candidate) => candidate !== wrapper && fs.existsSync(candidate));
+const binary = candidates.find((candidate) => fs.existsSync(candidate));
 if (!binary) {
   process.stderr.write(
     'homer-cli: the Go binary is not installed. Use curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/master/install.sh | sh\n',
