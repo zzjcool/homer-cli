@@ -68,6 +68,62 @@ func SourceErrorMessages(errors SnapshotSourceErrors) []string {
 	return commands.SourceErrorMessages(errors)
 }
 
+// renderDisabledStatus keeps the machine-facing paths in StatusReport while
+// giving the human renderer a compact per-adapter summary.  A disabled
+// adapter is already a complete summary; category paths are grouped by their
+// adapter so the common case reads, for example, "pi: 2 类未启用（extensions,
+// agents）".  Verbose mode deliberately switches to one path per line.
+func renderDisabledStatus(disabled []string, verbose bool) []string {
+	if len(disabled) == 0 {
+		return nil
+	}
+	if verbose {
+		lines := make([]string, 0, len(disabled))
+		for _, item := range disabled {
+			lines = append(lines, "  "+item)
+		}
+		return lines
+	}
+
+	type disabledGroup struct {
+		adapterDisabled bool
+		categories      []string
+	}
+	groups := make(map[string]*disabledGroup)
+	order := make([]string, 0, len(disabled))
+	for _, item := range disabled {
+		adapterID, category, hasCategory := strings.Cut(item, "/")
+		if adapterID == "" {
+			continue
+		}
+		group, ok := groups[adapterID]
+		if !ok {
+			group = &disabledGroup{}
+			groups[adapterID] = group
+			order = append(order, adapterID)
+		}
+		if !hasCategory || category == "" {
+			group.adapterDisabled = true
+			continue
+		}
+		group.categories = append(group.categories, category)
+	}
+
+	lines := make([]string, 0, len(order))
+	for _, adapterID := range order {
+		group := groups[adapterID]
+		if group.adapterDisabled {
+			lines = append(lines, adapterID+": adapter 未启用")
+			continue
+		}
+		if len(group.categories) == 0 {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s: %d 类未启用（%s）", adapterID, len(group.categories), strings.Join(group.categories, ", ")))
+	}
+	return lines
+}
+
 // RenderStatus prints warnings first, then adapter totals and optional
 // category totals.  Drift is informational: all-zero output ends with the
 // same Chinese no-drift marker as the archived CLI.
@@ -85,7 +141,9 @@ func RenderStatus(report StatusReport, options ...RenderStatusOptions) string {
 		lines = append(lines, "⚠ "+message)
 	}
 	if len(report.Adapters) == 0 {
-		return strings.Join(append(lines, "（homer.json 中没有启用的 adapter）"), "\n")
+		lines = append(lines, "（homer.json 中没有启用的 adapter）")
+		lines = append(lines, renderDisabledStatus(report.Disabled, verbose)...)
+		return strings.Join(lines, "\n")
 	}
 
 	totalPush, totalPull, totalConflicts := 0, 0, 0
@@ -108,6 +166,7 @@ func RenderStatus(report StatusReport, options ...RenderStatusOptions) string {
 			}
 		}
 	}
+	lines = append(lines, renderDisabledStatus(report.Disabled, verbose)...)
 	if totalPush == 0 && totalPull == 0 && totalConflicts == 0 {
 		lines = append(lines, "无漂移")
 	}
@@ -353,6 +412,10 @@ func RenderStatusJSON(report StatusReport) string {
 	if len(report.Warnings) > 0 {
 		keys = append(keys, "warnings")
 		values["warnings"] = stringsJSON(report.Warnings)
+	}
+	if len(report.Disabled) > 0 {
+		keys = append(keys, "disabled")
+		values["disabled"] = stringsJSON(report.Disabled)
 	}
 	return string(orderedjson.Serialize(orderedObject(keys, values)))
 }

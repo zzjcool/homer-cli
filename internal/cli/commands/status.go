@@ -49,6 +49,7 @@ type StatusReport struct {
 	Adapters []StatusAdapterReport `json:"adapters"`
 	Errors   []string              `json:"errors"`
 	Warnings []string              `json:"warnings,omitempty"`
+	Disabled []string              `json:"disabled,omitempty"`
 }
 
 // SnapshotSourceError keeps scan diagnostics structured until the report
@@ -124,6 +125,63 @@ func rootUnreadable(outcome adapter.ScanOutcome) bool {
 }
 
 func enabled(value *bool) bool { return value == nil || *value }
+
+// statusCategoryOrder keeps disabled summaries in the same stable order as
+// adapter scans.  CategoryConfig is a map in the frozen config shape, so
+// built-in categories need an explicit preference and custom names fall back
+// to lexical order.
+func statusCategoryOrder(adapterID string, categories map[string]core.CategoryConfig) []string {
+	preferred := map[string][]string{
+		"pi":       {"settings", "skills", "extensions", "agents", "models", "prompts", "themes"},
+		"herdr":    {"config"},
+		"opencode": {"config", "plugins", "locks"},
+		"vscode":   {"settings", "keybindings", "extensions"},
+	}[adapterID]
+
+	ordered := make([]string, 0, len(categories))
+	seen := make(map[string]struct{}, len(categories))
+	for _, name := range preferred {
+		if _, ok := categories[name]; ok {
+			ordered = append(ordered, name)
+			seen[name] = struct{}{}
+		}
+	}
+	rest := make([]string, 0, len(categories)-len(ordered))
+	for name := range categories {
+		if _, ok := seen[name]; !ok {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(ordered, rest...)
+}
+
+// DisabledSummaries returns the disabled adapter/category paths used by the
+// status report.  A disabled adapter is represented by just its adapter ID;
+// its disabled categories are intentionally not repeated because the adapter
+// switch already suppresses all of them.
+func DisabledSummaries(config core.HomerConfig) []string {
+	adapterIDs := make([]string, 0, len(config.Adapters))
+	for adapterID := range config.Adapters {
+		adapterIDs = append(adapterIDs, adapterID)
+	}
+	sort.Strings(adapterIDs)
+
+	disabled := make([]string, 0)
+	for _, adapterID := range adapterIDs {
+		adapterConfig := config.Adapters[adapterID]
+		if !enabled(adapterConfig.Enabled) {
+			disabled = append(disabled, adapterID)
+			continue
+		}
+		for _, category := range statusCategoryOrder(adapterID, adapterConfig.Categories) {
+			if !enabled(adapterConfig.Categories[category].Enabled) {
+				disabled = append(disabled, adapterID+"/"+category)
+			}
+		}
+	}
+	return disabled
+}
 
 func excludeKeysByCategory(config core.HomerConfig, adapterID string) map[string][]string {
 	adapterConfig, ok := config.Adapters[adapterID]
@@ -320,7 +378,9 @@ func RunStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, erro
 	errorMessages := append([]string(nil), sources.Errors...)
 	errorMessages = append(errorMessages, sources.ErrorMessages...)
 	errorMessages = append(errorMessages, sourceErrorMessages(sources.ScanErrors)...)
-	return BuildStatusReport(engine.ComputeDrift(sources.Base, sources.Local, sources.Remote), errorMessages, sources.Warnings), nil
+	report := BuildStatusReport(engine.ComputeDrift(sources.Base, sources.Local, sources.Remote), errorMessages, sources.Warnings)
+	report.Disabled = DisabledSummaries(*config)
+	return report, nil
 }
 
 // runStatus is kept as an internal compatibility spelling for package-local

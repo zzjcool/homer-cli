@@ -107,6 +107,48 @@ master`（分支名按实际仓库显示）确认无误后运行即可。`homer 
 - **opencode**：`opencode.json` / `package.json`（merge），lock 文件（mirror），
   `node_modules` 与运行时文件忽略。
 
+### 自定义 adapter（v1.2 起）
+
+手写 `homer.json` 即可声明自定义 adapter；`homer init` 不会自动发现或删除它。
+adapter ID 使用小写字母、数字和连字符（例如 `my-tool`）。下面是一个可直接复制的
+完整配置片段：它包含普通文件分类、**manifest 分类（v1.2 起支持）**、忽略规则和
+明确的 symlink 逃逸例外。
+
+```json
+{
+  "version": 1,
+  "adapters": {
+    "my-tool": {
+      "root": "~/.config/my-tool",
+      "categories": {
+        "config": {
+          "paths": ["config.json"],
+          "mode": "merge"
+        },
+        "profiles": {
+          "paths": ["profiles/"],
+          "mode": "mirror"
+        },
+        "plugins": {
+          "kind": "manifest",
+          "mode": "mirror",
+          "listCmd": "my-tool plugin list --ids",
+          "applyCmd": "my-tool plugin install"
+        }
+      },
+      "ignore": ["cache/", "*.log"],
+      "allowEscape": ["shared/credentials/"]
+    }
+  }
+}
+```
+
+`root` 是工具配置根目录；普通分类按 `paths` 读取文件或目录。manifest 分类不写
+`paths`：`listCmd` 的标准输出必须是每行一个 ID，`applyCmd` 会在确认后逐个安装远端
+缺少的 ID（v1.2 只装不卸）。`ignore` 规则相对 `root` 生效；`allowEscape` 只应列出
+确实需要允许的具体 symlink 路径，不能写 `*`、`**` 等裸通配。来自远端仓库的
+manifest `listCmd` / `applyCmd` 会在 `home` 时触发安全确认，请只信任自己的配置仓库。
+
 ### 机器 B：一键归位与换设备
 
 ```sh
