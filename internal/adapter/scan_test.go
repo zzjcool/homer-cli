@@ -1,6 +1,7 @@
 package adapter_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/adapter/opencode"
 	"github.com/zzjcool/homer-cli/internal/adapter/pi"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/manifest"
 )
 
 func writeFixture(t *testing.T, root, rel, content string) {
@@ -415,5 +417,82 @@ func TestResolveCategoryFilePathInverse(t *testing.T) {
 		if _, err := adapter.ResolveCategoryFilePath(root, cfg, rel); err == nil {
 			t.Errorf("ResolveCategoryFilePath(%q) unexpectedly succeeded", rel)
 		}
+	}
+}
+
+type fakeManifestPort struct {
+	output    []byte
+	outputErr error
+}
+
+func (fake *fakeManifestPort) Output(string) ([]byte, error) {
+	return fake.output, fake.outputErr
+}
+
+func (fake *fakeManifestPort) Apply(string, string) error { return nil }
+
+func manifestKind() *core.CategoryKind {
+	kind := core.CategoryKindManifest
+	return &kind
+}
+
+func TestScanManifestWithInjectedPortAndLegacyCall(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "settings.json", "{}\n")
+	port := &fakeManifestPort{output: []byte("pub.two\r\npub.one\npub.two\n")}
+	config := core.AdapterConfig{
+		Root: root,
+		Categories: map[string]core.CategoryConfig{
+			"settings":   {Paths: []string{"settings.json"}, Mode: core.SyncModeMerge},
+			"extensions": {Kind: manifestKind(), Mode: core.SyncModeMirror, ListCmd: "fake list"},
+		},
+	}
+	outcome := adapter.ScanAdapter("fake", config, adapter.ScanDeps{Commands: port})
+	if len(outcome.Errors) != 0 {
+		t.Fatalf("manifest scan errors = %#v", outcome.Errors)
+	}
+	if got := category(t, outcome.Snapshot, "extensions"); got.AdapterID != "fake" || got.Mode != core.SyncModeMirror {
+		t.Fatalf("manifest category metadata = %#v", got)
+	}
+	if got := category(t, outcome.Snapshot, "extensions").Files[manifest.VirtualFileName("extensions")]; got.Kind != "file" || got.Content != "pub.two\npub.one\n" {
+		t.Fatalf("manifest file = %#v", got)
+	}
+	if got := category(t, outcome.Snapshot, "settings").Files["settings.json"].Content; got != "{}\n" {
+		t.Fatalf("regular category was not scanned = %q", got)
+	}
+
+	// A two-argument call remains source-compatible and does not require a
+	// command dependency when the config has only ordinary categories.
+	legacy := adapter.ScanAdapter("fake", core.AdapterConfig{
+		Root: root,
+		Categories: map[string]core.CategoryConfig{
+			"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMerge},
+		},
+	})
+	if len(legacy.Errors) != 0 || len(legacy.Snapshot.Categories) != 1 {
+		t.Fatalf("legacy two-argument scan = %#v", legacy)
+	}
+}
+
+func TestScanManifestFailureDoesNotBlockOtherCategories(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "settings.json", "settings\n")
+	port := &fakeManifestPort{outputErr: errors.New("context deadline exceeded")}
+	kind := core.CategoryKindManifest
+	outcome := adapter.ScanAdapter("fake", core.AdapterConfig{
+		Root: root,
+		Categories: map[string]core.CategoryConfig{
+			"settings":   {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
+			"extensions": {Kind: &kind, Mode: core.SyncModeMirror, ListCmd: "fake list"},
+		},
+	}, adapter.ScanDeps{Commands: port})
+	if len(outcome.Errors) != 1 || outcome.Errors[0].Path != "fake list" || outcome.Errors[0].Message != "context deadline exceeded" {
+		t.Fatalf("manifest failure errors = %#v", outcome.Errors)
+	}
+	if got := category(t, outcome.Snapshot, "extensions"); len(got.Files) != 0 {
+		t.Fatalf("failed manifest files = %#v", got.Files)
+	}
+	if got := category(t, outcome.Snapshot, "settings").Files["settings.json"].Content; got != "settings\n" {
+		t.Fatalf("other category was blocked = %q", got)
 	}
 }

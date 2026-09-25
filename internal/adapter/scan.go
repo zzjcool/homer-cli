@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/manifest"
 )
 
 // ScanError is a non-fatal diagnostic emitted while collecting a snapshot.
@@ -22,6 +23,13 @@ type ScanError struct {
 type ScanOutcome struct {
 	Snapshot core.AdapterSnapshot
 	Errors   []ScanError
+}
+
+// ScanDeps contains injectable side effects for scanning. A nil Commands
+// value uses manifest.DefaultPort; the variadic argument keeps existing
+// two-argument ScanAdapter callers source-compatible.
+type ScanDeps struct {
+	Commands manifest.CommandPort
 }
 
 const maxWalkDepth = 32
@@ -271,7 +279,15 @@ func resolveConfiguredPath(abs, rootReal, rootRel string, allowEscape []string, 
 	return configuredPath{Real: real, Info: info}, true
 }
 
-func scanCategory(root, rootReal, category string, cfg core.CategoryConfig, ignore, allowEscape []string, errors *[]ScanError) core.CategorySnapshot {
+func scanCategory(root, rootReal, category string, cfg core.CategoryConfig, ignore, allowEscape []string, port manifest.CommandPort, errors *[]ScanError) core.CategorySnapshot {
+	if cfg.IsManifest() {
+		snapshot, problems := manifest.ScanCategory("", category, cfg, port)
+		for _, problem := range problems {
+			addScanError(errors, problem.Command, problem.Message)
+		}
+		return snapshot
+	}
+
 	files := make(core.SnapshotFiles)
 
 	for _, declared := range cfg.Paths {
@@ -366,7 +382,15 @@ func categoryOrder(adapterID string, categories map[string]core.CategoryConfig) 
 // ScanAdapter reads one adapter root without writing to the tool directory.
 // Missing roots produce an empty snapshot and one diagnostic; missing
 // configured files/directories produce empty category entries without errors.
-func ScanAdapter(adapterID string, config core.AdapterConfig) ScanOutcome {
+func ScanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) ScanOutcome {
+	var port manifest.CommandPort
+	if len(deps) > 0 {
+		port = deps[0].Commands
+	}
+	if port == nil {
+		port = manifest.DefaultPort()
+	}
+
 	outcome := ScanOutcome{
 		Snapshot: core.AdapterSnapshot{AdapterID: adapterID, Categories: []core.CategorySnapshot{}},
 		Errors:   make([]ScanError, 0),
@@ -398,7 +422,7 @@ func ScanAdapter(adapterID string, config core.AdapterConfig) ScanOutcome {
 		if cfg.Enabled != nil && !*cfg.Enabled {
 			continue
 		}
-		cat := scanCategory(root, rootReal, category, cfg, config.Ignore, config.AllowEscape, &outcome.Errors)
+		cat := scanCategory(root, rootReal, category, cfg, config.Ignore, config.AllowEscape, port, &outcome.Errors)
 		cat.AdapterID = adapterID
 		outcome.Snapshot.Categories = append(outcome.Snapshot.Categories, cat)
 	}
@@ -407,6 +431,6 @@ func ScanAdapter(adapterID string, config core.AdapterConfig) ScanOutcome {
 
 // Lower-case aliases are useful to tests kept in package adapter and mirror
 // the original TypeScript naming without duplicating implementation.
-func scanAdapter(adapterID string, config core.AdapterConfig) ScanOutcome {
-	return ScanAdapter(adapterID, config)
+func scanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) ScanOutcome {
+	return ScanAdapter(adapterID, config, deps...)
 }
