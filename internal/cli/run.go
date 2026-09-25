@@ -43,13 +43,17 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		return runSecret(parsed.Rest, out, errOut)
 	}
 
-	allowPositionals := parsed.Command == CommandHome || parsed.Command == CommandRemote
+	allowPositionals := parsed.Command == CommandHome || parsed.Command == CommandRemote || parsed.Command == CommandPair
 	options, parseErr := parseOptions(parsed.Command, parsed.Rest, allowPositionals)
 	if parseErr != nil {
 		return usageError(parsed.Command, parseErr.Error(), out, errOut)
 	}
 	if options.Help {
-		writeLine(out, commandUsage(parsed.Command))
+		if parsed.Command == CommandPair {
+			writeLine(out, commands.PAIR_USAGE)
+		} else {
+			writeLine(out, commandUsage(parsed.Command))
+		}
 		return 0
 	}
 	if validationErr := validateCommandOptions(parsed.Command, options); validationErr != nil {
@@ -73,6 +77,9 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		if options.Mode != "" && options.Mode != "pull" && options.Mode != "merge" && options.Mode != "skip" {
 			return usageError(parsed.Command, "--mode 只能是 pull / merge / skip", out, errOut)
 		}
+	}
+	if parsed.Command == CommandPair && len(options.Positionals) > 1 {
+		return usageError(parsed.Command, fmt.Sprintf("多余的参数: %s", joinArgs(options.Positionals[1:])), out, errOut)
 	}
 
 	switch parsed.Command {
@@ -207,6 +214,18 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		}, nil)
 		writeLine(out, commands.RenderDoctorReport(report))
 		return report.ExitCode()
+
+	case CommandPair:
+		addr := ""
+		if len(options.Positionals) == 1 {
+			addr = options.Positionals[0]
+		}
+		return commands.ExecutePair(commands.PairOptions{
+			HomerHome: options.Home,
+			Addr:      addr,
+			Yes:       options.Yes,
+			JSON:      options.JSON,
+		}, nil, out, errOut)
 
 	default:
 		writeLine(errOut, fmt.Sprintf("homer %s: 尚未实现", parsed.Command))
@@ -384,6 +403,8 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "remote")
 	case CommandDoctor:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+	case CommandPair:
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	default:
 		return usageArgumentError(fmt.Sprintf("未知命令: %s", command))
 	}

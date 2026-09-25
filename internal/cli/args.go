@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"strings"
+
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
 )
 
 // Command is a top-level homer command.  The complete command list stays in
@@ -20,6 +22,7 @@ const (
 	CommandHome    Command = "home"
 	CommandDoctor  Command = "doctor"
 	CommandSecret  Command = "secret"
+	CommandPair    Command = "pair"
 	CommandVersion Command = "version"
 	CommandHelp    Command = "help"
 )
@@ -36,6 +39,7 @@ var COMMANDS = []Command{
 	CommandHome,
 	CommandDoctor,
 	CommandSecret,
+	CommandPair,
 	CommandVersion,
 	CommandHelp,
 }
@@ -87,6 +91,7 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   home      新机器一键归位：clone 配置仓库 → 应用配置 → 解密密钥 → doctor
   doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
   secret    密钥投递：keygen | push | pull | list
+  pair      在线配对另一台机器（tailcat 快车道，传输全程 age 密文）
   version   打印 homer 版本（开发构建显示 dev）
 
 全局选项:
@@ -108,6 +113,8 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   homer home <repo-url> --yes
   homer doctor --json
   homer secret keygen
+  homer pair
+  homer pair <tc-addr>
 `
 
 // CommandOptions is the shared parsed flag shape.  parseOptions accepts the
@@ -318,6 +325,12 @@ func commandUsage(command Command) string {
 		return "用法: homer doctor [options]\n\n八项体检。\n\n选项: --home <dir> --offline --json -h, --help"
 	case CommandSecret:
 		return "用法: homer secret <keygen|push|pull|list> [options]\n\n选项: --home <dir> --yes --no-push --json -h, --help"
+	case CommandPair:
+		lines := strings.Split(commands.PAIR_USAGE, "\n")
+		if len(lines) >= 2 {
+			return strings.Join(lines[:2], "\n")
+		}
+		return commands.PAIR_USAGE
 	case CommandVersion:
 		return "用法: homer version"
 	default:
