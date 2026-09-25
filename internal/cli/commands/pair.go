@@ -167,8 +167,12 @@ func RunPairServe(options PairOptions, deps *PairDeps) PairServeReport {
 		report.Errors = append(report.Errors, "pair transport returned an empty address")
 		return report
 	}
-	if deps != nil && deps.OnAddr != nil && !options.JSON {
-		deps.OnAddr(report.Addr)
+	if !options.JSON {
+		if deps != nil && deps.OnAddr != nil {
+			deps.OnAddr(report.Addr)
+		} else {
+			fmt.Fprintln(os.Stdout, "🐈 pair 地址（一次性，仅带外交换，勿入 git/聊天记录）: "+report.Addr)
+		}
 	}
 
 	acceptContext, acceptCancel := context.WithTimeout(context.Background(), pair.AcceptDeadline)
@@ -695,10 +699,14 @@ func pairTransportFor(deps *PairDeps) (pair.PairTransport, error) {
 	if deps != nil && deps.Transport != nil {
 		return deps.Transport, nil
 	}
-	// P1 deliberately has no production tailcat adapter in its authorized
-	// files. Keep the missing adapter explicit instead of silently inventing a
-	// second transport implementation; P2 supplies this default path.
-	return nil, errPairTransportUnavailable
+	// Production default: the P2 tailcat CLI adapter.
+	transport, err := pair.NewTailcatTransport(pair.TailcatOptions{
+		Stderr: os.Stderr,
+	})
+	if err != nil {
+		return nil, errPairTransportUnavailable
+	}
+	return transport, nil
 }
 
 func pairConfigReady(home string) error {
