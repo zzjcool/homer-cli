@@ -27,8 +27,22 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		return 0
 	}
 	if parsed.Command == CommandVersion {
-		writeLine(out, renderVersion())
+		writeLine(out, renderVersionChecked(currentVersion(), checkForUpdate(currentVersion())))
 		return 0
+	}
+	if parsed.Command == CommandUpgrade {
+		options, parseErr := parseOptions(parsed.Command, parsed.Rest, false)
+		if parseErr != nil {
+			return usageError(parsed.Command, parseErr.Error(), out, errOut)
+		}
+		if options.Help {
+			writeLine(out, commandUsage(CommandUpgrade))
+			return 0
+		}
+		if validationErr := validateCommandOptions(parsed.Command, options); validationErr != nil {
+			return usageError(parsed.Command, validationErr.Error(), out, errOut)
+		}
+		return runUpgrade(options.Force, out, errOut)
 	}
 	if parsed.Command == "" {
 		if len(parsed.Rest) > 0 {
@@ -405,6 +419,10 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandPair:
 		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+	case CommandUpgrade:
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "adapters", "adapter", "category", "mode", "remote", "json")
+	case CommandVersion:
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json")
 	default:
 		return usageArgumentError(fmt.Sprintf("未知命令: %s", command))
 	}

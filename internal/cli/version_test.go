@@ -27,6 +27,7 @@ func TestVersionAndVersionFlagPrintDevelopmentVersion(t *testing.T) {
 func TestSetVersionFeedsVersionCommand(t *testing.T) {
 	old := version
 	t.Cleanup(func() { version = old })
+	t.Setenv("HOMER_NO_VERSION_CHECK", "1")
 	SetVersion("v1.1.0-test")
 	var out, errOut bytes.Buffer
 	if code := runWithIO([]string{"homer", "version"}, &out, &errOut); code != 0 {

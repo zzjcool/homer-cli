@@ -24,6 +24,7 @@ const (
 	CommandSecret  Command = "secret"
 	CommandPair    Command = "pair"
 	CommandVersion Command = "version"
+	CommandUpgrade Command = "upgrade"
 	CommandHelp    Command = "help"
 )
 
@@ -38,9 +39,10 @@ var COMMANDS = []Command{
 	CommandMerge,
 	CommandHome,
 	CommandDoctor,
-	CommandSecret,
+		CommandSecret,
 	CommandPair,
 	CommandVersion,
+	CommandUpgrade,
 	CommandHelp,
 }
 
@@ -92,7 +94,8 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
   secret    密钥投递：keygen | push | pull | list
   pair      在线配对另一台机器（tailcat 快车道，传输全程 age 密文）
-  version   打印 homer 版本（开发构建显示 dev）
+  version   打印 homer 版本（开发构建显示 dev；联网时提示新版本）
+  upgrade   自更新到最新 release（校验 SHA-256 后原子替换二进制）
 
 全局选项:
   --home <dir>  homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
@@ -332,7 +335,9 @@ func commandUsage(command Command) string {
 		}
 		return commands.PAIR_USAGE
 	case CommandVersion:
-		return "用法: homer version"
+		return "用法: homer version\n\n打印版本；联网时顺带检查新版本并在有更新时提示 homer upgrade"
+	case CommandUpgrade:
+		return "用法: homer upgrade [options]\n\n检查最新 release 并自更新（下载 → SHA-256 校验 → 原子替换当前二进制）。\n\n选项: --force 即使无新版本也重装 -h, --help"
 	default:
 		return fmt.Sprintf("用法: homer %s [options]", command)
 	}
