@@ -38,14 +38,20 @@ HOME_DIR=${HOME:-}
 
 PREFIX=${HOMER_INSTALL_PREFIX:-"$HOME_DIR/.local/bin"}
 ARCHIVE_NAME="homer_${HOMER_OS}_${HOMER_ARCH}.tar.gz"
-TMP_ROOT=${TMPDIR:-/tmp}/homer-install-$$
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/homer-install.XXXXXX") || die 'cannot create temporary directory'
 DOWNLOAD_DIR="$TMP_ROOT/download"
 EXTRACT_DIR="$TMP_ROOT/extract"
 mkdir -p "$DOWNLOAD_DIR" "$EXTRACT_DIR"
 cleanup() {
   rm -rf "$TMP_ROOT"
 }
-trap cleanup EXIT HUP INT TERM
+# Signal traps only set the exit code; the EXIT trap does the cleanup so a
+# Ctrl-C during download cannot fall through into misleading follow-up
+# errors after the temp tree has already been removed.
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # download SOURCE DEST supports regular local paths and file:// URLs as well
 # as curl/wget URLs.  The local forms make the installer testable without a
@@ -101,6 +107,8 @@ checksum_from_file() {
 verify_checksum() {
   package_file=$1
   checksum_file=$2
+  [ -f "$checksum_file" ] || die "checksum file not found: $checksum_file"
+  [ -s "$checksum_file" ] || die "checksum file is empty: $checksum_file"
   expected=$(checksum_from_file "$checksum_file" "$(basename "$package_file")")
   [ -n "$expected" ] || die "checksums.txt has no entry for $(basename "$package_file")"
   actual=$(sha256 "$package_file")
@@ -144,7 +152,7 @@ else
 
   if [ -n "$DIRECT_URL" ]; then
     case "$DIRECT_URL" in
-      */.tar.gz|*.tar.gz|*.tgz|*/homer_*) PACKAGE_URL=$DIRECT_URL ;;
+      *.tar.gz|*.tgz) PACKAGE_URL=$DIRECT_URL ;;
       */) PACKAGE_URL=${DIRECT_URL}${ARCHIVE_NAME} ;;
       *) PACKAGE_URL=${DIRECT_URL}/${ARCHIVE_NAME} ;;
     esac
@@ -214,7 +222,7 @@ else
 fi
 
 if [ "$INSTALL_WITH_SUDO" -eq 1 ]; then
-  sudo install -m 0755 "$BINARY" "$TARGET"
+  sudo install -m 0755 "$BINARY" "$TARGET" || die "sudo install failed; retry with HOMER_INSTALL_PREFIX=$HOME_DIR/.local/bin"
 else
   STAGED="$TARGET.tmp-$$"
   cp "$BINARY" "$STAGED"
@@ -223,7 +231,7 @@ else
 fi
 
 "$TARGET" --help >/dev/null 2>&1 || die "installed binary failed the --help smoke test: $TARGET"
-say "✓ homer 安装完成($TARGET)"
+say "✓ homer 安装完成""($TARGET)"
 say ''
 say '下一步：'
 say '  1. 新机器一键归位 : homer home <你的配置仓库 url> --yes'

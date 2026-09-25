@@ -36,7 +36,7 @@ func TestDocsInstallURLReachable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("network check skipped in -short mode")
 	}
-	files := []string{"README.md", "npm/README.md", "npm/bin/homer.js"}
+	files := []string{"README.md", "npm/README.md", "npm/bin/homer.js", "DESIGN.md"}
 	client := &http.Client{Timeout: 30 * time.Second}
 	seen := map[string]bool{}
 	for _, filename := range files {
