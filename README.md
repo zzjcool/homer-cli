@@ -149,6 +149,43 @@ adapter ID 使用小写字母、数字和连字符（例如 `my-tool`）。下�
 确实需要允许的具体 symlink 路径，不能写 `*`、`**` 等裸通配。来自远端仓库的
 manifest `listCmd` / `applyCmd` 会在 `home` 时触发安全确认，请只信任自己的配置仓库。
 
+### init 选择向导（v1.2 起）
+
+在 TTY 中直接运行 `homer init` 会打开三级选择：adapter → 分类 → 大目录的
+一级条目。选项默认全选；空格切换、Enter 确认、`/` 过滤。向导的选择会写入
+`enabled:false` 与分类 `exclude`，不会删除既有 adapter、路径、忽略规则、
+`allowEscape`、备份或 secrets 字段。
+
+CI、脚本和其它非 TTY 环境应显式选择旁路：
+
+```sh
+homer init --all --json       # 全量内置 adapter，不启动向导
+homer init --adapters pi,vscode --json
+```
+
+`--json`、`--all`、`--adapters` 都不会读取 stdin；非 TTY 下已有 `homer.json`
+仍拒绝无意覆盖（除非使用 `--force`）。TTY 下对已有配置重新运行 `homer init`
+是 re-init：向导预选当前状态，只增量更新 enabled/exclude，**不重写 store 快照**。
+选择完成后运行 `homer push --yes` 才会提交当前本地状态；若确实要恢复内置默认
+并重写快照，使用 `homer init --force`。
+
+### VS Code 与 manifest 分类（v1.2 起）
+
+内置 `vscode` adapter 默认启用，根目录为 `~/.config/Code`，同步
+`settings.json`、`keybindings.json`，并把 `code --list-extensions` 的输出保存为
+`store/vscode/extensions/extensions.manifest.txt` 这一虚拟文件。每行一个扩展 ID；
+本机没有 `code` 或 VS Code 根目录时会降级为空快照，不会把缺失的工具误判成删除。
+
+manifest 是集合并集语义：归位或 pull 时只对“远端有、本机 listCmd 没有”的 ID
+逐个执行 `applyCmd`，**只装不卸**，本机已经安装的扩展以及本机多出的扩展都会保留。
+每条 apply 失败会写入 `manifest.failed` 和 warning，但不会阻断其它 ID；命令不经
+shell 执行且 manifest ID 必须通过安全字符集校验。
+
+`homer home` 发现远端 manifest 安装任务时，会在预览中列出 `listCmd` /
+`applyCmd` 并显示远端命令门禁。TTY 需要确认，非 TTY 没有 `--yes` 会以
+`aborted` 结束；`--yes` 才会放行，并在 `report.warnings` 记录已按 `--yes` 确认
+执行远端声明的命令。请只使用自己信任的配置仓库。
+
 ### 机器 B：一键归位与换设备
 
 ```sh
@@ -198,6 +235,11 @@ homer --version
   `--upload-pack=<cmd>` 形式的选项注入。
 - `allowEscape` 只放行明确的 symlink 路径；`*`、`*/`、`**`、`**/` 等裸通配会被
   配置校验拒绝，默认仍禁止 root 外逃逸。
+- **D4 残余向量（v1.2 已知限制）**：`homer pull` 的 fast-forward 可能把新的
+  `homer.json` 一并带入工作区；如果该配置新增或改写了 manifest 的 `listCmd` /
+  `applyCmd`，下一次 `status` 扫描就会执行新的 `listCmd`。`home` 的远端命令门禁
+  覆盖新机归位，但不能替代 pull 后的信任判断。v1.3 将用 `state.json` 中的
+  `trustedManifests` 命令指纹库收口；在此之前请先审阅远端 diff，再运行 pull。
 
 ## 验收与文档
 
