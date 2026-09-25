@@ -65,9 +65,51 @@ type WizardSelection struct {
 // which the wizard offers a third, per-entry selection level.
 const WizardEntryDrillThreshold = 8
 
+// WizardBackValue is a sentinel option value injected into wizard prompts
+// (except the top-level adapter question) so the user can go back one level:
+// selecting it and pressing Enter restarts the previous question with the
+// current choices preserved as defaults. The sentinel never reaches the
+// resulting selection.
+const WizardBackValue = "\x00back"
+
+// backOptionLabel is how the back sentinel appears in the terminal.
+const backOptionLabel = "< 返回上一级"
+
+func backOption() WizardOption {
+	return WizardOption{Value: WizardBackValue, Label: backOptionLabel}
+}
+
+// containsBack reports whether the user picked the back sentinel.
+func containsBack(values []string) bool {
+	for _, value := range values {
+		if value == WizardBackValue {
+			return true
+		}
+	}
+	return false
+}
+
+// stripBack removes the sentinel from a value list.
+func stripBack(values []string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != WizardBackValue {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
+}
+
+func withBackOption(options []WizardOption) []WizardOption {
+	return append(append([]WizardOption(nil), options...), backOption())
+}
+
 // RunSelectionWizard orchestrates adapter -> category -> entry MultiSelects.
 // It is deliberately pure apart from calls to the injected port, making all
 // cancellation and selection cases testable without a terminal.
+// Every question below the adapter level offers a "< 返回上一级" sentinel;
+// picking it restarts the previous question with the user's in-progress
+// choices preserved as the new defaults.
 func RunSelectionWizard(port WizardPort, state WizardState) (WizardSelection, error) {
 	if port == nil {
 		port = identityWizardPort{}
@@ -89,11 +131,18 @@ func RunSelectionWizard(port WizardPort, state WizardState) (WizardSelection, er
 			adapterChecked = append(adapterChecked, item.ID)
 		}
 	}
+
+	// The adapter level has no parent to go back to: no sentinel is offered.
 	checkedAdapters, err := port.MultiSelect("选择要初始化的 adapter（空格勾选，Enter 确认）", adapterOptions, adapterChecked)
 	if err != nil {
 		return WizardSelection{}, err
 	}
 	selectedAdapters := optionSet(adapterOptions, checkedAdapters)
+
+	// lastChoice carries in-progress selections per level so a back
+	// navigation restores them as checked defaults instead of starting over.
+	lastCategoryChoice := make(map[string][]string)
+	lastEntryChoice := make(map[string]map[string][]string)
 
 	for _, adapterState := range state.Adapters {
 		adapterSelected := selectedAdapters[adapterState.ID]
@@ -119,59 +168,104 @@ func RunSelectionWizard(port WizardPort, state WizardState) (WizardSelection, er
 			}
 			continue
 		}
-		checkedCategories, err := port.MultiSelect(
-			"选择 "+adapterState.ID+" 的分类（空格勾选，Enter 确认）",
-			categoryOptions,
-			categoryChecked,
-		)
-		if err != nil {
-			return WizardSelection{}, err
-		}
-		selectedCategories := optionSet(categoryOptions, checkedCategories)
-		for _, category := range adapterState.Categories {
-			selected := selectedCategories[category.Name]
-			categorySelection[category.Name] = selected
-			// The state builder emits Entries only for categories above the
-			// threshold. A caller may also populate Entries explicitly to mark
-			// a small directory as drillable, so the orchestration keys off the
-			// non-empty marker rather than reapplying the threshold here.
-			if !selected || len(category.Entries) == 0 {
-				continue
-			}
 
-			entryOptions := make([]WizardOption, 0, len(category.Entries))
-			entryChecked := make([]string, 0, len(category.Entries))
-			for _, entry := range category.Entries {
-				if entry.Key == "" {
-					continue
-				}
-				label := entry.Label
-				if label == "" {
-					label = entry.Key
-				}
-				entryOptions = append(entryOptions, WizardOption{Value: entry.Key, Label: label})
-				if entry.Included {
-					entryChecked = append(entryChecked, entry.Key)
-				}
-			}
-			if len(entryOptions) == 0 {
-				continue
-			}
-			checkedEntries, err := port.MultiSelect(
-				"选择 "+adapterState.ID+"/"+category.Name+" 的目录条目（空格勾选，Enter 确认）",
-				entryOptions,
-				entryChecked,
+		categoryDefault := categoryChecked
+		if previous, ok := lastCategoryChoice[adapterState.ID]; ok {
+			categoryDefault = previous
+		}
+
+	categoryLoop:
+		for {
+			checkedCategories, err := port.MultiSelect(
+				"选择 "+adapterState.ID+" 的分类（空格勾选，Enter 确认；选 "+backOptionLabel+" 回到 adapter 选择）",
+				withBackOption(categoryOptions),
+				categoryDefault,
 			)
 			if err != nil {
 				return WizardSelection{}, err
 			}
-			selectedEntries := optionSet(entryOptions, checkedEntries)
-			for _, entry := range category.Entries {
-				if entry.Key == "" || selectedEntries[entry.Key] {
+			if containsBack(checkedCategories) {
+				// Go back to the adapter question, preserving in-progress state.
+				lastCategoryChoice[adapterState.ID] = stripBack(categoryDefault)
+				checkedAdapters, err = port.MultiSelect("选择要初始化的 adapter（空格勾选，Enter 确认）", adapterOptions, checkedAdapters)
+				if err != nil {
+					return WizardSelection{}, err
+				}
+				selectedAdapters = optionSet(adapterOptions, checkedAdapters)
+				adapterSelected = selectedAdapters[adapterState.ID]
+				selection.Adapters[adapterState.ID] = adapterSelected
+				if !adapterSelected {
+					for _, category := range adapterState.Categories {
+						categorySelection[category.Name] = false
+					}
+					break categoryLoop
+				}
+				continue
+			}
+			categoryDefault = stripBack(checkedCategories)
+
+			selectedCategories := optionSet(categoryOptions, categoryDefault)
+			for _, category := range adapterState.Categories {
+				selected := selectedCategories[category.Name]
+				categorySelection[category.Name] = selected
+				// The state builder emits Entries only for categories above the
+				// threshold. A caller may also populate Entries explicitly to mark
+				// a small directory as drillable, so the orchestration keys off the
+				// non-empty marker rather than reapplying the threshold here.
+				if !selected || len(category.Entries) == 0 {
 					continue
 				}
-				appendWizardExclude(&selection, adapterState.ID, category.Name, entry.Key)
+
+				entryOptions := make([]WizardOption, 0, len(category.Entries))
+				entryChecked := make([]string, 0, len(category.Entries))
+				for _, entry := range category.Entries {
+					if entry.Key == "" {
+						continue
+					}
+						label := entry.Label
+						if label == "" {
+								label = entry.Key
+						}
+						entryOptions = append(entryOptions, WizardOption{Value: entry.Key, Label: label})
+						if entry.Included {
+							entryChecked = append(entryChecked, entry.Key)
+						}
+					}
+				if len(entryOptions) == 0 {
+					continue
+				}
+
+				entryDefault := entryChecked
+				if previous, ok := lastEntryChoice[adapterState.ID][category.Name]; ok {
+						entryDefault = previous
+				}
+
+			entryLoop:
+				for {
+					checkedEntries, err := port.MultiSelect(
+						"选择 "+adapterState.ID+"/"+category.Name+" 的目录条目（空格勾选，Enter 确认；选 "+backOptionLabel+" 回到分类选择）",
+						withBackOption(entryOptions),
+						entryDefault,
+					)
+					if err != nil {
+						return WizardSelection{}, err
+					}
+					if containsBack(checkedEntries) {
+						lastEntryChoice[adapterState.ID] = map[string][]string{category.Name: stripBack(entryDefault)}
+						continue categoryLoop
+					}
+					entryDefault = stripBack(checkedEntries)
+					selectedEntries := optionSet(entryOptions, entryDefault)
+					for _, entry := range category.Entries {
+						if entry.Key == "" || selectedEntries[entry.Key] {
+							continue
+						}
+						appendWizardExclude(&selection, adapterState.ID, category.Name, entry.Key)
+					}
+					break entryLoop
+				}
 			}
+			break categoryLoop
 		}
 	}
 	return selection, nil

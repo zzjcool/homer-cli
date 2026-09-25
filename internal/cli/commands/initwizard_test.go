@@ -51,8 +51,18 @@ func TestRunSelectionWizardAdapterCategoryEntryOff(t *testing.T) {
 		case 1:
 			return []string{"extensions"}, nil
 		case 2:
+			// The wizard appends a back sentinel after the real entries;
+			// selecting all but the sentinel and the last real entry excludes
+			// only that last entry (last option = sentinel).
 			values := optionValues(options)
-			return values[:len(values)-1], nil
+			result := make([]string, 0, len(values))
+			for index, value := range values {
+						if value == WizardBackValue || index == len(values)-2 {
+								continue
+						}
+						result = append(result, value)
+			}
+			return result, nil
 		default:
 			return nil, errors.New("unexpected prompt")
 		}
@@ -94,6 +104,103 @@ func TestRunSelectionWizardAdapterCategoryEntryOff(t *testing.T) {
 	}
 	if off.Adapters["pi"] || off.Categories["pi"]["extensions"] {
 		t.Fatalf("adapter off selection = %#v", off)
+	}
+}
+
+func TestRunSelectionWizardBackNavigationRestoresState(t *testing.T) {
+	// Exact user-reported scenario: entered pi's category question, then
+	// remembered herdr was also wanted. Selecting the back sentinel
+	// restarts the adapter question; the resumed pi category question
+	// preserves the in-progress selection as defaults.
+	var calls []wizardCall
+	wizard := &scriptedWizard{selectFn: func(call int, message string, options []WizardOption, checked []string) ([]string, error) {
+		_ = call
+		calls = append(calls, wizardCall{message: message, options: options, checked: checked})
+		switch message {
+		case "选择要初始化的 adapter（空格勾选，Enter 确认）":
+			if len(calls) == 1 {
+				return []string{"pi"}, nil // initially only pi
+			}
+			return []string{"pi", "herdr"}, nil // after back: herdr added
+		case "选择 pi 的分类（空格勾选，Enter 确认；选 < 返回上一级 回到 adapter 选择）":
+			if len(calls) == 2 {
+				return []string{WizardBackValue}, nil // go back on first visit
+			}
+			// Second visit must default to the in-progress choices.
+			return append([]string(nil), checked...), nil
+		default:
+			return append([]string(nil), checked...), nil
+		}
+	}}
+	state := WizardState{Adapters: []WizardAdapter{
+		{ID: "pi", Enabled: true, Categories: []WizardCategory{
+			{Name: "settings", Enabled: true, FileCount: 1},
+		}},
+		{ID: "herdr", Enabled: true, Categories: []WizardCategory{
+			{Name: "config", Enabled: true, FileCount: 1},
+		}},
+	}}
+	selection, err := RunSelectionWizard(wizard, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.Adapters["pi"] || !selection.Adapters["herdr"] {
+		t.Fatalf("adapter selection after back = %#v", selection.Adapters)
+	}
+	// 1st adapter prompt, pi category (back), 2nd adapter prompt (pi+herdr),
+	// pi category resumed, herdr category.
+	if len(calls) != 5 {
+		t.Fatalf("prompt count = %d, want 5: %+v", len(calls), calls)
+	}
+	// The resumed pi category question must offer the sentinel and carry the
+	// in-progress defaults, never the sentinel itself.
+	resumed := calls[3]
+	if optionValues(resumed.options)[len(resumed.options)-1] != WizardBackValue {
+		t.Fatal("resumed category prompt missing back sentinel")
+	}
+	for _, value := range resumed.checked {
+		if value == WizardBackValue {
+			t.Fatal("back sentinel leaked into restored defaults")
+		}
+	}
+	// herdr was asked after the resume.
+	if !strings.Contains(calls[4].message, "herdr") {
+		t.Fatalf("herdr never asked: %q", calls[4].message)
+	}
+}
+
+func TestRunSelectionWizardEntryBackReturnsToCategory(t *testing.T) {
+	entries := make([]WizardEntry, 0, WizardEntryDrillThreshold+1)
+	for index := 0; index < WizardEntryDrillThreshold+1; index++ {
+		key := "entry-" + string(rune('a'+index))
+		entries = append(entries, WizardEntry{Key: key, Label: key, Included: true})
+	}
+	var categoryVisits int
+	wizard := &scriptedWizard{selectFn: func(_ int, message string, _ []WizardOption, checked []string) ([]string, error) {
+		if strings.Contains(message, "的目录条目") {
+			if categoryVisits == 0 {
+				categoryVisits++
+				return []string{WizardBackValue}, nil // go back from entries
+			}
+			return []string{"entry-a"}, nil
+		}
+		if strings.Contains(message, "的分类") {
+			categoryVisits++
+			return append([]string(nil), checked...), nil
+		}
+		return append([]string(nil), checked...), nil
+	}}
+	state := WizardState{Adapters: []WizardAdapter{
+		{ID: "pi", Enabled: true, Categories: []WizardCategory{
+			{Name: "extensions", Enabled: true, FileCount: len(entries), Entries: entries},
+		}},
+	}}
+	selection, err := RunSelectionWizard(wizard, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := selection.Excluded["pi"]["extensions"]; len(got) != len(entries)-1 {
+		t.Fatalf("excluded entries = %#v, want all but entry-a", got)
 	}
 }
 
