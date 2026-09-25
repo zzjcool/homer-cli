@@ -12,6 +12,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/adapter/herdr"
 	"github.com/zzjcool/homer-cli/internal/adapter/opencode"
 	"github.com/zzjcool/homer-cli/internal/adapter/pi"
+	"github.com/zzjcool/homer-cli/internal/adapter/vscode"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
@@ -24,6 +25,7 @@ type InitOptions struct {
 	Home     string
 	Adapters []string
 	JSON     bool
+	All      bool
 	Force    bool
 	Remote   string
 }
@@ -70,12 +72,13 @@ var KNOWN_ADAPTERS = map[string]core.AdapterConfig{
 	pi.PIAdapterID:             pi.DefaultPIAdapter,
 	herdr.HerdrAdapterID:       herdr.DefaultHerdrAdapter,
 	opencode.OpencodeAdapterID: opencode.DefaultOpencodeAdapter,
+	vscode.VSCodeAdapterID:     vscode.DefaultVSCodeAdapter,
 }
 
 // KnownAdapters is the idiomatic alias for KNOWN_ADAPTERS.
 var KnownAdapters = KNOWN_ADAPTERS
 
-var knownAdapterOrder = []string{pi.PIAdapterID, herdr.HerdrAdapterID, opencode.OpencodeAdapterID}
+var knownAdapterOrder = []string{pi.PIAdapterID, herdr.HerdrAdapterID, opencode.OpencodeAdapterID, vscode.VSCodeAdapterID}
 
 const INIT_USAGE = `用法: homer init [options]
 
@@ -84,6 +87,7 @@ const INIT_USAGE = `用法: homer init [options]
 选项:
   --home <dir>          homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
   --adapters <ids>      只初始化指定 adapter（逗号分隔，可重复）
+  --all                 显式初始化全部内置 adapter（跳过交互向导）
   --force               覆盖已存在的 homer.json
   --remote <url>        初始化 git、绑定 origin，并建立/推送首个同步基线
   --json                输出机器可读 JSON（InitReport）
@@ -110,7 +114,7 @@ func selectedAdapters(ids []string) (map[string]core.AdapterConfig, error) {
 		}
 		config, ok := KNOWN_ADAPTERS[id]
 		if !ok {
-			return nil, core.NewCliError(fmt.Sprintf("未知 adapter: %s；M1/P3 已知 adapter: pi, herdr, opencode", id))
+			return nil, core.NewCliError(fmt.Sprintf("未知 adapter: %s；已知 adapter: pi, herdr, opencode, vscode；自定义 adapter 请直接编辑 homer.json", id))
 		}
 		selected[id] = config
 	}

@@ -8,13 +8,33 @@ const (
 	SyncModeMirror SyncMode = "mirror"
 )
 
+// CategoryKind describes the category's declared shape. A nil kind keeps the
+// legacy paths-based behavior; file and dir are informational for now, while
+// manifest is the virtual-file category used by the manifest engine.
+type CategoryKind string
+
+const (
+	CategoryKindFile     CategoryKind = "file"
+	CategoryKindDir      CategoryKind = "dir"
+	CategoryKindManifest CategoryKind = "manifest"
+)
+
 // CategoryConfig describes the files belonging to one adapter category.
 type CategoryConfig struct {
-	Paths       []string `json:"paths"`
-	Mode        SyncMode `json:"mode"`
-	Enabled     *bool    `json:"enabled,omitempty"`
-	Exclude     []string `json:"exclude,omitempty"`
-	ExcludeKeys []string `json:"excludeKeys,omitempty"`
+	Paths       []string      `json:"paths"`
+	Mode        SyncMode      `json:"mode"`
+	Kind        *CategoryKind `json:"kind,omitempty"`
+	ListCmd     string        `json:"listCmd,omitempty"`
+	ApplyCmd    string        `json:"applyCmd,omitempty"`
+	Enabled     *bool         `json:"enabled,omitempty"`
+	Exclude     []string      `json:"exclude,omitempty"`
+	ExcludeKeys []string      `json:"excludeKeys,omitempty"`
+}
+
+// IsManifest is the single behavior switch; file and dir kinds stay
+// informational until a later engine wave adds kind-specific behavior.
+func (c CategoryConfig) IsManifest() bool {
+	return c.Kind != nil && *c.Kind == CategoryKindManifest
 }
 
 // AdapterConfig describes one tool/adapter and its categories.

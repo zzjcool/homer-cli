@@ -189,7 +189,7 @@ func TestInitExistingConfigRefusesOverwrite(t *testing.T) {
 	}
 }
 
-func TestInitRegistersThreeAdapters(t *testing.T) {
+func TestInitRegistersFourAdapters(t *testing.T) {
 	home := t.TempDir()
 	oldHome, hadHome := os.LookupEnv("HOME")
 	if err := os.Setenv("HOME", filepath.Join(home, "fake-home")); err != nil {
@@ -207,7 +207,7 @@ func TestInitRegistersThreeAdapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Adapters) != 3 {
+	if len(report.Adapters) != 4 {
 		t.Fatalf("init adapters = %#v", report.Adapters)
 	}
 	paths := core.GetHomerPaths(func(key string) string {
@@ -220,7 +220,7 @@ func TestInitRegistersThreeAdapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"pi", "herdr", "opencode"} {
+	for _, id := range []string{"pi", "herdr", "opencode", "vscode"} {
 		if _, ok := config.Adapters[id]; !ok {
 			t.Fatalf("config missing adapter %q", id)
 		}
@@ -235,7 +235,7 @@ func TestInitRegistersThreeAdapters(t *testing.T) {
 	}
 	root := value.(*orderedjson.Object)
 	adapters := root.M["adapters"].(*orderedjson.Object)
-	if got := strings.Join(adapters.Keys, ","); got != "pi,herdr,opencode" {
+	if got := strings.Join(adapters.Keys, ","); got != "pi,herdr,opencode,vscode" {
 		t.Fatalf("adapter registration order = %q", got)
 	}
 }

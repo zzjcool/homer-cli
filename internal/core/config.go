@@ -16,6 +16,7 @@ import (
 
 var ageRecipientPattern = regexp.MustCompile(`^age1[02-9ac-hj-np-z]{58}$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var adapterIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 var bareAllowEscapePatterns = map[string]struct{}{
 	"*":   {},
@@ -147,8 +148,30 @@ func validateCategory(raw any, where string, validationErrors *[]string) {
 		return
 	}
 
-	paths, exists := object["paths"]
-	if !exists {
+	kind := CategoryKind("")
+	if rawKind, exists := object["kind"]; exists {
+		kindText, isString := rawKind.(string)
+		kind = CategoryKind(kindText)
+		if !isString || (kind != CategoryKindFile && kind != CategoryKindDir && kind != CategoryKindManifest) {
+			*validationErrors = append(*validationErrors, fmt.Sprintf(
+				"%s.kind 必须是 'file'、'dir' 或 'manifest'（当前: %s）", where, jsonValue(rawKind),
+			))
+		}
+	}
+
+	paths, pathsPresent := object["paths"]
+	if kind == CategoryKindManifest {
+		if pathsPresent {
+			items, validArray := stringSlice(paths)
+			if !validArray || len(items) != 0 {
+				*validationErrors = append(*validationErrors, fmt.Sprintf(
+					"%s.paths 在 kind=manifest 时必须是空数组或缺省（当前: %s）", where, jsonValue(paths),
+				))
+			} else {
+				checkStringArray(paths, where+".paths", validationErrors)
+			}
+		}
+	} else if !pathsPresent {
 		*validationErrors = append(*validationErrors, fmt.Sprintf("%s.paths 必须是非空字符串数组", where))
 	} else {
 		items, validArray := stringSlice(paths)
@@ -159,12 +182,40 @@ func validateCategory(raw any, where string, validationErrors *[]string) {
 		}
 	}
 
-	mode, exists := object["mode"]
+	mode, modePresent := object["mode"]
 	modeText, modeIsString := mode.(string)
-	if !exists || !modeIsString || (modeText != string(SyncModeMerge) && modeText != string(SyncModeMirror)) {
+	validMode := modeIsString && (modeText == string(SyncModeMerge) || modeText == string(SyncModeMirror))
+	if !modePresent || !validMode {
 		*validationErrors = append(*validationErrors, fmt.Sprintf("%s.mode 必须是 'merge' 或 'mirror'（当前: %s）", where, jsonValue(mode)))
+	} else if kind == CategoryKindManifest && modeText != string(SyncModeMirror) {
+		*validationErrors = append(*validationErrors, fmt.Sprintf("%s.mode 在 kind=manifest 时必须是 'mirror'（当前: %s）", where, jsonValue(mode)))
 	}
 
+	listCmd, listCmdPresent := object["listCmd"]
+	applyCmd, applyCmdPresent := object["applyCmd"]
+	if kind == CategoryKindManifest {
+		if !listCmdPresent {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.listCmd 在 kind=manifest 时必须是非空字符串", where))
+		} else if text, isString := listCmd.(string); !isString || text == "" {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.listCmd 在 kind=manifest 时必须是非空字符串", where))
+		}
+		if !applyCmdPresent {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.applyCmd 在 kind=manifest 时必须是非空字符串", where))
+		} else if text, isString := applyCmd.(string); !isString || text == "" {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.applyCmd 在 kind=manifest 时必须是非空字符串", where))
+		}
+	} else {
+		if listCmdPresent {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.listCmd 仅允许用于 kind=manifest", where))
+		}
+		if applyCmdPresent {
+			*validationErrors = append(*validationErrors, fmt.Sprintf("%s.applyCmd 仅允许用于 kind=manifest", where))
+		}
+	}
+
+	// A malformed kind still receives the ordinary paths validation, while the
+	// valid manifest branch above remains the only place where command fields
+	// are accepted.
 	enabled, enabledPresent := object["enabled"]
 	checkOptionalBoolean(enabled, enabledPresent, where+".enabled", validationErrors)
 	exclude, excludePresent := object["exclude"]
@@ -191,6 +242,8 @@ func validateAdapter(raw any, where string, validationErrors *[]string) {
 		*validationErrors = append(*validationErrors, fmt.Sprintf("%s.categories 必须是对象", where))
 	} else if categoryMap, validObject := objectMap(categories); !validObject {
 		*validationErrors = append(*validationErrors, fmt.Sprintf("%s.categories 必须是对象", where))
+	} else if len(categoryMap) == 0 {
+		*validationErrors = append(*validationErrors, fmt.Sprintf("%s.categories 必须至少包含一个分类", where))
 	} else {
 		for name, category := range categoryMap {
 			validateCategory(category, fmt.Sprintf("%s.categories.%s", where, name), validationErrors)
@@ -315,6 +368,11 @@ func validateConfigObject(raw orderedjson.Value) (*HomerConfig, []string) {
 		validationErrors = append(validationErrors, "adapters 必须是对象")
 	} else {
 		for adapterID, adapter := range adapterMap {
+			if !adapterIDPattern.MatchString(adapterID) {
+				validationErrors = append(validationErrors, fmt.Sprintf(
+					"adapters 的键 %q 不是合法的 adapter ID（应匹配 ^[a-z][a-z0-9-]*$）", adapterID,
+				))
+			}
 			validateAdapter(adapter, "adapters."+adapterID, &validationErrors)
 		}
 	}
@@ -403,9 +461,21 @@ func configFromValue(root map[string]orderedjson.Value) (*HomerConfig, error) {
 				return nil, errors.New("category 不是对象")
 			}
 			category := CategoryConfig{
-				Paths:   stringsFromValue(categoryObject["paths"]),
 				Mode:    SyncMode(stringValue(categoryObject, "mode")),
 				Enabled: boolPointer(categoryObject, "enabled"),
+			}
+			if paths, exists := categoryObject["paths"]; exists {
+				category.Paths = stringsFromValue(paths)
+			}
+			if _, exists := categoryObject["kind"]; exists {
+				kindValue := CategoryKind(stringValue(categoryObject, "kind"))
+				category.Kind = &kindValue
+			}
+			if listCmd, exists := categoryObject["listCmd"]; exists {
+				category.ListCmd, _ = listCmd.(string)
+			}
+			if applyCmd, exists := categoryObject["applyCmd"]; exists {
+				category.ApplyCmd, _ = applyCmd.(string)
 			}
 			if exclude, exists := categoryObject["exclude"]; exists {
 				category.Exclude = stringsFromValue(exclude)
@@ -535,8 +605,26 @@ func configToValue(config HomerConfig) orderedjson.Value {
 		sort.Strings(categoryKeys)
 		for _, categoryName := range categoryKeys {
 			category := adapter.Categories[categoryName]
-			keys := []string{"paths", "mode"}
-			values := map[string]orderedjson.Value{"paths": orderedStringSlice(category.Paths), "mode": string(category.Mode)}
+			keys := make([]string, 0, 8)
+			values := make(map[string]orderedjson.Value, 8)
+			if category.Paths != nil {
+				keys = append(keys, "paths")
+				values["paths"] = orderedStringSlice(category.Paths)
+			}
+			keys = append(keys, "mode")
+			values["mode"] = string(category.Mode)
+			if category.Kind != nil {
+				keys = append(keys, "kind")
+				values["kind"] = string(*category.Kind)
+			}
+			if category.ListCmd != "" {
+				keys = append(keys, "listCmd")
+				values["listCmd"] = category.ListCmd
+			}
+			if category.ApplyCmd != "" {
+				keys = append(keys, "applyCmd")
+				values["applyCmd"] = category.ApplyCmd
+			}
 			if category.Enabled != nil {
 				keys = append(keys, "enabled")
 				values["enabled"] = *category.Enabled

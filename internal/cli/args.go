@@ -116,6 +116,7 @@ const USAGE = `homer — dotfiles for humans and their AI agents
 type CommandOptions struct {
 	Home         string
 	JSON         bool
+	All          bool
 	Help         bool
 	Yes          bool
 	NoPush       bool
@@ -218,6 +219,11 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 				return options, usageArgumentError("选项 --json 不接受值")
 			}
 			options.JSON = true
+		case "--all":
+			if hasInline {
+				return options, usageArgumentError("选项 --all 不接受值")
+			}
+			options.All = true
 		case "--yes":
 			if hasInline {
 				return options, usageArgumentError("选项 --yes 不接受值")
@@ -293,7 +299,7 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 func commandUsage(command Command) string {
 	switch command {
 	case CommandInit:
-		return "用法: homer init [options]\n\n扫描 adapter，生成 homer.json + store 快照。\n\n选项: --home <dir> --adapters <ids> --force --remote <url> --json -h, --help"
+		return "用法: homer init [options]\n\n扫描 adapter，生成 homer.json + store 快照。\n\n选项: --home <dir> --adapters <ids> --all --force --remote <url> --json -h, --help"
 	case CommandRemote:
 		return "用法: homer remote <url> [options]\n\n配置 origin，不自动推送。\n\n选项: --home <dir> --json -h, --help"
 	case CommandStatus:

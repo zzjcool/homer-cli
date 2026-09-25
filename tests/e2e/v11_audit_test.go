@@ -23,7 +23,7 @@ func TestV11AuditMainline(t *testing.T) {
 
 	a := makeMachine(t, root, "audit-A", global, true)
 	init := mustJSONHomer(t, binary, a, "init", "--json")
-	if len(init["adapters"].([]any)) != 3 {
+	if len(init["adapters"].([]any)) != 4 {
 		t.Fatalf("init adapters = %#v", init["adapters"])
 	}
 	// This is intentionally outside Homer to match the advisor's exact
@@ -54,7 +54,7 @@ func TestV11AuditMainline(t *testing.T) {
 		}
 		return ""
 	}))
-	if err != nil || len(config.Adapters) != 3 {
+	if err != nil || len(config.Adapters) != 4 {
 		t.Fatalf("cloned config = %#v, err=%v", config, err)
 	}
 	if result := runHomer(t, binary, b, "version"); result.code != 0 || !strings.Contains(result.stdout, "homer version: dev") {

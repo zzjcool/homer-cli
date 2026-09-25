@@ -342,6 +342,7 @@ func categoryOrder(adapterID string, categories map[string]core.CategoryConfig) 
 		"pi":       {"settings", "skills", "extensions", "agents", "models", "prompts", "themes"},
 		"herdr":    {"config"},
 		"opencode": {"config", "plugins", "locks"},
+		"vscode":   {"settings", "keybindings", "extensions"},
 	}[adapterID]
 
 	ordered := make([]string, 0, len(categories))

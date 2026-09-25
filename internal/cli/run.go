@@ -81,6 +81,7 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 			HomerHome: options.Home,
 			Adapters:  options.Adapters,
 			JSON:      options.JSON,
+			All:       options.All,
 			Remote:    options.Remote,
 		}, commands.InitRunOptions{Force: options.Force})
 		if err != nil {
@@ -298,6 +299,10 @@ func unsupportedOptions(command Command, options CommandOptions, names ...string
 			if options.Offline {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --offline", command))
 			}
+		case "all":
+			if options.All {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --all", command))
+			}
 		case "verbose":
 			if options.Verbose {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --verbose", command))
@@ -336,21 +341,24 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 	case CommandInit:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "adapter", "category", "mode")
 	case CommandRemote:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandStatus:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandDiff:
 		// TS diff intentionally has no --json flag; keep strict command-local
 		// parsing even though status/init expose machine-readable reports.
 		if options.JSON {
 			return usageArgumentError("命令 diff 不支持选项 --json")
 		}
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "mode", "remote")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "mode", "remote")
 	case CommandPush:
-		return unsupportedOptions(command, options, "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandPull:
-		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandMerge:
+		if options.All {
+			return usageArgumentError("命令 merge 不支持选项 --all")
+		}
 		if options.Yes {
 			return usageArgumentError("命令 merge 不支持选项 --yes")
 		}
@@ -373,9 +381,9 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 			return usageArgumentError("--accept-local 与 --accept-remote 不能同时使用")
 		}
 	case CommandHome:
-		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "verbose", "force", "adapters", "adapter", "category", "remote")
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "remote")
 	case CommandDoctor:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	default:
 		return usageArgumentError(fmt.Sprintf("未知命令: %s", command))
 	}
@@ -420,7 +428,7 @@ func runSecret(args []string, out, errOut io.Writer) int {
 }
 
 func validateSecretOptions(subcommand string, options CommandOptions) error {
-	if options.AcceptLocal || options.AcceptRemote || options.Offline || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" || options.Remote != "" {
+	if options.AcceptLocal || options.AcceptRemote || options.Offline || options.All || options.Verbose || options.Force || len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" || options.Remote != "" {
 		return usageArgumentError(fmt.Sprintf("secret %s 不支持该选项", subcommand))
 	}
 	switch subcommand {

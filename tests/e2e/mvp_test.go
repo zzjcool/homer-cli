@@ -493,14 +493,14 @@ func TestMVPSevenGroups(t *testing.T) {
 
 	t.Run("01-machine-A-assembly", func(t *testing.T) {
 		adapters, ok := world.initReport["adapters"].([]any)
-		if !ok || len(adapters) != 3 {
-			t.Fatalf("init adapters = %#v, want three", world.initReport["adapters"])
+		if !ok || len(adapters) != 4 {
+			t.Fatalf("init adapters = %#v, want four", world.initReport["adapters"])
 		}
 		ids := []string{}
 		for _, item := range adapters {
 			ids = append(ids, item.(map[string]any)["id"].(string))
 		}
-		if got := strings.Join(ids, ","); got != "pi,herdr,opencode" {
+		if got := strings.Join(ids, ","); got != "pi,herdr,opencode,vscode" {
 			t.Fatalf("init adapter order = %s", got)
 		}
 		if world.secretPushA["status"] != "pushed" || world.pushA["status"] != "pushed" {
@@ -518,7 +518,7 @@ func TestMVPSevenGroups(t *testing.T) {
 		if err != nil {
 			t.Fatalf("load A config: %v", err)
 		}
-		if len(config.Adapters) != 3 || config.Secrets == nil || config.Secrets.Files[secretName] != secretDest {
+		if len(config.Adapters) != 4 || config.Secrets == nil || config.Secrets.Files[secretName] != secretDest {
 			t.Fatalf("A config missing adapters/secrets: %#v", config)
 		}
 		if _, err := os.Stat(filepath.Join(world.a.homerHome, "secrets", secretName+".age")); err != nil {
@@ -675,7 +675,7 @@ func TestMVPSevenGroups(t *testing.T) {
 		}
 		m := machine{name: "readonly", fakeHome: fakeHome, homerHome: filepath.Join(root, "homer"), gitGlobal: world.gitGlobal}
 		init := mustJSONHomer(t, world.binary, m, "init", "--json")
-		if len(init["adapters"].([]any)) != 3 {
+		if len(init["adapters"].([]any)) != 4 {
 			t.Fatalf("isolated init adapters = %#v", init["adapters"])
 		}
 		result := runHomer(t, world.binary, m, "doctor", "--offline", "--json")

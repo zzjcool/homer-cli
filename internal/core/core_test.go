@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -79,7 +80,23 @@ func TestValidateConfigTable(t *testing.T) {
 		{"non string path", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"x":{"paths":[1],"mode":"merge"}}}}}`, false},
 		{"root not string", `{"version":1,"adapters":{"pi":{"root":1,"categories":{}}}}`, false},
 		{"allow escape star", `{"version":1,"adapters":{"pi":{"root":"x","allowEscape":["**/"],"categories":{}}}}`, false},
-		{"allow escape specific", `{"version":1,"adapters":{"pi":{"root":"x","allowEscape":["skills/browser/"],"categories":{}}}}`, true},
+		{"allow escape specific", `{"version":1,"adapters":{"pi":{"root":"x","allowEscape":["skills/browser/"],"categories":{"settings":{"paths":["settings.json"],"mode":"merge"}}}}}`, true},
+		{"empty categories", `{"version":1,"adapters":{"pi":{"root":"x","categories":{}}}}`, false},
+		{"adapter id uppercase", `{"version":1,"adapters":{"Pi":{"root":"x","categories":{"settings":{"paths":["settings.json"],"mode":"merge"}}}}}`, false},
+		{"adapter id leading digit", `{"version":1,"adapters":{"1pi":{"root":"x","categories":{"settings":{"paths":["settings.json"],"mode":"merge"}}}}}`, false},
+		{"adapter id underscore", `{"version":1,"adapters":{"pi_agent":{"root":"x","categories":{"settings":{"paths":["settings.json"],"mode":"merge"}}}}}`, false},
+		{"kind omitted", valid, true},
+		{"kind file", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"settings":{"paths":["settings.json"],"mode":"merge","kind":"file"}}}}}`, true},
+		{"kind dir", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"skills":{"paths":["skills/"],"mode":"mirror","kind":"dir"}}}}}`, true},
+		{"kind manifest without paths", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","listCmd":"code --list-extensions","applyCmd":"code --install-extension"}}}}}`, true},
+		{"kind manifest empty paths", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"paths":[],"mode":"mirror","kind":"manifest","listCmd":"list","applyCmd":"apply"}}}}}`, true},
+		{"kind manifest paths rejected", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"paths":["extensions/"],"mode":"mirror","kind":"manifest","listCmd":"list","applyCmd":"apply"}}}}}`, false},
+		{"kind manifest wrong mode", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"merge","kind":"manifest","listCmd":"list","applyCmd":"apply"}}}}}`, false},
+		{"kind manifest missing list command", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","applyCmd":"apply"}}}}}`, false},
+		{"kind manifest missing apply command", `{"version":1,"adapters":{"vscode":{"root":"x","categories":{"extensions":{"mode":"mirror","kind":"manifest","listCmd":"list"}}}}}`, false},
+		{"kind file list command rejected", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"settings":{"paths":["settings.json"],"mode":"merge","kind":"file","listCmd":"list"}}}}}`, false},
+		{"kind dir apply command rejected", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"skills":{"paths":["skills/"],"mode":"mirror","kind":"dir","applyCmd":"apply"}}}}}`, false},
+		{"unknown kind", `{"version":1,"adapters":{"pi":{"root":"x","categories":{"settings":{"paths":["settings.json"],"mode":"merge","kind":"other"}}}}}`, false},
 		{"backup zero", `{"version":1,"adapters":{},"backup":{"keep":0}}`, false},
 		{"backup fraction", `{"version":1,"adapters":{},"backup":{"keep":1.5}}`, false},
 		{"backup string", `{"version":1,"adapters":{},"backup":{"keep":"7"}}`, false},
@@ -118,6 +135,63 @@ func TestConfigRoundTripAndMissingSentinel(t *testing.T) {
 	}
 	if _, err := LoadConfig(GetHomerPaths(func(string) string { return t.TempDir() })); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing config error = %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestManifestCategoryConfigRoundTrip(t *testing.T) {
+	manifestKind := CategoryKindManifest
+	fileKind := CategoryKindFile
+	config := HomerConfig{
+		Version: 1,
+		Adapters: map[string]AdapterConfig{
+			"vscode": {
+				Root: "~/.config/Code",
+				Categories: map[string]CategoryConfig{
+					"extensions": {
+						Mode:     SyncModeMirror,
+						Kind:     &manifestKind,
+						ListCmd:  "code --list-extensions",
+						ApplyCmd: "code --install-extension",
+					},
+					"empty-manifest": {
+						Paths:    []string{},
+						Mode:     SyncModeMirror,
+						Kind:     &manifestKind,
+						ListCmd:  "list",
+						ApplyCmd: "apply",
+					},
+					"settings": {
+						Paths: []string{"settings.json"},
+						Mode:  SyncModeMerge,
+						Kind:  &fileKind,
+					},
+				},
+			},
+		},
+	}
+	paths := GetHomerPaths(func(string) string { return t.TempDir() })
+	if err := SaveConfig(paths, config); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(encoded)
+	for _, field := range []string{`"kind": "manifest"`, `"listCmd": "code --list-extensions"`, `"applyCmd": "code --install-extension"`} {
+		if !strings.Contains(raw, field) {
+			t.Fatalf("manifest field %s was not serialized: %s", field, raw)
+		}
+	}
+	got, err := LoadConfig(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, &config) {
+		t.Fatalf("manifest config roundtrip = %#v, want %#v", got, config)
+	}
+	if !got.Adapters["vscode"].Categories["extensions"].IsManifest() {
+		t.Fatal("manifest kind was not retained")
 	}
 }
 
