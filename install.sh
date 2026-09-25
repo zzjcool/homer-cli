@@ -223,7 +223,7 @@ else
 fi
 
 "$TARGET" --help >/dev/null 2>&1 || die "installed binary failed the --help smoke test: $TARGET"
-say "✓ homer 安装完成（$TARGET）"
+say "✓ homer 安装完成($TARGET)"
 say ''
 say '下一步：'
 say '  1. 新机器一键归位 : homer home <你的配置仓库 url> --yes'
