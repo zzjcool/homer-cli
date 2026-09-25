@@ -229,7 +229,9 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 
 	scan := deps.Scan
 	if scan == nil {
-		scan = adapter.ScanAdapter
+		scan = func(adapterID string, config core.AdapterConfig) adapter.ScanOutcome {
+			return adapter.ScanAdapter(adapterID, config)
+		}
 	}
 	writeSnapshot := deps.WriteSnapshot
 	if writeSnapshot == nil {
