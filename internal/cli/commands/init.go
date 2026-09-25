@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -44,6 +45,7 @@ type InitDeps struct {
 	Scan          func(adapterID string, config core.AdapterConfig) adapter.ScanOutcome
 	WriteSnapshot func(paths core.HomerPaths, snapshot core.AdapterSnapshot) error
 	SaveConfig    func(paths core.HomerPaths, config core.HomerConfig) error
+	Wizard        WizardPort
 }
 
 // InitCategoryReport is the per-category file count in InitReport.
@@ -63,6 +65,7 @@ type InitReport struct {
 	HomerHome string              `json:"homerHome"`
 	Adapters  []InitAdapterReport `json:"adapters"`
 	Errors    []string            `json:"errors"`
+	Warnings  []string            `json:"warnings,omitempty"`
 }
 
 // KNOWN_ADAPTERS is the P3 registration table.  The map is exported for
@@ -93,7 +96,7 @@ const INIT_USAGE = `用法: homer init [options]
   --json                输出机器可读 JSON（InitReport）
   -h, --help            显示本帮助
 
-注意: 已存在 homer.json 时会拒绝覆盖，除非显式给出 --force。`
+注意: 已存在 homer.json 时会拒绝覆盖，除非显式给出 --force；TTY 下可交互调整向导选择。`
 
 // InitUsage is the idiomatic alias for the archived constant spelling.
 const InitUsage = INIT_USAGE
@@ -122,13 +125,7 @@ func selectedAdapters(ids []string) (map[string]core.AdapterConfig, error) {
 }
 
 func selectedAdapterIDs(selected map[string]core.AdapterConfig) []string {
-	ids := make([]string, 0, len(selected))
-	for _, id := range knownAdapterOrder {
-		if _, ok := selected[id]; ok {
-			ids = append(ids, id)
-		}
-	}
-	return ids
+	return orderedConfigIDs(selected)
 }
 
 // saveInitConfig preserves the known adapter registration order in the JSON
@@ -197,9 +194,9 @@ func RunInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 }
 
 func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptions) (InitReport, error) {
-	runOpts := InitRunOptions{Force: opts.Force}
+	force := opts.Force
 	if len(runOptions) > 0 {
-		runOpts = runOptions[0]
+		force = runOptions[0].Force
 	}
 	homerHome := opts.HomerHome
 	if homerHome == "" {
@@ -212,10 +209,17 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 		return os.Getenv(key)
 	})
 
-	if _, err := os.Stat(paths.ConfigFile); err == nil && !runOpts.Force {
-		return InitReport{}, core.NewCliError(fmt.Sprintf("已存在 homer 配置: %s；拒绝覆盖。如需重新初始化，请加 `--force`（会覆盖 homer.json 与 store 快照）。", paths.ConfigFile))
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return InitReport{}, err
+	_, statErr := os.Stat(paths.ConfigFile)
+	configExists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return InitReport{}, statErr
+	}
+	interactive := initWizardActive(opts, deps)
+	if configExists && !force && !interactive {
+		return InitReport{}, core.NewCliError(fmt.Sprintf(
+			"已存在 homer 配置: %s；拒绝覆盖。如需重新初始化，请加 `--force`（会覆盖 homer.json 与 store 快照）。TTY 下可交互调整选择。",
+			paths.ConfigFile,
+		))
 	}
 	if opts.Remote != "" {
 		if err := gitx.AssertCloneableRepoURL(opts.Remote); err != nil {
@@ -223,16 +227,6 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 		}
 	}
 
-	selected, err := selectedAdapters(opts.Adapters)
-	if err != nil {
-		return InitReport{}, err
-	}
-
-	report := InitReport{
-		HomerHome: paths.Home,
-		Adapters:  make([]InitAdapterReport, 0, len(selected)),
-		Errors:    []string{},
-	}
 	scan := deps.Scan
 	if scan == nil {
 		scan = adapter.ScanAdapter
@@ -246,37 +240,30 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 		saveConfig = saveInitConfig
 	}
 
-	for _, adapterID := range selectedAdapterIDs(selected) {
-		adapterConfig := selected[adapterID]
-		outcome := scan(adapterID, adapterConfig)
+	var existing *core.HomerConfig
+	if configExists {
+		loaded, err := core.LoadConfig(paths)
+		if err != nil {
+			return InitReport{}, err
+		}
+		existing = loaded
+	}
+
+	if interactive {
+		return runInteractiveInit(opts, force, configExists, existing, paths, deps, scan, writeSnapshot, saveConfig)
+	}
+
+	config, err := nonInteractiveInitConfig(opts, force, existing)
+	if err != nil {
+		return InitReport{}, err
+	}
+	outcomes := scanInitAdapters(config, selectedAdapterIDs(config.Adapters), scan, false)
+	for _, outcome := range outcomes {
 		if err := writeSnapshot(paths, outcome.Snapshot); err != nil {
 			return InitReport{}, err
 		}
-
-		if len(outcome.Errors) > 0 {
-			report.Errors = append(report.Errors, sourceErrorMessages(SnapshotSourceErrors{
-				{
-					AdapterID:      adapterID,
-					RootUnreadable: rootUnreadable(outcome),
-					Errors:         append([]adapter.ScanError(nil), outcome.Errors...),
-				},
-			})...)
-		}
-
-		adapterReport := InitAdapterReport{
-			ID:         adapterID,
-			Categories: make([]InitCategoryReport, 0, len(outcome.Snapshot.Categories)),
-		}
-		for _, category := range outcome.Snapshot.Categories {
-			adapterReport.Categories = append(adapterReport.Categories, InitCategoryReport{
-				Name:      category.Category,
-				FileCount: len(category.Files),
-			})
-		}
-		report.Adapters = append(report.Adapters, adapterReport)
 	}
-
-	config := core.HomerConfig{Version: 1, Adapters: selected}
+	report := buildInitReport(outcomes, outcomesToSnapshots(outcomes), config, paths.Home)
 	if err := saveConfig(paths, config); err != nil {
 		return InitReport{}, err
 	}
@@ -286,6 +273,306 @@ func runInitWithDeps(opts InitOptions, deps InitDeps, runOptions ...InitRunOptio
 		}
 	}
 	return report, nil
+}
+
+func initWizardActive(opts InitOptions, deps InitDeps) bool {
+	if opts.JSON || opts.All || len(opts.Adapters) > 0 {
+		return false
+	}
+	// An injected wizard is the package-level fake-port seam. It also lets
+	// tests exercise the TTY branch without making the test process itself a
+	// terminal; production calls with a nil Wizard still require a real TTY.
+	return isTTY() || deps.Wizard != nil
+}
+
+func nonInteractiveInitConfig(opts InitOptions, force bool, existing *core.HomerConfig) (core.HomerConfig, error) {
+	selected, err := selectedAdapters(opts.Adapters)
+	if err != nil {
+		return core.HomerConfig{}, err
+	}
+	if !force {
+		return core.HomerConfig{Version: 1, Adapters: cloneAdapterMap(selected)}, nil
+	}
+	config := core.HomerConfig{Version: 1, Adapters: cloneAdapterMap(selected)}
+	if existing == nil {
+		return config, nil
+	}
+	for adapterID, adapterConfig := range existing.Adapters {
+		if builtinConfig, builtin := KNOWN_ADAPTERS[adapterID]; builtin {
+			// --adapters narrows newly registered built-ins, but --force still
+			// must not delete an adapter that already exists. Existing built-ins
+			// are reset to their defaults; non-existing ones stay omitted.
+			if _, selected := config.Adapters[adapterID]; !selected {
+				config.Adapters[adapterID] = cloneAdapterConfig(builtinConfig)
+			}
+			continue
+		}
+		config.Adapters[adapterID] = cloneAdapterConfig(adapterConfig)
+	}
+	config.Backup = cloneBackupConfig(existing.Backup)
+	config.Secrets = cloneSecretsConfig(existing.Secrets)
+	return config, nil
+}
+
+func runInteractiveInit(
+	opts InitOptions,
+	force bool,
+	configExists bool,
+	existing *core.HomerConfig,
+	paths core.HomerPaths,
+	deps InitDeps,
+	scan func(adapterID string, config core.AdapterConfig) adapter.ScanOutcome,
+	writeSnapshot func(paths core.HomerPaths, snapshot core.AdapterSnapshot) error,
+	saveConfig func(paths core.HomerPaths, config core.HomerConfig) error,
+) (InitReport, error) {
+	var config core.HomerConfig
+	reInit := configExists && !force
+	if reInit {
+		if existing == nil {
+			return InitReport{}, fmt.Errorf("无法加载已有 homer 配置")
+		}
+		config = cloneHomerConfig(*existing)
+	} else {
+		var err error
+		config, err = nonInteractiveInitConfig(opts, force, existing)
+		if err != nil {
+			return InitReport{}, err
+		}
+	}
+
+	// Scan an enabled view even when the current config has an adapter/category
+	// disabled. This lets re-init show the complete three-level choice tree and
+	// lets a user re-enable a previously disabled category without editing JSON.
+	scanConfig := cloneHomerConfig(config)
+	enableWizardScan(&scanConfig)
+	ids := selectedAdapterIDs(scanConfig.Adapters)
+	outcomes := scanInitAdapters(scanConfig, ids, scan, true)
+	state := buildWizardState(config, outcomes, reInit)
+	port := deps.Wizard
+	if port == nil {
+		port = NewDefaultWizardPort(isTTY())
+	}
+	selection, err := RunSelectionWizard(port, state)
+	if err != nil {
+		return InitReport{}, core.NewCliError("已取消初始化")
+	}
+	beforeSelection := cloneHomerConfig(config)
+	ApplySelectionToConfig(&config, selection)
+	filtered := FilterSnapshotsBySelection(outcomesToSnapshots(outcomes), config)
+	report := buildInitReport(outcomes, filtered, config, paths.Home)
+	if reInit {
+		if !reflect.DeepEqual(beforeSelection, config) {
+			if err := saveConfig(paths, config); err != nil {
+				return InitReport{}, err
+			}
+		}
+		report.Warnings = append(report.Warnings, "已更新选择；store 快照未重写，`homer push` 提交当前本地状态")
+		if opts.Remote != "" {
+			if err := initializeRemote(paths, opts.Remote); err != nil {
+				return InitReport{}, err
+			}
+		}
+		return report, nil
+	}
+
+	for _, snapshot := range filtered {
+		if err := writeSnapshot(paths, snapshot); err != nil {
+			return InitReport{}, err
+		}
+	}
+	if err := saveConfig(paths, config); err != nil {
+		return InitReport{}, err
+	}
+	if opts.Remote != "" {
+		if err := initializeRemote(paths, opts.Remote); err != nil {
+			return InitReport{}, err
+		}
+	}
+	return report, nil
+}
+
+func scanInitAdapters(config core.HomerConfig, ids []string, scan func(adapterID string, config core.AdapterConfig) adapter.ScanOutcome, wizard bool) []adapter.ScanOutcome {
+	outcomes := make([]adapter.ScanOutcome, 0, len(ids))
+	for _, adapterID := range ids {
+		adapterConfig := config.Adapters[adapterID]
+		if wizard {
+			adapterConfig = wizardScanAdapterConfig(adapterConfig)
+		}
+		outcome := scan(adapterID, adapterConfig)
+		outcome.Snapshot.AdapterID = adapterID
+		for index := range outcome.Snapshot.Categories {
+			outcome.Snapshot.Categories[index].AdapterID = adapterID
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	return outcomes
+}
+
+func wizardScanAdapterConfig(config core.AdapterConfig) core.AdapterConfig {
+	config.Enabled = boolPointer(true)
+	for categoryName, categoryConfig := range config.Categories {
+		categoryConfig.Enabled = boolPointer(true)
+		config.Categories[categoryName] = categoryConfig
+	}
+	return config
+}
+
+func enableWizardScan(config *core.HomerConfig) {
+	if config == nil {
+		return
+	}
+	for adapterID, adapterConfig := range config.Adapters {
+		config.Adapters[adapterID] = wizardScanAdapterConfig(adapterConfig)
+	}
+}
+
+func outcomesToSnapshots(outcomes []adapter.ScanOutcome) []core.AdapterSnapshot {
+	snapshots := make([]core.AdapterSnapshot, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		snapshots = append(snapshots, outcome.Snapshot)
+	}
+	return snapshots
+}
+
+func buildInitReport(outcomes []adapter.ScanOutcome, snapshots []core.AdapterSnapshot, config core.HomerConfig, homerHome string) InitReport {
+	report := InitReport{
+		HomerHome: homerHome,
+		Adapters:  make([]InitAdapterReport, 0, len(snapshots)),
+		Errors:    make([]string, 0),
+	}
+	for _, outcome := range outcomes {
+		if len(outcome.Errors) > 0 {
+			report.Errors = append(report.Errors, sourceErrorMessages(SnapshotSourceErrors{
+				{
+					AdapterID:      outcome.Snapshot.AdapterID,
+					RootUnreadable: rootUnreadable(outcome),
+					Errors:         append([]adapter.ScanError(nil), outcome.Errors...),
+				},
+			})...)
+		}
+	}
+	filteredByID := make(map[string]core.AdapterSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		filteredByID[snapshot.AdapterID] = snapshot
+	}
+	for _, adapterID := range selectedAdapterIDs(config.Adapters) {
+		adapterConfig, ok := config.Adapters[adapterID]
+		if !ok || !enabledSelection(adapterConfig.Enabled) {
+			continue
+		}
+		snapshot, ok := filteredByID[adapterID]
+		if !ok {
+			continue
+		}
+		adapterReport := InitAdapterReport{ID: adapterID, Categories: make([]InitCategoryReport, 0, len(snapshot.Categories))}
+		for _, category := range snapshot.Categories {
+			adapterReport.Categories = append(adapterReport.Categories, InitCategoryReport{
+				Name:      category.Category,
+				FileCount: len(category.Files),
+			})
+		}
+		report.Adapters = append(report.Adapters, adapterReport)
+	}
+	return report
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func cloneHomerConfig(config core.HomerConfig) core.HomerConfig {
+	return core.HomerConfig{
+		Version:  config.Version,
+		Adapters: cloneAdapterMap(config.Adapters),
+		Backup:   cloneBackupConfig(config.Backup),
+		Secrets:  cloneSecretsConfig(config.Secrets),
+	}
+}
+
+func cloneAdapterMap(adapters map[string]core.AdapterConfig) map[string]core.AdapterConfig {
+	if adapters == nil {
+		return nil
+	}
+	result := make(map[string]core.AdapterConfig, len(adapters))
+	for id, config := range adapters {
+		result[id] = cloneAdapterConfig(config)
+	}
+	return result
+}
+
+func cloneAdapterConfig(config core.AdapterConfig) core.AdapterConfig {
+	clone := core.AdapterConfig{
+		Root:        config.Root,
+		Enabled:     cloneBoolPointer(config.Enabled),
+		Categories:  make(map[string]core.CategoryConfig, len(config.Categories)),
+		Ignore:      cloneStringSlice(config.Ignore),
+		AllowEscape: cloneStringSlice(config.AllowEscape),
+	}
+	for name, category := range config.Categories {
+		categoryCopy := category
+		categoryCopy.Paths = cloneStringSlice(category.Paths)
+		categoryCopy.Kind = cloneKindPointer(category.Kind)
+		categoryCopy.Enabled = cloneBoolPointer(category.Enabled)
+		categoryCopy.Exclude = cloneStringSlice(category.Exclude)
+		categoryCopy.ExcludeKeys = cloneStringSlice(category.ExcludeKeys)
+		clone.Categories[name] = categoryCopy
+	}
+	return clone
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneKindPointer(value *core.CategoryKind) *core.CategoryKind {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneBackupConfig(value *core.BackupConfig) *core.BackupConfig {
+	if value == nil {
+		return nil
+	}
+	return &core.BackupConfig{Keep: cloneIntPointer(value.Keep)}
+}
+
+func cloneSecretsConfig(value *core.SecretsConfig) *core.SecretsConfig {
+	if value == nil {
+		return nil
+	}
+	clone := &core.SecretsConfig{
+		IgnorePaths: cloneStringSlice(value.IgnorePaths),
+		Recipients:  cloneStringSlice(value.Recipients),
+	}
+	if value.Files != nil {
+		clone.Files = make(map[string]string, len(value.Files))
+		for name, path := range value.Files {
+			clone.Files[name] = path
+		}
+	}
+	return clone
+}
+
+func cloneIntPointer(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneStringSlice(value []string) []string {
+	if value == nil {
+		return nil
+	}
+	clone := make([]string, len(value))
+	copy(clone, value)
+	return clone
 }
 
 // initializeRemote is the opt-in init one-liner: create the repository,
