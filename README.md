@@ -9,7 +9,7 @@
 ## 快速开始（三行版）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/master/install.sh | sh
 homer init && homer secret keygen
 homer push --yes                 # 首次 push 自动 git init + 建立基线
 ```
@@ -29,7 +29,7 @@ homer home <配置仓库 URL> --yes
 ### 1. release 二进制（推荐）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/master/install.sh | sh
 ```
 
 脚本探测 `uname -s` / `uname -m`，从 GitHub Release latest 下载对应的
