@@ -511,11 +511,16 @@ func TestScanManifestMissingCLIDegradesQuietly(t *testing.T) {
 	if len(outcome.Errors) != 0 {
 		t.Fatalf("missing CLI must degrade quietly, got errors: %+v", outcome.Errors)
 	}
-	cat, ok := outcome.Snapshot.Categories["extensions"]
-	if !ok {
-		t.Fatal("extensions category missing from snapshot")
+	var found bool
+	for _, cat := range outcome.Snapshot.Categories {
+		if cat.Category == "extensions" {
+			found = true
+			if len(cat.Files) != 0 {
+				t.Fatalf("expected empty manifest files, got %+v", cat.Files)
+			}
+		}
 	}
-	if len(cat.Files) != 0 {
-		t.Fatalf("expected empty manifest files, got %+v", cat.Files)
+	if !found {
+		t.Fatal("extensions category missing from snapshot")
 	}
 }
