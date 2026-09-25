@@ -39,7 +39,7 @@ var COMMANDS = []Command{
 	CommandMerge,
 	CommandHome,
 	CommandDoctor,
-		CommandSecret,
+	CommandSecret,
 	CommandPair,
 	CommandVersion,
 	CommandUpgrade,

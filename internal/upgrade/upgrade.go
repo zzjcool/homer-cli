@@ -14,7 +14,7 @@ import (
 // the homer binaries. They are vars so tests can redirect lookups.
 var (
 	RepoOwner = "zzjcool"
-	RepoName = "homer-cli"
+	RepoName  = "homer-cli"
 )
 
 // DefaultBaseURL is the release download root; overridable for tests and
