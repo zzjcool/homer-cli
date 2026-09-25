@@ -496,3 +496,26 @@ func TestScanManifestFailureDoesNotBlockOtherCategories(t *testing.T) {
 		t.Fatalf("other category was blocked = %q", got)
 	}
 }
+
+// TestScanManifestMissingCLIDegradesQuietly locks the product semantics added
+// after the v1.2 e2e ripple: a manifest listCmd failing because the tool CLI
+// is simply not installed (fresh machine, no `code` in PATH) must NOT surface
+// as a scan error — it degrades to an empty manifest so status stays clean.
+func TestScanManifestMissingCLIDegradesQuietly(t *testing.T) {
+	outcome := adapter.ScanAdapter("vscode", core.AdapterConfig{
+		Root: t.TempDir(),
+		Categories: map[string]core.CategoryConfig{
+			"extensions": {Kind: manifestKind(), Mode: core.SyncModeMirror, ListCmd: "definitely-not-a-real-cli-xyz --list"},
+		},
+	})
+	if len(outcome.Errors) != 0 {
+		t.Fatalf("missing CLI must degrade quietly, got errors: %+v", outcome.Errors)
+	}
+	cat, ok := outcome.Snapshot.Categories["extensions"]
+	if !ok {
+		t.Fatal("extensions category missing from snapshot")
+	}
+	if len(cat.Files) != 0 {
+		t.Fatalf("expected empty manifest files, got %+v", cat.Files)
+	}
+}

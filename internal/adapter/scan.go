@@ -283,6 +283,12 @@ func scanCategory(root, rootReal, category string, cfg core.CategoryConfig, igno
 	if cfg.IsManifest() {
 		snapshot, problems := manifest.ScanCategory("", category, cfg, port)
 		for _, problem := range problems {
+			// A tool CLI that is not installed (e.g. `code` missing on a
+			// fresh machine) is a normal machine state, not a scan failure:
+			// degrade quietly to an empty manifest so status stays clean.
+			if isCommandMissing(problem.Message) {
+				continue
+			}
 			addScanError(errors, problem.Command, problem.Message)
 		}
 		return snapshot
@@ -433,4 +439,12 @@ func ScanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) 
 // the original TypeScript naming without duplicating implementation.
 func scanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) ScanOutcome {
 	return ScanAdapter(adapterID, config, deps...)
+}
+
+// isCommandMissing reports whether a manifest list failure was caused by the
+// tool CLI simply not being installed on this machine.
+func isCommandMissing(message string) bool {
+	return strings.Contains(message, "executable file not found") ||
+		strings.Contains(message, "no such file or directory") ||
+		strings.Contains(message, "command not found")
 }
