@@ -173,11 +173,28 @@ func RenderStatus(report StatusReport, options ...RenderStatusOptions) string {
 	return strings.Join(lines, "\n")
 }
 
+// abbreviateHome rewrites a leading home directory in a display path as ~
+// so init output stays readable on long macOS paths.
+func abbreviateHome(homeDir, path string) string {
+	if homeDir == "" || !strings.HasPrefix(path, homeDir) {
+		return path
+	}
+	rest := path[len(homeDir):]
+	if rest == "" {
+		return "~"
+	}
+	if strings.HasPrefix(rest, "/") {
+		return "~" + rest
+	}
+	return path
+}
+
 // RenderInit prints the workspace and file counts.  Scan diagnostics remain
 // visible even when an adapter root is absent; a missing tool must not look
 // like a successful empty scan.
 func RenderInit(report InitReport) string {
-	lines := []string{"homer init: " + report.HomerHome}
+	homeDir, _ := os.UserHomeDir()
+	lines := []string{"homer init: " + abbreviateHome(homeDir, report.HomerHome)}
 	for _, message := range report.Errors {
 		lines = append(lines, "  ⚠ "+message)
 	}
@@ -185,16 +202,28 @@ func RenderInit(report InitReport) string {
 		lines = append(lines, "（没有要初始化的 adapter）")
 		return strings.Join(lines, "\n")
 	}
+	totalFiles := 0
 	for _, adapter := range report.Adapters {
 		total := 0
 		for _, category := range adapter.Categories {
 			total += category.FileCount
 		}
+		totalFiles += total
 		lines = append(lines, "  "+adapter.ID+": "+strconv.Itoa(total)+" 个文件")
 		for _, category := range adapter.Categories {
 			lines = append(lines, "    "+category.Name+": "+strconv.Itoa(category.FileCount))
 		}
 	}
+	for _, message := range report.Warnings {
+		lines = append(lines, "  ⚠ "+message)
+	}
+	lines = append(lines, "")
+	lines = append(lines, "✓ 初始化完成，"+strconv.Itoa(totalFiles)+" 个文件已写入 store（工作区固定在 ~/.homer，与当前目录无关）")
+	lines = append(lines, "")
+	lines = append(lines, "下一步：")
+	lines = append(lines, "  1. 检查范围 : homer status / homer diff")
+	lines = append(lines, "  2. 建立远端 : homer remote <配置仓库 url>，或 homer init --remote <url> 一步完成首推")
+	lines = append(lines, "  3. 提交基线 : homer push --yes")
 	return strings.Join(lines, "\n")
 }
 
