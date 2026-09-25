@@ -260,6 +260,9 @@ func minimalCommandEnv() []string {
 }
 
 func run(argv []string, timeout time.Duration) ([]byte, error) {
+	// argv comes from the user's own homer.json listCmd/applyCmd (trusted
+	// local config, never remote input); the sandboxing below (timeout,
+	// minimal env, output cap) is hygiene, not a security boundary.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -277,20 +280,33 @@ func run(argv []string, timeout time.Duration) ([]byte, error) {
 	}
 	cmd.WaitDelay = time.Second
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Use an explicit os.Pipe instead of cmd.StdoutPipe: StdoutPipe's Wait
+	// closes the read end while the reader goroutine may still be draining
+	// it, racing the reader into "file already closed" and masking the
+	// size-limit error. With our own pipe we control exactly who closes it.
+	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
+	cmd.Stdout = stdoutWrite
 	var stderr limitedBuffer
 	stderr.limit = maxCommandOutputBytes
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
+		stdoutRead.Close()
+		stdoutWrite.Close()
 		return nil, err
 	}
+	// The child holds its own duplicate of the write end; closing ours here
+	// lets the reader observe EOF as soon as the child (and any descendant
+	// still sharing the fd) exits.
+	stdoutWrite.Close()
 
 	stdoutDone := make(chan limitedReadResult, 1)
 	go func() {
-		stdoutDone <- readLimited(stdoutPipe, maxCommandOutputBytes)
+		result := readLimited(stdoutRead, maxCommandOutputBytes)
+		stdoutRead.Close()
+		stdoutDone <- result
 	}()
 	waitErr := cmd.Wait()
 	stdout := <-stdoutDone
