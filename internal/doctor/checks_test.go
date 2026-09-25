@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,6 +176,43 @@ func TestDoctorHealthyChecks(t *testing.T) {
 	}
 	if required := CheckRequiredPlaceholders(paths, secretConfig); required.Status != CheckOK {
 		t.Fatalf("healthy required = %#v", required)
+	}
+}
+
+func TestCheckAgeShowsPairedDevices(t *testing.T) {
+	paths := testPaths(t)
+	identity := agecrypto.GenerateIdentity()
+	if err := agecrypto.WriteIdentityFile(paths, identity); err != nil {
+		t.Fatal(err)
+	}
+	config := core.HomerConfig{
+		Version: 1,
+		Secrets: &core.SecretsConfig{
+			Recipients: []string{identity.Recipient},
+			Files:      map[string]string{"token": filepath.Join(paths.Home, "token")},
+		},
+	}
+	if err := agecrypto.EncryptSecretToFile(nil, paths, "token", []byte("paired-doctor-secret"), []string{identity.Recipient}); err != nil {
+		t.Fatal(err)
+	}
+	state := core.HomerState{Version: 1, Paired: make([]core.PairedDevice, 0, 6)}
+	for index := 0; index < 6; index++ {
+		state.Paired = append(state.Paired, core.PairedDevice{
+			Hostname:  fmt.Sprintf("device-%d", index),
+			Recipient: identity.Recipient,
+			PairedAt:  "2026-01-02T03:04:05Z",
+		})
+	}
+	if err := core.SaveState(paths, state); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckAge(paths, config, nil)
+	if check.Status != CheckOK || !strings.Contains(check.Message, "已配对 6 台设备") {
+		t.Fatalf("paired age check = %#v", check)
+	}
+	if len(check.Details) != 6 || check.Details[0] != "device-0（"+identity.Recipient[:12]+"…"+identity.Recipient[len(identity.Recipient)-4:]+"）" || check.Details[5] != "… 其余 1 台" {
+		t.Fatalf("paired age details = %#v", check.Details)
 	}
 }
 

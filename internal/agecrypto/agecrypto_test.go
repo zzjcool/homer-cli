@@ -267,6 +267,53 @@ func (p leakingPort) Decrypt(ciphertext []byte, _ AgeIdentity) ([]byte, error) {
 	return append([]byte(nil), ciphertext...), nil
 }
 
+func TestCiphertextLooksSafeAndWriteVaultCiphertext(t *testing.T) {
+	home := t.TempDir()
+	paths := core.GetHomerPaths(func(string) string { return home })
+	identity := GenerateIdentity()
+	plaintext := []byte("a sufficiently long secret for the exported vault self-check")
+	ciphertext, err := EncryptToRecipients(plaintext, []string{identity.Recipient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !CiphertextLooksSafe(ciphertext, plaintext) {
+		t.Fatal("valid age ciphertext was rejected")
+	}
+	if CiphertextLooksSafe(plaintext, plaintext) {
+		t.Fatal("plaintext passthrough was accepted")
+	}
+	leaking := append([]byte("prefix"), plaintext...)
+	if CiphertextLooksSafe(leaking, plaintext) {
+		t.Fatal("ciphertext containing the plaintext sample was accepted")
+	}
+
+	if err := WriteVaultCiphertext(paths, "received", ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	file, err := SecretFilePath(paths, "received")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, ciphertext) {
+		t.Fatalf("stored ciphertext = %x, want %x", stored, ciphertext)
+	}
+	if mode := os.FileMode(statMode(t, file)); mode.Perm() != 0o600 {
+		t.Fatalf("vault mode = %o, want 600", mode.Perm())
+	}
+	if mode := os.FileMode(statMode(t, paths.SecretsDir)); mode.Perm() != 0o700 {
+		t.Fatalf("secrets dir mode = %o, want 700", mode.Perm())
+	}
+	if err := WriteVaultCiphertext(paths, "../escape", ciphertext); err == nil {
+		t.Fatal("invalid vault name was accepted")
+	} else if _, ok := err.(core.CliError); !ok {
+		t.Fatalf("invalid name error = %T, want core.CliError", err)
+	}
+}
+
 func TestVaultCiphertextSelfCheckCatchesShortAndTailLeaks(t *testing.T) {
 	home := t.TempDir()
 	paths := core.GetHomerPaths(func(string) string { return home })

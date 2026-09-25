@@ -323,7 +323,10 @@ const rePushHint = "若本机是新设备：在旧机把本机 recipient 加入 
 // reads a workspace vault first and falls back to the local upstream commit;
 // this is important because secret pull intentionally does not fast-forward
 // the whole Homer repository.
-func CheckAge(paths core.HomerPaths, config core.HomerConfig, crypto agecrypto.AgeCryptoPort) DoctorCheck {
+func CheckAge(paths core.HomerPaths, config core.HomerConfig, crypto agecrypto.AgeCryptoPort) (check DoctorCheck) {
+	defer func() {
+		check = appendPairedAgeDisplay(paths, check)
+	}()
 	files := map[string]string{}
 	recipients := []string{}
 	if config.Secrets != nil {
@@ -442,6 +445,25 @@ func CheckAge(paths core.HomerPaths, config core.HomerConfig, crypto agecrypto.A
 		}
 	}
 	return DoctorCheck{ID: CheckAgeID, Status: CheckOK, Message: fmt.Sprintf("%d 个密钥均可解密", len(names))}
+}
+
+func appendPairedAgeDisplay(paths core.HomerPaths, check DoctorCheck) DoctorCheck {
+	devices := core.PairedDisplay(core.LoadState(paths))
+	if len(devices) == 0 {
+		return check
+	}
+	check.Message += fmt.Sprintf("；已配对 %d 台设备", len(devices))
+	details := append([]string(nil), check.Details...)
+	limit := len(devices)
+	if limit > 5 {
+		limit = 5
+	}
+	details = append(details, devices[:limit]...)
+	if len(devices) > limit {
+		details = append(details, fmt.Sprintf("… 其余 %d 台", len(devices)-limit))
+	}
+	check.Details = details
+	return check
 }
 
 func secretRelativePath(name string) string {

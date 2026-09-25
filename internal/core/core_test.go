@@ -224,6 +224,63 @@ func TestStateRoundTripAndCorruptionFallback(t *testing.T) {
 	}
 }
 
+func TestPairedStateMergeRoundTripAndMalformedFieldFallback(t *testing.T) {
+	home := t.TempDir()
+	paths := GetHomerPaths(func(string) string { return home })
+	recipientA := "age1" + strings.Repeat("a", 20)
+	recipientB := "age1" + strings.Repeat("b", 20)
+	original := HomerState{
+		Version:        1,
+		LastSyncCommit: "keep-me",
+		Paired: []PairedDevice{{
+			Hostname:  "old-name",
+			Recipient: recipientA,
+			PairedAt:  "2026-01-02T03:04:05Z",
+		}},
+	}
+	updated := original.AddPairedDevice(PairedDevice{
+		Hostname:  "new-name",
+		Recipient: recipientA,
+		PairedAt:  "2026-02-03T04:05:06Z",
+	})
+	updated = updated.AddPairedDevice(PairedDevice{
+		Hostname:  "second",
+		Recipient: recipientB,
+		PairedAt:  "2026-03-04T05:06:07Z",
+	})
+	if original.Paired[0].Hostname != "old-name" || len(original.Paired) != 1 {
+		t.Fatalf("AddPairedDevice mutated receiver: %#v", original)
+	}
+	if len(updated.Paired) != 2 || updated.Paired[0].Hostname != "new-name" || updated.Paired[1].Hostname != "second" {
+		t.Fatalf("merged paired devices = %#v", updated.Paired)
+	}
+	if err := SaveState(paths, updated); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadState(paths); !reflect.DeepEqual(got, updated) {
+		t.Fatalf("paired state roundtrip = %#v, want %#v", got, updated)
+	}
+	encoded, err := os.ReadFile(paths.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "\"lastSyncCommit\": \"keep-me\",\n  \"paired\":") {
+		t.Fatalf("paired field was not serialized after lastSyncCommand fields: %s", encoded)
+	}
+	displays := PairedDisplay(updated)
+	if len(displays) != 2 || displays[0] != "new-name（"+recipientA[:12]+"…"+recipientA[len(recipientA)-4:]+"）" {
+		t.Fatalf("paired display = %#v", displays)
+	}
+
+	if err := os.WriteFile(paths.StateFile, []byte(`{"version":1,"lastSyncCommit":"survives","paired":[{"hostname":"ok","recipient":"`+recipientA+`","pairedAt":"now"},{"hostname":"broken","recipient":7,"pairedAt":"now"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := LoadState(paths)
+	if got.LastSyncCommit != "survives" || len(got.Paired) != 0 {
+		t.Fatalf("malformed paired field should be ignored without losing state: %#v", got)
+	}
+}
+
 func TestStoreRoundTripClearsAdapterAndDerivesKind(t *testing.T) {
 	paths := GetHomerPaths(func(string) string { return t.TempDir() })
 	config := testConfig()

@@ -111,12 +111,13 @@ func plaintextSamples(plaintext []byte) [][]byte {
 	return samples
 }
 
-// ciphertextLooksSafe applies the vault self-check before any bytes reach
+// CiphertextLooksSafe applies the vault self-check before any bytes reach
 // disk. The samples catch partial leakage at the beginning, middle, and end;
 // the full byte equality check is the explicit fallback for short plaintexts,
 // for which rejecting every short substring would create random-match false
-// positives.
-func ciphertextLooksSafe(ciphertext, plaintext []byte) bool {
+// positives. It is exported for pair's preflight path; the behavior is kept
+// identical to the original vault write guard.
+func CiphertextLooksSafe(ciphertext, plaintext []byte) bool {
 	if len(ciphertext) == 0 {
 		return false
 	}
@@ -129,6 +130,12 @@ func ciphertextLooksSafe(ciphertext, plaintext []byte) bool {
 		}
 	}
 	return true
+}
+
+// Keep the package-local spelling used by the pre-v1.3 write path so its
+// behavior and call sites remain unchanged.
+func ciphertextLooksSafe(ciphertext, plaintext []byte) bool {
+	return CiphertextLooksSafe(ciphertext, plaintext)
 }
 
 func integrityError() error {
@@ -155,6 +162,17 @@ func EncryptSecretToFile(crypto AgeCryptoPort, p core.HomerPaths, name string, p
 	}
 	if !ciphertextLooksSafe(ciphertext, plaintext) {
 		return integrityError()
+	}
+	return atomicWriteVaultFile(file, ciphertext)
+}
+
+// WriteVaultCiphertext atomically stores an already-encrypted payload in the
+// local vault. The payload is intentionally not re-encrypted or parsed here:
+// the join side has already verified it before asking the vault to persist it.
+func WriteVaultCiphertext(p core.HomerPaths, name string, ciphertext []byte) error {
+	file, err := SecretFilePath(p, name)
+	if err != nil {
+		return err
 	}
 	return atomicWriteVaultFile(file, ciphertext)
 }
