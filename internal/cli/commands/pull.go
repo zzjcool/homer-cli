@@ -7,6 +7,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/backup"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/manifest"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
@@ -30,6 +31,13 @@ const (
 	PullStatusError           PullStatus = "error"
 )
 
+// ManifestApplyReport is shared by pull and home so both commands expose the
+// same additive JSON shape for manifest installations.
+type ManifestApplyReport struct {
+	Installed []string `json:"installed"`
+	Failed    []string `json:"failed"`
+}
+
 // PullReport is deliberately a value report rather than an error-returning
 // API. This keeps --json parseable even when a precondition or an apply step
 // fails: the dispatcher can render the same shape for every exit-1 outcome.
@@ -38,6 +46,7 @@ type PullReport struct {
 	Status    PullStatus                 `json:"status"`
 	Applied   syncx.ApplyResult          `json:"applied"`
 	Conflicts []syncx.PullConflictAction `json:"conflicts"`
+	Manifest  *ManifestApplyReport       `json:"manifest,omitempty"`
 	Commit    string                     `json:"commit,omitempty"`
 	Warnings  []string                   `json:"warnings"`
 	Errors    []string                   `json:"errors"`
@@ -52,6 +61,48 @@ func newPullCommandReport(status PullStatus) PullReport {
 		Warnings:  []string{},
 		Errors:    []string{},
 	}
+}
+
+func emptyManifestApplyReport() *ManifestApplyReport {
+	return &ManifestApplyReport{Installed: []string{}, Failed: []string{}}
+}
+
+// applyManifestTasks preserves the manifest engine's continue-on-error
+// behavior while adapting its result to the command report and warning
+// contract. The engine's Failure intentionally carries only ID/message; the
+// task list supplies the category context required by the CLI report.
+func applyManifestTasks(tasks []manifest.Task, port manifest.CommandPort, warnings *[]string) *ManifestApplyReport {
+	result := manifest.ApplyTasks(tasks, port)
+	report := &ManifestApplyReport{
+		Installed: append([]string{}, result.Installed...),
+		Failed:    make([]string, 0, len(result.Failed)),
+	}
+	for _, failure := range result.Failed {
+		entry := manifestFailureRef(tasks, failure)
+		report.Failed = append(report.Failed, entry)
+		if warnings != nil {
+			*warnings = append(*warnings, "manifest 安装失败: "+entry)
+		}
+	}
+	return report
+}
+
+func manifestFailureRef(tasks []manifest.Task, failure manifest.Failure) string {
+	for _, task := range tasks {
+		for _, id := range task.IDs {
+			if id == failure.ID {
+				return fmt.Sprintf("%s/%s:%s: %s", task.AdapterID, task.Category, failure.ID, failure.Message)
+			}
+		}
+	}
+	return fmt.Sprintf("%s: %s", failure.ID, failure.Message)
+}
+
+func pullManifestCommands(deps *PullDeps) manifest.CommandPort {
+	if deps == nil {
+		return nil
+	}
+	return deps.Commands
 }
 
 func (report PullReport) ExitCode() int {
@@ -187,6 +238,15 @@ func BuildPullPreview(sources syncx.SyncSources, plan syncx.PullPlan) string {
 	return strings.Join(lines, "\n")
 }
 
+func pullConfirmationPreview(sources syncx.SyncSources, plan syncx.PullPlan, tasks []manifest.Task) string {
+	preview := BuildPullPreview(sources, plan)
+	manifestPreview := syncx.BuildManifestPreview(tasks)
+	if manifestPreview == "" {
+		return preview
+	}
+	return preview + "\n" + manifestPreview
+}
+
 // RunPull implements the frozen pull sequence. In particular, all four
 // repository/store checks happen before collection or any tool-directory
 // write, and a pull leaving conflicts deliberately keeps state at preFfHead
@@ -257,20 +317,27 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 	warnings := append([]string{}, sources.Warnings...)
 	sourceErrors := append([]string{}, sources.Errors...)
 	plan := syncx.PlanPull(*config, sources.Base, sources.Local, sources.Remote)
-	if len(plan.Actions) == 0 {
+	remainingPlan, manifestTasks, manifestWarnings := syncx.SplitManifestActions(*config, plan, sources.Local)
+	warnings = append(warnings, manifestWarnings...)
+	if len(remainingPlan.Actions) == 0 && len(manifestTasks) == 0 {
 		report = newPullCommandReport(PullStatusNoDrift)
 		report.Warnings = warnings
 		report.Errors = sourceErrors
 		return report
 	}
 
+	manifestReport := (*ManifestApplyReport)(nil)
+	if len(manifestTasks) > 0 {
+		manifestReport = emptyManifestApplyReport()
+	}
 	if !options.Yes {
-		confirmed := promptConfirm(depsUI(deps), BuildPullPreview(sources, plan)+"\n\n以上变更将应用到本机工具目录（受影响文件会先备份）。是否继续？", false)
+		confirmed := promptConfirm(depsUI(deps), pullConfirmationPreview(sources, remainingPlan, manifestTasks)+"\n\n以上变更将应用到本机工具目录（受影响文件会先备份）。是否继续？", false)
 		if !confirmed {
 			if depsUI(deps) == nil && !isTTY() {
 				warnings = append(warnings, "非交互环境无法确认，已中止；如需自动应用请加 --yes")
 			}
 			report = newPullCommandReport(PullStatusAborted)
+			report.Manifest = manifestReport
 			report.Warnings = warnings
 			report.Errors = sourceErrors
 			return report
@@ -281,11 +348,12 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 	applied := emptyApplyResult()
 	commit := ""
 	if !noApply {
-		applied, err = syncx.ApplyPullActions(paths, *config, plan, syncx.ApplyPullActionsOptions{Backup: true, Command: "pull"})
+		applied, err = syncx.ApplyPullActions(paths, *config, remainingPlan, syncx.ApplyPullActionsOptions{Backup: true, Command: "pull"})
 		if err != nil {
 			report = newPullCommandReport(PullStatusError)
 			report.Applied = applied
-			report.Conflicts = pullConflicts(plan)
+			report.Conflicts = pullConflicts(remainingPlan)
+			report.Manifest = manifestReport
 			report.Warnings = warnings
 			report.Errors = append(sourceErrors, errorLines(err)...)
 			return report
@@ -294,10 +362,14 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		if config.Backup != nil && config.Backup.Keep != nil {
 			keep = *config.Backup.Keep
 		}
+		if len(manifestTasks) > 0 {
+			manifestReport = applyManifestTasks(manifestTasks, pullManifestCommands(deps), &warnings)
+		}
 		if _, pruneErr := backup.PruneBackups(paths, keep); pruneErr != nil {
 			report = newPullCommandReport(PullStatusError)
 			report.Applied = applied
-			report.Conflicts = pullConflicts(plan)
+			report.Conflicts = pullConflicts(remainingPlan)
+			report.Manifest = manifestReport
 			report.Warnings = warnings
 			report.Errors = append(sourceErrors, errorLines(pruneErr)...)
 			return report
@@ -310,13 +382,14 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		if !ff.OK {
 			report = newPullCommandReport(PullStatusError)
 			report.Applied = applied
-			report.Conflicts = pullConflicts(plan)
+			report.Conflicts = pullConflicts(remainingPlan)
+			report.Manifest = manifestReport
 			report.Warnings = warnings
 			report.Errors = append(sourceErrors, fmt.Sprintf("git merge --ff-only 失败（工具目录已应用，store 未前移）: %s", firstLine(ff.Stderr)))
 			return report
 		}
 		commit = git.headCommit(paths.Home)
-		conflicts := pullConflicts(plan)
+		conflicts := pullConflicts(remainingPlan)
 		nextBase := commit
 		if len(conflicts) > 0 {
 			nextBase = preFfHead
@@ -326,6 +399,7 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 				report = newPullCommandReport(PullStatusError)
 				report.Applied = applied
 				report.Conflicts = conflicts
+				report.Manifest = manifestReport
 				report.Commit = commit
 				report.Warnings = warnings
 				report.Errors = append(sourceErrors, errorLines(stateErr)...)
@@ -336,7 +410,7 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		}
 	}
 
-	conflicts := pullConflicts(plan)
+	conflicts := pullConflicts(remainingPlan)
 	errorsOut := append([]string{}, sourceErrors...)
 	if len(conflicts) > 0 {
 		errorsOut = append(errorsOut, fmt.Sprintf("检测到 %d 个冲突（已保留本地）：请运行 `homer merge` 逐项裁决。", len(conflicts)))
@@ -349,6 +423,7 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 	report.OK = len(conflicts) == 0
 	report.Applied = applied
 	report.Conflicts = conflicts
+	report.Manifest = manifestReport
 	report.Commit = commit
 	report.Warnings = warnings
 	report.Errors = errorsOut
@@ -383,6 +458,12 @@ func RenderPullReport(report PullReport) string {
 	if report.Commit != "" {
 		lines = append(lines, "  同步提交: "+report.Commit)
 	}
+	if report.Manifest != nil {
+		lines = append(lines, fmt.Sprintf("  安装扩展: %d 成功 / %d 失败", len(report.Manifest.Installed), len(report.Manifest.Failed)))
+		for _, failure := range report.Manifest.Failed {
+			lines = append(lines, "  ✗ manifest: "+failure)
+		}
+	}
 	for _, conflict := range report.Conflicts {
 		lines = append(lines, fmt.Sprintf("  ⚡ 冲突: %s (%s)", pullTarget(conflict), conflict.Reason))
 	}
@@ -403,6 +484,10 @@ func RenderPullJSON(report PullReport) string {
 		"applied":   applyResultValue(report.Applied),
 		"conflicts": pullActionsValue(report.Conflicts),
 	}
+	if report.Manifest != nil {
+		keys = append(keys, "manifest")
+		values["manifest"] = manifestApplyReportValue(report.Manifest)
+	}
 	if report.Commit != "" {
 		keys = append(keys, "commit")
 		values["commit"] = report.Commit
@@ -417,6 +502,16 @@ func RenderPullJSON(report PullReport) string {
 // allowing the shared ordered-json helpers in push.go to remain private to the
 // command package.
 type orderedJSONValue = orderedjson.Value
+
+func manifestApplyReportValue(report *ManifestApplyReport) orderedjson.Value {
+	return &orderedjson.Object{
+		Keys: []string{"installed", "failed"},
+		M: map[string]orderedjson.Value{
+			"installed": stringArrayValue(report.Installed),
+			"failed":    stringArrayValue(report.Failed),
+		},
+	}
+}
 
 func applyResultValue(result syncx.ApplyResult) orderedjson.Value {
 	keys := []string{"written", "deleted", "conflicts"}

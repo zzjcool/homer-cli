@@ -11,6 +11,7 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gitx"
+	"github.com/zzjcool/homer-cli/internal/manifest"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 	"github.com/zzjcool/homer-cli/internal/secretscan"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
@@ -75,11 +76,12 @@ type PushDeps struct {
 }
 
 type PullDeps struct {
-	UI      any
-	Sources any
-	NoFetch bool
-	NoApply bool
-	Git     any
+	UI       any
+	Sources  any
+	NoFetch  bool
+	NoApply  bool
+	Git      any
+	Commands manifest.CommandPort
 }
 
 type MergeDeps struct {

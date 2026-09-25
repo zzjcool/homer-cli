@@ -13,6 +13,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/backup"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gitx"
+	"github.com/zzjcool/homer-cli/internal/manifest"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
@@ -62,6 +63,7 @@ type HomeReport struct {
 	Cloned       bool                    `json:"cloned"`
 	AdapterIDs   []string                `json:"adapterIds"`
 	FirstContact *HomeFirstContactReport `json:"firstContact,omitempty"`
+	Manifest     *ManifestApplyReport    `json:"manifest,omitempty"`
 	Secrets      HomeSecretsReport       `json:"secrets"`
 	Doctor       *DoctorReport           `json:"doctor,omitempty"`
 	Warnings     []string                `json:"warnings"`
@@ -92,10 +94,11 @@ func (report HomeReport) ExitCode() int {
 // function (rather than a git port) so tests can provide a fake origin while
 // all normal git behavior stays behind gitx.CloneRepo.
 type HomeDeps struct {
-	UI    any
-	Age   agecrypto.AgeCryptoPort
-	Git   any
-	Clone func(repoURL, destDir string) error
+	UI       any
+	Age      agecrypto.AgeCryptoPort
+	Git      any
+	Commands manifest.CommandPort
+	Clone    func(repoURL, destDir string) error
 }
 
 const HOME_USAGE = `用法: homer home <repo-url> [options]
@@ -200,11 +203,15 @@ func homeEnabledAdapterIDs(config core.HomerConfig) []string {
 }
 
 func homeScanLocal(config core.HomerConfig, remote []core.AdapterSnapshot, warnings *[]string) []core.AdapterSnapshot {
+	return homeScanLocalWithCommands(config, remote, warnings, nil)
+}
+
+func homeScanLocalWithCommands(config core.HomerConfig, remote []core.AdapterSnapshot, warnings *[]string, commands manifest.CommandPort) []core.AdapterSnapshot {
 	ids := homeEnabledAdapterIDs(config)
 	local := make([]core.AdapterSnapshot, 0, len(ids))
 	for _, id := range ids {
 		cfg := config.Adapters[id]
-		outcome := adapter.ScanAdapter(id, cfg)
+		outcome := adapter.ScanAdapter(id, cfg, adapter.ScanDeps{Commands: commands})
 		problems := make([]core.ScanProblem, len(outcome.Errors))
 		for i, item := range outcome.Errors {
 			problems[i] = core.ScanProblem{Path: item.Path, Message: item.Message}
@@ -253,6 +260,13 @@ func ensureHomeAdapterRoots(config core.HomerConfig) homeRootEnsureResult {
 		}
 	}
 	return result
+}
+
+func homeManifestCommands(deps *HomeDeps) manifest.CommandPort {
+	if deps == nil {
+		return nil
+	}
+	return deps.Commands
 }
 
 func homeMode(options HomeOptions, deps *HomeDeps) (syncx.FirstContactMode, bool) {
@@ -325,6 +339,39 @@ func BuildHomePreview(config core.HomerConfig, plan syncx.FirstContactPlan, secr
 		}
 	}
 	lines = append(lines, "以上将应用到本机工具目录（受影响文件先备份）与密钥目标路径。是否继续？")
+	return strings.Join(lines, "\n")
+}
+
+func homeManifestGatePreview(tasks []manifest.Task) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	lines := []string{"⚠ 远端配置声明了 manifest 分类，将执行外部命令"}
+	for _, task := range tasks {
+		lines = append(lines, fmt.Sprintf("  manifest %s/%s", task.AdapterID, task.Category))
+		lines = append(lines, "    listCmd: "+task.ListCmd)
+		lines = append(lines, "    applyCmd: "+task.ApplyCmd)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func homeConfirmationPreview(config core.HomerConfig, plan syncx.FirstContactPlan, tasks []manifest.Task, secretNames []string) string {
+	preview := BuildHomePreview(config, plan, secretNames)
+	manifestPreview := syncx.BuildManifestPreview(tasks)
+	gate := homeManifestGatePreview(tasks)
+	if manifestPreview == "" && gate == "" {
+		return preview
+	}
+	lines := strings.Split(preview, "\n")
+	question := lines[len(lines)-1]
+	lines = lines[:len(lines)-1]
+	if manifestPreview != "" {
+		lines = append(lines, manifestPreview)
+	}
+	if gate != "" {
+		lines = append(lines, gate)
+	}
+	lines = append(lines, question)
 	return strings.Join(lines, "\n")
 }
 
@@ -484,7 +531,8 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		return report
 	}
 	scanWarnings := []string{}
-	local := homeScanLocal(*config, remote, &scanWarnings)
+	commands := homeManifestCommands(deps)
+	local := homeScanLocalWithCommands(*config, remote, &scanWarnings, commands)
 	warnings = append(warnings, scanWarnings...)
 	mode, modeOK := homeMode(options, deps)
 	if !modeOK {
@@ -501,7 +549,7 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		if rootResult.Retried {
 			warnings = []string{}
 			refreshedWarnings := []string{}
-			local = homeScanLocal(*config, remote, &refreshedWarnings)
+			local = homeScanLocalWithCommands(*config, remote, &refreshedWarnings, commands)
 			warnings = append(warnings, refreshedWarnings...)
 		}
 		for _, warning := range rootResult.Warnings {
@@ -520,8 +568,23 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 
 	plan := syncx.PlanFirstContact(*config, local, remote, mode)
 	names := agecrypto.SecretNames(config)
-	if !options.Yes && (len(plan.Actions) > 0 || len(names) > 0) {
-		if !promptConfirm(depsHomeUI(deps), BuildHomePreview(*config, plan, names), false) {
+	remainingPlan := syncx.PullPlan{Actions: plan.Actions}
+	manifestTasks := []manifest.Task{}
+	manifestWarnings := []string{}
+	if mode != syncx.FirstContactSkip {
+		remainingPlan, manifestTasks, manifestWarnings = syncx.SplitManifestActions(*config, remainingPlan, local)
+	}
+	warnings = append(warnings, manifestWarnings...)
+	plan.Actions = remainingPlan.Actions
+	manifestReport := (*ManifestApplyReport)(nil)
+	if len(manifestTasks) > 0 {
+		manifestReport = emptyManifestApplyReport()
+	}
+	if options.Yes && len(manifestTasks) > 0 {
+		warnings = append(warnings, fmt.Sprintf("已按 --yes 确认执行远端声明的 manifest 命令（%d 条）", len(manifestTasks)))
+	}
+	if !options.Yes && (len(plan.Actions) > 0 || len(names) > 0 || len(manifestTasks) > 0) {
+		if !promptConfirm(depsHomeUI(deps), homeConfirmationPreview(*config, plan, manifestTasks, names), false) {
 			if depsHomeUI(deps) == nil && !isTTY() {
 				warnings = append(warnings, "非交互环境无法确认，已中止；如需自动归位请加 --yes")
 			}
@@ -529,8 +592,13 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 			report.Cloned = true
 			report.AdapterIDs = homeEnabledAdapterIDs(*config)
 			report.FirstContact = &HomeFirstContactReport{Mode: mode, Applied: emptyApplyResult(), Conflicts: []syncx.PullConflictAction{}}
+			report.Manifest = manifestReport
 			report.Warnings = warnings
-			report.Errors = []string{"已取消：未确认归位（未写入任何工具目录 / 密钥目标，未更新 state）"}
+			if len(manifestTasks) > 0 {
+				report.Errors = []string{"已取消：未确认归位（包含 manifest 外部命令，未写入任何工具目录 / 密钥目标，未更新 state）"}
+			} else {
+				report.Errors = []string{"已取消：未确认归位（未写入任何工具目录 / 密钥目标，未更新 state）"}
+			}
 			return report
 		}
 	}
@@ -543,6 +611,9 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 			report.Errors = errorLines(err)
 			return report
 		}
+	}
+	if len(manifestTasks) > 0 {
+		manifestReport = applyManifestTasks(manifestTasks, commands, &warnings)
 	}
 	head := GitPort{}
 	if deps != nil {
@@ -573,6 +644,7 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 	if err := homePlaceSecrets(paths, *config, crypto, &secretReport, &warnings); err != nil {
 		report.Errors = errorLines(err)
 		report.FirstContact = &HomeFirstContactReport{Mode: mode, Applied: applied, Conflicts: homePlanConflicts(plan)}
+		report.Manifest = manifestReport
 		report.Secrets = secretReport
 		report.Warnings = warnings
 		return report
@@ -587,6 +659,7 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 	report.Cloned = true
 	report.AdapterIDs = homeEnabledAdapterIDs(*config)
 	report.FirstContact = &HomeFirstContactReport{Mode: mode, Applied: applied, Conflicts: homePlanConflicts(plan)}
+	report.Manifest = manifestReport
 	report.Secrets = secretReport
 	report.Doctor = &doctorReport
 	report.Warnings = warnings
@@ -620,6 +693,12 @@ func RenderHomeReport(report HomeReport) string {
 	}
 	if report.FirstContact != nil {
 		lines = append(lines, fmt.Sprintf("  首次对接: %s（写入 %d / 删除 %d / 冲突 %d）", report.FirstContact.Mode, len(report.FirstContact.Applied.Written), len(report.FirstContact.Applied.Deleted), len(report.FirstContact.Conflicts)))
+	}
+	if report.Manifest != nil {
+		lines = append(lines, fmt.Sprintf("  安装扩展: %d 成功 / %d 失败", len(report.Manifest.Installed), len(report.Manifest.Failed)))
+		for _, failure := range report.Manifest.Failed {
+			lines = append(lines, "  ✗ manifest: "+failure)
+		}
 	}
 	if len(report.Secrets.Pulled) > 0 {
 		lines = append(lines, fmt.Sprintf("  密钥归位: %d 个（%s）", len(report.Secrets.Pulled), strings.Join(report.Secrets.Pulled, ", ")))
@@ -667,6 +746,10 @@ func RenderHomeJSON(report HomeReport) string {
 			},
 		}
 		keys = append(keys, "firstContact")
+	}
+	if report.Manifest != nil {
+		values["manifest"] = manifestApplyReportValue(report.Manifest)
+		keys = append(keys, "manifest")
 	}
 	values["secrets"] = &orderedjson.Object{
 		Keys: []string{"pulled", "skipped", "errors"},
