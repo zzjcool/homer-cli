@@ -215,6 +215,84 @@ identity 时会安全地跳过密钥并给出补齐步骤。配置归位不覆�
 machine、required 八项。warn（例如离线、工具未安装、`__REQUIRED__` 残留）不改变
 退出码；只有 fail 返回 1。`--offline` 可在无网络 CI 使用。
 
+## 在线配对（v1.3）
+
+`homer pair` 是密钥配对的单次快车道：tailcat 只负责建立一次性的
+WireGuard/DERP 字节管道，Homer 自己的协议负责传输；管道中的每个密钥仍是
+age 密文。pair 不同步 `store/`，也不自动提交或推送 `homer.json`。
+
+### 用法
+
+两台机器先各自完成 `homer init` / `homer home`，A 端有可读取的
+`secrets.files` 目标，B 端运行过 `homer secret keygen`：
+
+```sh
+# 机器 A：输出一次性地址并等待 B
+homer pair --home ~/.homer --yes
+
+# 机器 B：把地址只通过当面或私密信道带入，不要粘贴到 git、issue、群聊
+homer pair '<tc-addr>' --home ~/.homer --yes
+```
+
+A 端收到 B 的 hostname 与 recipient 指纹后才会继续；TTY 默认会询问，脚本或
+非 TTY 必须给 A 端 `--yes`。B 端的 `--yes` 是兼容选项、不产生额外确认。
+`--json` 适合自动化，但 JSON 中的 `addr` 仍是 bearer secret，不能写入共享日志。
+配对成功后 A 的 `homer.json` 会追加 B recipient，但 pair **不自动 commit**：
+
+```sh
+# A：让旧的 git 密钥通道也能解给 B，并提交 homer.json / vault
+homer secret push --yes
+homer push --yes
+
+# 没有 tailcat 时，B 仍可走原有 git 通道
+homer secret pull --yes
+```
+
+`secret push` 会用 `secrets.recipients` 的全部 recipient 重新加密 vault；这一步
+使 B 既能使用 pair 收到的密钥，也能在后续从 git 通道 pull。地址泄露本身不能解开
+age 密文，但仍应按敏感 bearer secret 处理。
+
+### 安装 tailcat、`--key=new` 与 DERP
+
+pair 需要可选的 tailcat CLI，不把 tailcat 作为 Go module 依赖。请按官方
+[INSTALL 指引](https://github.com/tailscale/tailcat)安装（建议 v0.7.0+），并确认
+两台机器的 `PATH` 都能找到 `tailcat`。Homer 会明确启动：
+
+```text
+tailcat --key=new
+```
+
+而不是裸 `tailcat`。`--key=new` 强制本次 serve 使用 ephemeral key，避免机器上已有
+`~/.config/tailcat/keys/default.private.json` 时复用 saved default key，造成地址
+跨会话可复用。地址经 `TAILCAT_ADDR_FILE` 送回 Homer，地址文件为 0600，pair 结束
+后删除；不要把地址存进配置仓库。
+
+两端直连时延通常最低；无法直连时会退到公网 DERP。DERP 受网络、区域、map 拉取和
+限流影响，没有端到端 SLA，跨区域延迟可能达到秒级，因此 pair 的接受/步骤超时按
+慢路径留有余量。对低延迟或合规部署，可以运行自建 derper，并给 tailcat transport
+显式注入自建 map：`TAILCAT_DERPMAP_URL=https://<your-map>/derpmap`（集成方使用
+`TailcatOptions.ExtraEnv` 传入；Homer 不会把任意 ambient environment 静默泄露给
+子进程）。先在小范围用 `tailcat ping` 观察 `via DERP(...)` 或 `via IP:port`，再决定
+是否切换；自建 derper 的证书、ACL、可达端口和 map 发布由部署方负责。
+
+### pair 安全模型（S1–S6）
+
+- **S1 地址生命周期**：`--key=new`、one-shot serve、0600 临时地址文件和结束时
+  删除共同限制地址的生命周期；地址只带外交换，并在输出中提示“勿入 git/聊天记录”。
+- **S2 A 端确认门**：hello 之后先显示 hostname 与 recipient 指纹（不回显完整 key），
+  再确认；拒绝或非 TTY 未给 `--yes` 时不写 `homer.json` / `state.json`，不发送密文。
+- **S3 bundle 原子性**：A 先把全部 destination 明文读入内存，再用 A 现有 recipient
+  加 B recipient 重新加密；B 全部解密验证成功后才备份、原子写 vault 和 0600 destination。
+- **S4 帧与路径防御**：单帧上限 16 MiB、bundle 上限 64 MiB；文件名必须属于本机
+  `secrets.files`，目标路径只从本机配置解析，拒绝未知密钥名和路径穿越。
+- **S5 中断清理**：pair 连接、serve 和 tailcat 子进程组在退出/中断时统一关闭，
+  不留孤儿 tailcat；A 已写入 recipient 但未收到 ack 时会 warning，B 公钥可保留或重试。
+- **S6 密钥分层**：tailcat 提供传输层 WireGuard/DERP，age 提供 at-rest 与 bundle
+  端到端内容加密，git push/pull 是无 tailcat 时仍可用的兜底通道。
+
+缺少 tailcat 时 `homer pair` 会明确以 exit 1 提示官方安装链接和 git 回退，不会
+静默降级或破坏既有 git 主通道。
+
 ### 版本与诊断
 
 ```sh
@@ -276,8 +354,8 @@ sh -n install.sh
   可解性检查。
 - `pull` / `merge` 检测到两台机器都推送造成的分叉时，会给出两条路径：放弃另一机改动就
   在本机 `homer push`，保留两边则 `git -C <home> pull --rebase` 后 `homer merge`。
-- 不包含 M4/M5 的 `sync`、`pair`、tailcat、插件机制与并发锁；真实 HOME / 真实远端
-  不属于自动化测试对象。
+- 不包含 M4/M5 的 `sync`、插件机制与并发锁；pair 只做一次一台的密钥快车道，
+  不同步 store。真实双机、真实 DERP 路径和真实 HOME 仍需按发布清单人工验收。
 
 ## License
 
