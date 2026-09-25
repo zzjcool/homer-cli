@@ -249,7 +249,7 @@ homer 作为 pi 子进程运行时**不能抢占 TTY**。模式：homer 子进�
 **验收场景 = 真实场景**：新机器上
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<user>/homer-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/<user>/homer-cli/master/install.sh | sh
 homer home https://github.com/<user>/my-config.git
 # → pi + herdr + opencode 的配置、skills、extensions、密钥全部归位
 # → pi 启动即用，herdr agents 就位，opencode 配置生效

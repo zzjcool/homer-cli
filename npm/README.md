@@ -4,7 +4,7 @@
 primary installation channel is the POSIX release installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zzjcool/homer-cli/master/install.sh | sh
 ```
 
 The npm package runs a best-effort `postinstall` download for Linux/macOS
