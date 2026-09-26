@@ -57,10 +57,10 @@ func TestRunSelectionWizardAdapterCategoryEntryOff(t *testing.T) {
 			values := optionValues(options)
 			result := make([]string, 0, len(values))
 			for index, value := range values {
-						if value == WizardBackValue || index == len(values)-2 {
-								continue
-						}
-						result = append(result, value)
+				if value == WizardBackValue || index == len(values)-2 {
+					continue
+				}
+				result = append(result, value)
 			}
 			return result, nil
 		default:

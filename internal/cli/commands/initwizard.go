@@ -222,22 +222,22 @@ func RunSelectionWizard(port WizardPort, state WizardState) (WizardSelection, er
 					if entry.Key == "" {
 						continue
 					}
-						label := entry.Label
-						if label == "" {
-								label = entry.Key
-						}
-						entryOptions = append(entryOptions, WizardOption{Value: entry.Key, Label: label})
-						if entry.Included {
-							entryChecked = append(entryChecked, entry.Key)
-						}
+					label := entry.Label
+					if label == "" {
+						label = entry.Key
 					}
+					entryOptions = append(entryOptions, WizardOption{Value: entry.Key, Label: label})
+					if entry.Included {
+						entryChecked = append(entryChecked, entry.Key)
+					}
+				}
 				if len(entryOptions) == 0 {
 					continue
 				}
 
 				entryDefault := entryChecked
 				if previous, ok := lastEntryChoice[adapterState.ID][category.Name]; ok {
-						entryDefault = previous
+					entryDefault = previous
 				}
 
 			entryLoop:
