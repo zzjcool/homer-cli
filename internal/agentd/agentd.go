@@ -1,0 +1,552 @@
+package agentd
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/hub"
+	"github.com/zzjcool/homer-cli/internal/web"
+)
+
+type Config struct {
+	HomerHome     string
+	Token         string
+	ListenAddr    string
+	AdvertiseURL  string
+	ConnectURL    string
+	HubURL        string
+	AgentID       string
+	PollInterval  time.Duration
+	PollWait      time.Duration
+	ReportTimeout time.Duration
+}
+
+func (c Config) Mode() (hub.AgentMode, error) {
+	listen := strings.TrimSpace(c.ListenAddr) != ""
+	connect := strings.TrimSpace(c.ConnectURL) != ""
+	if listen == connect {
+		return "", errors.New("agent 必须恰好指定 --listen 或 --connect")
+	}
+	if listen {
+		return hub.AgentModeListen, nil
+	}
+	return hub.AgentModeConnect, nil
+}
+
+var agentIDInvalidChar = regexp.MustCompile(`[^a-z0-9-]+`)
+var agentIDSequence uint32
+
+func DefaultAgentID() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "agent"
+	}
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	hostname = agentIDInvalidChar.ReplaceAllString(hostname, "-")
+	hostname = strings.Trim(hostname, "-")
+	if hostname == "" {
+		hostname = "agent"
+	}
+	if hostname[0] < 'a' || hostname[0] > 'z' {
+		if hostname[0] < '0' || hostname[0] > '9' {
+			hostname = "agent-" + hostname
+		}
+	}
+	var suffix [2]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		fallback := atomic.AddUint32(&agentIDSequence, 1)
+		suffix[0] = byte(fallback >> 8)
+		suffix[1] = byte(fallback)
+	}
+	return hostname + "-" + hex.EncodeToString(suffix[:])
+}
+
+type Daemon struct {
+	cfg  Config
+	exec Executor
+}
+
+func New(cfg Config, exec Executor) *Daemon {
+	if strings.TrimSpace(cfg.AgentID) == "" {
+		cfg.AgentID = DefaultAgentID()
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 2 * time.Second
+	}
+	if cfg.PollWait <= 0 {
+		cfg.PollWait = 25 * time.Second
+	}
+	if cfg.ReportTimeout <= 0 {
+		cfg.ReportTimeout = 90 * time.Second
+	}
+	if exec == nil {
+		exec = NewLocalExecutor(cfg.HomerHome)
+	}
+	return &Daemon{cfg: cfg, exec: exec}
+}
+
+func (d *Daemon) Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if d == nil {
+		return errors.New("nil agent daemon")
+	}
+	mode, err := d.cfg.Mode()
+	if err != nil {
+		return err
+	}
+	if d.exec == nil {
+		return errors.New("agent executor is required")
+	}
+	switch mode {
+	case hub.AgentModeListen:
+		return d.runListen(ctx)
+	case hub.AgentModeConnect:
+		return d.runConnect(ctx)
+	default:
+		return fmt.Errorf("unsupported agent mode %q", mode)
+	}
+}
+
+func (d *Daemon) runListen(ctx context.Context) error {
+	hostname := localHostname()
+	identity := &web.AgentIdentity{
+		AgentID:  d.cfg.AgentID,
+		Hostname: hostname,
+		Version:  web.Version,
+	}
+	webServer, err := web.NewServer(web.ServeOptions{
+		Addr:      d.cfg.ListenAddr,
+		HomerHome: d.cfg.HomerHome,
+		Token:     d.cfg.Token,
+		Identity:  identity,
+	})
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", d.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+	httpServer := &http.Server{
+		Handler:           webServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      90 * time.Second,
+	}
+	serveDone := make(chan error, 1)
+	go func() {
+		err := httpServer.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		serveDone <- err
+	}()
+
+	registerCtx, stopRegister := context.WithCancel(ctx)
+	var registerWG sync.WaitGroup
+	if strings.TrimSpace(d.cfg.HubURL) != "" {
+		registerWG.Add(1)
+		go func() {
+			defer registerWG.Done()
+			d.listenRegisterLoop(registerCtx, hostname)
+		}()
+	}
+
+	select {
+	case <-ctx.Done():
+		stopRegister()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		cancel()
+		registerWG.Wait()
+		if shutdownErr != nil {
+			return shutdownErr
+		}
+		return nil
+	case err := <-serveDone:
+		stopRegister()
+		registerWG.Wait()
+		return err
+	}
+}
+
+func (d *Daemon) listenRegisterLoop(ctx context.Context, hostname string) {
+	backoff := time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := d.register(ctx, hub.AgentModeListen, hostname); err != nil {
+			if !sleepContext(ctx, backoff) {
+				return
+			}
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			continue
+		}
+		backoff = time.Second
+		ticker := time.NewTicker(60 * time.Second)
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			ticker.Stop()
+		}
+	}
+}
+
+func (d *Daemon) runConnect(ctx context.Context) error {
+	hostname := localHostname()
+	if err := d.registerWithRetry(ctx, hub.AgentModeConnect, hostname); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	client := d.agentHTTPClient()
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		task, ok, err := d.poll(ctx, client)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			// A transient hub/network error should not terminate a long-running
+			// daemon. Keep the retry bounded by PollInterval.
+			if !sleepContext(ctx, d.cfg.PollInterval) {
+				return nil
+			}
+			continue
+		}
+		if !ok {
+			if !sleepContext(ctx, d.cfg.PollInterval) {
+				return nil
+			}
+			continue
+		}
+		result := d.execute(ctx, task)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := d.report(ctx, client, task, result); err != nil && ctx.Err() != nil {
+			return nil
+		}
+		if !sleepContext(ctx, d.cfg.PollInterval) {
+			return nil
+		}
+	}
+}
+
+func (d *Daemon) registerWithRetry(ctx context.Context, mode hub.AgentMode, hostname string) error {
+	backoff := time.Second
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := d.register(ctx, mode, hostname); err == nil {
+			return nil
+		}
+		if !sleepContext(ctx, backoff) {
+			return ctx.Err()
+		}
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
+}
+
+func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname string) error {
+	payload := struct {
+		AgentID  string        `json:"agentId"`
+		Hostname string        `json:"hostname"`
+		Mode     hub.AgentMode `json:"mode"`
+		Addr     string        `json:"addr,omitempty"`
+		Version  string        `json:"version,omitempty"`
+	}{
+		AgentID:  d.cfg.AgentID,
+		Hostname: hostname,
+		Mode:     mode,
+		Version:  web.Version,
+	}
+	if mode == hub.AgentModeListen {
+		payload.Addr = d.cfg.AdvertiseURL
+		if strings.TrimSpace(payload.Addr) == "" {
+			payload.Addr = d.cfg.ListenAddr
+		}
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return d.postJSON(ctx, d.endpointURL("register"), body, nil)
+}
+
+func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool, error) {
+	waitSeconds := durationSeconds(d.cfg.PollWait)
+	payload := struct {
+		AgentID     string `json:"agentId"`
+		WaitSeconds int    `json:"waitSeconds"`
+	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return hub.Task{}, false, err
+	}
+	responseBody, err := d.postJSONWithClient(ctx, client, d.endpointURL("poll"), body)
+	if err != nil {
+		return hub.Task{}, false, err
+	}
+	var response struct {
+		OK    bool                   `json:"ok"`
+		Task  *hub.Task              `json:"task"`
+		Error *agentAPIErrorEnvelope `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return hub.Task{}, false, err
+	}
+	if response.Error != nil {
+		return hub.Task{}, false, response.Error.AgentError()
+	}
+	if response.Task == nil {
+		return hub.Task{}, false, nil
+	}
+	return *response.Task, true, nil
+}
+
+func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
+	ctx, cancel := context.WithTimeout(parent, d.cfg.ReportTimeout)
+	defer cancel()
+	result := hub.TaskResult{TaskID: task.TaskID, AgentID: d.cfg.AgentID, Kind: task.Kind}
+	type executionResult struct {
+		report any
+		err    error
+	}
+	completed := make(chan executionResult, 1)
+	go func() {
+		var output any
+		var err error
+		switch task.Kind {
+		case hub.TaskKindStatus:
+			output, err = d.exec.Status(ctx)
+		case hub.TaskKindDiff:
+			output, err = d.exec.Diff(ctx, web.DiffParams{Adapter: task.Options.Adapter, Category: task.Options.Category})
+			if err == nil {
+				output = struct {
+					Text string `json:"text"`
+				}{output.(string)}
+			}
+		case hub.TaskKindPush:
+			output, err = d.exec.Push(ctx, task.Options.Confirm)
+		case hub.TaskKindPull:
+			output, err = d.exec.Pull(ctx, task.Options.Confirm)
+		default:
+			err = fmt.Errorf("unsupported task kind %q", task.Kind)
+		}
+		completed <- executionResult{report: output, err: err}
+	}()
+	select {
+	case output := <-completed:
+		if output.err != nil {
+			result.Error = output.err.Error()
+			return result
+		}
+		encoded, err := json.Marshal(output.report)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		result.OK = taskResultOK(task.Kind, output.report)
+		result.Report = encoded
+		return result
+	case <-ctx.Done():
+		result.Error = fmt.Sprintf("task execution timeout: %v", ctx.Err())
+		return result
+	}
+}
+
+func (d *Daemon) report(ctx context.Context, client *http.Client, task hub.Task, result hub.TaskResult) error {
+	payload := struct {
+		AgentID string          `json:"agentId"`
+		TaskID  string          `json:"taskId"`
+		OK      bool            `json:"ok"`
+		Report  json.RawMessage `json:"report,omitempty"`
+		Error   string          `json:"error,omitempty"`
+	}{
+		AgentID: d.cfg.AgentID,
+		TaskID:  result.TaskID,
+		OK:      result.OK,
+		Report:  result.Report,
+		Error:   result.Error,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	responseBody, err := d.postJSONWithClient(ctx, client, d.endpointURL("report"), body)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		OK    bool                   `json:"ok"`
+		Error *agentAPIErrorEnvelope `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return err
+	}
+	if response.Error != nil {
+		return response.Error.AgentError()
+	}
+	if !response.OK {
+		return errors.New("hub rejected agent report")
+	}
+	return nil
+}
+
+func (d *Daemon) postJSON(ctx context.Context, endpoint string, body []byte, response any) error {
+	client := d.agentHTTPClient()
+	responseBody, err := d.postJSONWithClient(ctx, client, endpoint, body)
+	if err != nil {
+		return err
+	}
+	if response != nil {
+		return json.Unmarshal(responseBody, response)
+	}
+	return nil
+}
+
+func (d *Daemon) postJSONWithClient(ctx context.Context, client *http.Client, endpoint string, body []byte) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if d.cfg.Token != "" {
+		request.Header.Set("Authorization", "Bearer "+d.cfg.Token)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if readErr != nil {
+		return nil, readErr
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		var apiErr agentAPIErrorEnvelope
+		if json.Unmarshal(responseBody, &apiErr) == nil && apiErr.Error != nil && apiErr.Error.Message != "" {
+			return nil, apiErr.AgentError()
+		}
+		return nil, fmt.Errorf("hub returned %s", response.Status)
+	}
+	return responseBody, nil
+}
+
+func (d *Daemon) endpointURL(operation string) string {
+	base := strings.TrimRight(strings.TrimSpace(d.cfg.ConnectURL), "/")
+	if base == "" {
+		base = strings.TrimRight(strings.TrimSpace(d.cfg.HubURL), "/")
+	}
+	return base + "/agent/v1/" + strings.TrimLeft(operation, "/")
+}
+
+func (d *Daemon) agentHTTPClient() *http.Client {
+	timeout := 60 * time.Second
+	if d.cfg.PollWait+5*time.Second > timeout {
+		timeout = d.cfg.PollWait + 5*time.Second
+	}
+	return &http.Client{Timeout: timeout}
+}
+
+type agentAPIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type agentAPIErrorEnvelope struct {
+	Error *agentAPIError `json:"error"`
+}
+
+func (e *agentAPIError) Error() string {
+	if e == nil {
+		return "hub request failed"
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Code != "" {
+		return e.Code
+	}
+	return "hub request failed"
+}
+
+func (e *agentAPIErrorEnvelope) AgentError() error {
+	if e == nil || e.Error == nil {
+		return errors.New("hub request failed")
+	}
+	return e.Error
+}
+
+func durationSeconds(value time.Duration) int {
+	if value <= 0 {
+		return 0
+	}
+	// The wire protocol carries whole seconds. For a deliberately short test
+	// or embedding interval, zero is preferable to rounding up to a full
+	// second: the hub then performs an immediate poll and the caller's
+	// PollInterval controls the cadence.
+	return int(value / time.Second)
+}
+
+func taskResultOK(kind hub.TaskKind, report any) bool {
+	switch kind {
+	case hub.TaskKindPush:
+		return report.(commands.PushReport).OK
+	case hub.TaskKindPull:
+		return report.(commands.PullReport).OK
+	default:
+		return true
+	}
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) bool {
+	if duration <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func localHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		return "localhost"
+	}
+	return hostname
+}

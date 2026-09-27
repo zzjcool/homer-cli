@@ -19,9 +19,10 @@ type AgentInfo struct {
 }
 
 type Registry struct {
-	mu     sync.Mutex
-	agents map[string]*registryAgent
-	tasks  map[string]*registryTask
+	mu         sync.Mutex
+	agents     map[string]*registryAgent
+	tasks      map[string]*registryTask
+	taskOwners map[string]string
 }
 
 type registryAgent struct {
@@ -41,8 +42,9 @@ type registryTask struct {
 
 func NewRegistry() *Registry {
 	return &Registry{
-		agents: make(map[string]*registryAgent),
-		tasks:  make(map[string]*registryTask),
+		agents:     make(map[string]*registryAgent),
+		tasks:      make(map[string]*registryTask),
+		taskOwners: make(map[string]string),
 	}
 }
 
@@ -99,6 +101,36 @@ func (r *Registry) Get(agentID string) (AgentInfo, bool) {
 	return agent.info, true
 }
 
+// taskInfo is a read-only protocol helper used by the report endpoint. It is
+// deliberately unexported so the frozen Registry API remains unchanged.
+func (r *Registry) taskInfo(taskID string) (Task, string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	state, ok := r.tasks[taskID]
+	if !ok || state.expired || state.submitted {
+		return Task{}, "", false
+	}
+	for agentID, agent := range r.agents {
+		for _, queued := range agent.queue {
+			if queued.TaskID == taskID {
+				return state.task, agentID, true
+			}
+		}
+	}
+	// A task is removed from the queue when a poller claims it. At that point
+	// the task state still records enough information for the endpoint to
+	// validate the reporting agent without exposing mutable Registry state.
+	return state.task, stateAgentIDLocked(r, taskID), state.inFlight
+}
+
+// stateAgentIDLocked finds the owner from the immutable queue/agent relation.
+// The task owner is populated by Enqueue through taskOwners; this helper is
+// kept separate to make the read-only lookup easy to audit.
+func stateAgentIDLocked(r *Registry, taskID string) string {
+	return r.taskOwners[taskID]
+}
+
 func (r *Registry) List() []AgentInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -132,11 +164,15 @@ func (r *Registry) Enqueue(agentID string, task Task) error {
 	if _, ok := r.tasks[task.TaskID]; ok {
 		return fmt.Errorf("hub: task %q already exists", task.TaskID)
 	}
+	if task.CreatedAt.IsZero() {
+		task.CreatedAt = time.Now()
+	}
 
 	r.tasks[task.TaskID] = &registryTask{
 		task: task,
 		done: make(chan struct{}),
 	}
+	r.taskOwners[task.TaskID] = agentID
 	agent.queue = append(agent.queue, task)
 	r.notifyAgentLocked(agent)
 	return nil
@@ -225,6 +261,7 @@ func (r *Registry) Submit(result TaskResult) error {
 	state.result = cloneTaskResult(result)
 	state.inFlight = false
 	state.submitted = true
+	delete(r.taskOwners, result.TaskID)
 	close(state.done)
 	return nil
 }
@@ -320,6 +357,7 @@ func (r *Registry) expireTaskLocked(taskID string, state *registryTask) {
 	if current, ok := r.tasks[taskID]; ok && current == state {
 		delete(r.tasks, taskID)
 	}
+	delete(r.taskOwners, taskID)
 	close(state.done)
 }
 
