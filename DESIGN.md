@@ -291,6 +291,12 @@ MVP 不做（v2+）：tailcat 集成、adapter 插件市场、claude/codex adapt
 3. **M3（密钥层 + home）**：age 集成、curl 安装脚本、herdr/opencode adapter —— 验收场景达成
 4. **M4（pi 扩展形态）**：footer 状态、/homer 命令、自动 pull
 5. **M5（v2）**：tailcat 快车道、adapter 插件机制、更多 adapter
+6. **M6（hub 形态，2026-09-27 立项）**：`homer serve` 本地 HTTP API + 内嵌 Web UI；
+   `homer agent` 双模式（--listen 被中心直连 / --connect 主动拨出）；hub 多机
+   视图（agent 注册表、远程 status/diff/pull/push）。动机：用户主机多、
+   NAT 内外混合，中心节点统一采集/分发；hub 是 git remote 的代理人，
+   不自建存储，同步语义全部复用 engine/sync/gitx。详见
+   docs/plan/2026-09-27-hub.md 与 docs/plan/2026-09-27-hub-plan.md。
 
 ---
 
