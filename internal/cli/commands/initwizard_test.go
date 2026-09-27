@@ -324,10 +324,14 @@ func TestRunInitReInitPreservesCustomFieldsAndSkipsStore(t *testing.T) {
 		if call == 0 {
 			return values, nil
 		}
-		if strings.Contains(options[0].Label, "settings") && len(values) == 1 {
+		// Sentinel-aware script: never checks the back row, and unchecks
+		// the settings category on the settings-only question (the only
+		// real option once the back sentinel is stripped).
+		real := stripBack(values)
+		if strings.Contains(options[0].Label, "settings") && len(real) == 1 {
 			return nil, nil
 		}
-		return values, nil
+		return real, nil
 	}}
 	var saved *core.HomerConfig
 	writes := 0
@@ -432,6 +436,108 @@ func TestRunInitForcePreservesNonBuiltinAndResetsBuiltin(t *testing.T) {
 	}
 	if saved.Backup == nil || saved.Backup.Keep == nil || *saved.Backup.Keep != *config.Backup.Keep || saved.Secrets == nil || !reflect.DeepEqual(saved.Secrets.Files, config.Secrets.Files) || !reflect.DeepEqual(saved.Secrets.IgnorePaths, config.Secrets.IgnorePaths) {
 		t.Fatalf("force did not preserve backup/secrets: got %#v/%#v want %#v/%#v", saved.Backup, saved.Secrets, config.Backup, config.Secrets)
+	}
+}
+
+func TestRunSelectionWizardBackWithUnchangedAdaptersStaysPut(t *testing.T) {
+	// The accidental-select-all trap: the answer includes the back sentinel
+	// (e.g. a scripted "select all" that does not know about the sentinel),
+	// the user re-confirms the same adapters, and the wizard must return to
+	// the same category question with the in-progress toggles restored
+	// instead of hanging between the two questions forever.
+	var categoryVisits int
+	wizard := &scriptedWizard{selectFn: func(_ int, message string, _ []WizardOption, checked []string) ([]string, error) {
+		if strings.Contains(message, "的分类") {
+			categoryVisits++
+			if categoryVisits == 1 {
+				return []string{"settings", WizardBackValue}, nil
+			}
+			// Second visit keeps the restored in-progress toggles.
+			return append([]string(nil), checked...), nil
+		}
+		return append([]string(nil), checked...), nil
+	}}
+	state := WizardState{Adapters: []WizardAdapter{
+		{ID: "pi", Enabled: true, Categories: []WizardCategory{
+			{Name: "settings", Enabled: true, FileCount: 1},
+		}},
+	}}
+	selection, err := RunSelectionWizard(wizard, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if categoryVisits != 2 {
+		t.Fatalf("category visits = %d, want 2", categoryVisits)
+	}
+	if !selection.Adapters["pi"] || !selection.Categories["pi"]["settings"] {
+		t.Fatalf("selection = %#v", selection)
+	}
+	// The restored second visit must not carry the sentinel as a default.
+	second := wizard.calls[len(wizard.calls)-1]
+	for _, value := range second.checked {
+		if value == WizardBackValue {
+			t.Fatal("back sentinel leaked into restored defaults")
+		}
+	}
+}
+
+func TestRunSelectionWizardBackInvalidatesEarlierAdapter(t *testing.T) {
+	// Going back from a later adapter's category question and unchecking
+	// an earlier adapter must invalidate that adapter's recorded selection:
+	// the walk replays and the unchecked adapter ends up with all
+	// categories disabled instead of keeping its previously confirmed state.
+	adapterVisits := 0
+	herdrVisits := 0
+	var herdrDefaults [][]string
+	wizard := &scriptedWizard{selectFn: func(_ int, message string, options []WizardOption, checked []string) ([]string, error) {
+		switch {
+		case strings.Contains(message, "选择要初始化的 adapter"):
+			adapterVisits++
+			if adapterVisits == 1 {
+				return []string{"pi", "herdr"}, nil
+			}
+			// After the back navigation: herdr only.
+			return []string{"herdr"}, nil
+		case strings.Contains(message, "herdr 的分类"):
+			herdrVisits++
+			herdrDefaults = append(herdrDefaults, append([]string(nil), checked...))
+			if herdrVisits == 1 {
+				return []string{WizardBackValue}, nil // back with nothing else checked
+			}
+			return stripBack(optionValues(options)), nil
+		default:
+			// pi's category question: confirm everything (no sentinel).
+			return stripBack(optionValues(options)), nil
+		}
+	}}
+	state := WizardState{Adapters: []WizardAdapter{
+		{ID: "pi", Enabled: true, Categories: []WizardCategory{
+			{Name: "settings", Enabled: true, FileCount: 1},
+		}},
+		{ID: "herdr", Enabled: true, Categories: []WizardCategory{
+			{Name: "config", Enabled: true, FileCount: 1},
+		}},
+	}}
+	selection, err := RunSelectionWizard(wizard, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapterVisits != 2 || herdrVisits != 2 {
+		t.Fatalf("adapter visits = %d, herdr visits = %d; want 2/2", adapterVisits, herdrVisits)
+	}
+	// The replayed herdr question must fall back to the config defaults
+	// ([config]), NOT to an empty selection from the abandoned back answer.
+	if len(herdrDefaults) != 2 || len(herdrDefaults[1]) != 1 || herdrDefaults[1][0] != "config" {
+		t.Fatalf("herdr defaults across visits = %#v, want second visit [config]", herdrDefaults)
+	}
+	if selection.Adapters["pi"] {
+		t.Fatal("unchecking pi after answering it kept it selected")
+	}
+	if selection.Categories["pi"]["settings"] {
+		t.Fatal("pi category survived being unchecked at the adapter level")
+	}
+	if !selection.Adapters["herdr"] {
+		t.Fatal("herdr was dropped")
 	}
 }
 
