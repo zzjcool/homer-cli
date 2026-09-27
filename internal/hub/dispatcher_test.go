@@ -143,3 +143,82 @@ func hasAgentCode(err error, code string, status int) bool {
 	var agentErr *web.AgentError
 	return errors.As(err, &agentErr) && agentErr.Code == code && agentErr.Status == status
 }
+
+func TestDispatcherListenNonOKMapping(t *testing.T) {
+	// A listen agent answering 5xx or non-JSON maps to agent-unreachable.
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	registry := NewRegistry()
+	if err := registry.Register(AgentInfo{AgentID: "err-agent", Mode: AgentModeListen, Addr: failing.URL}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(registry, "")
+	if _, err := dispatcher.AgentStatus(context.Background(), "err-agent"); err == nil || !hasAgentCode(err, "agent-unreachable", http.StatusBadGateway) {
+		t.Fatalf("5xx error = %v", err)
+	}
+
+	// 200 with a non-JSON body also maps to agent-unreachable.
+	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer garbage.Close()
+	if err := registry.Register(AgentInfo{AgentID: "garbage", Mode: AgentModeListen, Addr: garbage.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatcher.AgentStatus(context.Background(), "garbage"); err == nil || !hasAgentCode(err, "agent-unreachable", http.StatusBadGateway) {
+		t.Fatalf("invalid JSON error = %v", err)
+	}
+}
+
+func TestDispatcherListenWriteStatusPassthrough(t *testing.T) {
+	// Remote push/pull preserves the agent's 409 (confirm gate) and 422
+	// (command failure) responses instead of remapping them to 502: the web
+	// layer's two-phase confirm for agents depends on this.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/push", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ok":false,"status":"aborted"}`))
+	})
+	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"ok":false,"status":"conflicts"}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	registry := NewRegistry()
+	if err := registry.Register(AgentInfo{AgentID: "write-a", Mode: AgentModeListen, Addr: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(registry, "")
+	raw, err := dispatcher.AgentPush(context.Background(), "write-a", false)
+	if err != nil || string(raw) != `{"ok":false,"status":"aborted"}` {
+		t.Fatalf("push 409 passthrough = %q err=%v", raw, err)
+	}
+	raw, err = dispatcher.AgentPull(context.Background(), "write-a", true)
+	if err != nil || string(raw) != `{"ok":false,"status":"conflicts"}` {
+		t.Fatalf("pull 422 passthrough = %q err=%v", raw, err)
+	}
+}
+
+func TestDispatcherConnectTimeout(t *testing.T) {
+	// A connect agent that never reports back surfaces as agent-timeout (504)
+	// once the caller's context deadline expires.
+	registry := NewRegistry()
+	if err := registry.Register(AgentInfo{AgentID: "slow", Mode: AgentModeConnect}); err != nil {
+		t.Fatal(err)
+	}
+	// Seed the queue with a task but never Submit the result.
+	if err := registry.Enqueue("slow", Task{TaskID: "t-timeout", Kind: TaskKindStatus}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(registry, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err := dispatcher.AgentStatus(ctx, "slow")
+	if err == nil || !hasAgentCode(err, "agent-timeout", http.StatusGatewayTimeout) {
+		t.Fatalf("connect timeout error = %v", err)
+	}
+}

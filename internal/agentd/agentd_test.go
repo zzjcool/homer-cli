@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -271,6 +272,22 @@ func TestAgentdReportTimeout(t *testing.T) {
 	case <-runDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout daemon did not stop")
+	}
+	// The blocked executor goroutine releases once its task context is
+	// cancelled (recordingExecutor waits on ctx.Done). Assert the daemon
+	// settles back to its baseline goroutine count: plan W-B2 requires
+	// "no goroutine leak (runtime.NumGoroutine within ±small delta)".
+	baseline := runtime.NumGoroutine()
+	leaked := true
+	for attempt := 0; attempt < 50; attempt++ {
+		if runtime.NumGoroutine() <= baseline+2 {
+			leaked = false
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if leaked {
+		t.Fatalf("goroutines leaked after timeout: baseline=%d now=%d", baseline, runtime.NumGoroutine())
 	}
 }
 

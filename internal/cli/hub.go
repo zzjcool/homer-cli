@@ -67,9 +67,30 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      90 * time.Second,
 	}
-	if err := httpServer.Serve(listener); err != nil {
-		writeLine(errOut, fmt.Sprintf("homer serve: %s", err.Error()))
-		return 1
+	// Graceful shutdown: SIGINT/SIGTERM drains in-flight requests before the
+	// process exits, matching the pair command's NotifyContext pattern.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serveDone := make(chan error, 1)
+	go func() {
+		err := httpServer.Serve(listener)
+		if err != nil && err != http.ErrServerClosed {
+			serveDone <- err
+			return
+		}
+		serveDone <- nil
+	}()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			writeLine(errOut, fmt.Sprintf("homer serve: %s", err.Error()))
+			return 1
+		}
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = httpServer.Shutdown(shutdownCtx)
+		cancel()
+		_ = <-serveDone
 	}
 	return 0
 }

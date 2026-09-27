@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -191,4 +192,41 @@ func errorCode(t *testing.T, body []byte) string {
 	}
 	decodeBody(t, body, &envelope)
 	return envelope.Error.Code
+}
+
+func TestAgentAPIPollWaitBounds(t *testing.T) {
+	registry := NewRegistry()
+	server := httptest.NewServer(NewAgentAPI(registry, ""))
+	defer server.Close()
+	if err := registry.Register(AgentInfo{AgentID: "agent-a", Mode: AgentModeConnect}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Negative waitSeconds is rejected outright.
+	negative := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": -1})
+	if negative.StatusCode != http.StatusBadRequest || errorCode(t, negative.Body) != "bad-request" {
+		t.Fatalf("negative poll = %d %s", negative.StatusCode, negative.Body)
+	}
+
+	// Above the ceiling is rejected too (the guard added in the review fix).
+	oversized := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": agentMaxPollWaitSeconds + 1})
+	if oversized.StatusCode != http.StatusBadRequest || errorCode(t, oversized.Body) != "bad-request" {
+		t.Fatalf("oversized poll = %d %s", oversized.StatusCode, oversized.Body)
+	}
+
+	// Omitted waitSeconds falls back to the 25s protocol default; cancel the
+	// request context so the handler returns without parking a full wait.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/agent/v1/poll", strings.NewReader(`{"agentId":"agent-a"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err == nil {
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("default poll = %d", response.StatusCode)
+		}
+	}
 }

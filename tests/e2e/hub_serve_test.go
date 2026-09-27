@@ -86,13 +86,30 @@ func TestServeSmoke(t *testing.T) {
 	if err := serve.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- serve.Wait() }()
+	exitCode := 0
 	select {
-	case <-done:
+	case err := <-waitExit(serve):
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				t.Fatalf("serve wait: %v", err)
+			}
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not exit on SIGINT")
 	}
+	if exitCode != 0 {
+		t.Fatalf("serve exited %d on SIGINT, want 0 (graceful)", exitCode)
+	}
+}
+
+// waitExit adapts cmd.Wait into a channel so shutdown assertions can select
+// with a deadline instead of blocking.
+func waitExit(command *exec.Cmd) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	return done
 }
 
 // TestServeNonLoopbackWithoutToken verifies the CLI exits 1 with the Chinese
@@ -188,3 +205,72 @@ func waitHTTP(t *testing.T, url string, want int, timeout time.Duration) string 
 }
 
 var _ = os.Getenv
+
+// TestServeTokenAuthSmoke boots serve with HOMER_HUB_TOKEN and walks the
+// 401 → authorized flow end to end over the real HTTP surface.
+func TestServeTokenAuthSmoke(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")
+	binary := binaryOf(t)
+	machine := makeMachine(t, root, "A", global, true)
+	if result := runHomer(t, binary, machine, "init", "--json"); result.code != 0 {
+		t.Fatalf("init failed: %s%s", result.stdout, result.stderr)
+	}
+
+	serve := exec.Command(binary, "serve", "--home", machine.homerHome, "--addr", "127.0.0.1:0")
+	serve.Env = append(serveEnv(machine, global), "HOMER_HUB_TOKEN=e2e-token")
+	var serveOut strings.Builder
+	serve.Stdout = &serveOut
+	serve.Stderr = &serveOut
+	if err := serve.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = serve.Process.Kill()
+		_, _ = serve.Process.Wait()
+	}()
+
+	addr := waitForServeAddr(t, &serveOut)
+	if code := getHTTPStatus(t, "http://"+addr+"/api/status"); code != http.StatusUnauthorized {
+		t.Fatalf("status without token = %d, want 401", code)
+	}
+	if code := getHTTPStatus(t, "http://"+addr+"/api/health"); code != http.StatusOK {
+		t.Fatalf("health without token = %d, want 200 (exempt)", code)
+	}
+	authorized := waitAuthorized(t, addr, "e2e-token")
+	if !strings.Contains(authorized, `"adapters"`) {
+		t.Fatalf("authorized status body = %q", authorized)
+	}
+}
+
+func getHTTPStatus(t *testing.T, url string) int {
+	t.Helper()
+	response, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	return response.StatusCode
+}
+
+func waitAuthorized(t *testing.T, addr, token string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		request, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/api/status", nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			body := make([]byte, 8192)
+			n, _ := response.Body.Read(body)
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return string(body[:n])
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("authorized status never reached 200")
+	return ""
+}
