@@ -155,12 +155,6 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
-	if s.opts.Agents != nil && isAgentLocalRoute(r.URL.Path) {
-		// Kept as a guard for future route composition. The current dispatcher
-		// invokes agent push in handleAgentRoute, before any command call.
-		s.handleAgentPush(w, r)
-		return
-	}
 	report := commands.RunPush(commands.PushOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
@@ -171,10 +165,6 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
-	if s.opts.Agents != nil && isAgentLocalRoute(r.URL.Path) {
-		s.handleAgentPull(w, r)
-		return
-	}
 	report := commands.RunPull(commands.PullOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
@@ -274,7 +264,7 @@ func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		writeMutex.Lock()
 		defer writeMutex.Unlock()
-		s.handleAgentPush(w, r)
+		s.handleAgentPush(w, r, agentID)
 	case "pull":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w)
@@ -282,7 +272,7 @@ func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		writeMutex.Lock()
 		defer writeMutex.Unlock()
-		s.handleAgentPull(w, r)
+		s.handleAgentPull(w, r, agentID)
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 	}
@@ -310,13 +300,8 @@ func (s *Server) handleAgentDiff(w http.ResponseWriter, r *http.Request, agentID
 	}{true, text})
 }
 
-func (s *Server) handleAgentPush(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/agents/"), "/")
-	if len(parts) != 2 {
-		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
-		return
-	}
-	raw, err := s.opts.Agents.AgentPush(r.Context(), parts[0], confirmValue(r))
+func (s *Server) handleAgentPush(w http.ResponseWriter, r *http.Request, agentID string) {
+	raw, err := s.opts.Agents.AgentPush(r.Context(), agentID, confirmValue(r))
 	if err != nil {
 		writeErrorValue(w, err)
 		return
@@ -324,13 +309,8 @@ func (s *Server) handleAgentPush(w http.ResponseWriter, r *http.Request) {
 	writeRemoteWriteReport(w, raw)
 }
 
-func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/agents/"), "/")
-	if len(parts) != 2 {
-		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
-		return
-	}
-	raw, err := s.opts.Agents.AgentPull(r.Context(), parts[0], confirmValue(r))
+func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID string) {
+	raw, err := s.opts.Agents.AgentPull(r.Context(), agentID, confirmValue(r))
 	if err != nil {
 		writeErrorValue(w, err)
 		return
@@ -409,7 +389,7 @@ func writeCommandError(w http.ResponseWriter, err error) {
 	if err != nil {
 		details = []string{err.Error()}
 	}
-	writeError(w, status, code, errorMessage(code, err), details)
+	writeError(w, status, code, errorMessage(code), details)
 }
 
 func writeConfigError(w http.ResponseWriter, err error) {
@@ -457,5 +437,3 @@ func (s *Server) paths() core.HomerPaths {
 }
 
 func (s *Server) homePath() string { return s.paths().Home }
-
-func isAgentLocalRoute(path string) bool { return strings.HasPrefix(path, "/api/agents/") }

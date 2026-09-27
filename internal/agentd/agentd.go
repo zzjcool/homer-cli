@@ -314,7 +314,9 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 	if err != nil {
 		return err
 	}
-	return d.postJSON(ctx, d.endpointURL("register"), body, nil)
+	client := d.agentHTTPClient()
+	_, postErr := d.postJSONWithClient(ctx, client, d.endpointURL("register"), body)
+	return postErr
 }
 
 func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool, error) {
@@ -437,18 +439,6 @@ func (d *Daemon) report(ctx context.Context, client *http.Client, task hub.Task,
 	}
 	if !response.OK {
 		return errors.New("hub rejected agent report")
-	}
-	return nil
-}
-
-func (d *Daemon) postJSON(ctx context.Context, endpoint string, body []byte, response any) error {
-	client := d.agentHTTPClient()
-	responseBody, err := d.postJSONWithClient(ctx, client, endpoint, body)
-	if err != nil {
-		return err
-	}
-	if response != nil {
-		return json.Unmarshal(responseBody, response)
 	}
 	return nil
 }

@@ -201,8 +201,8 @@
         const data = await api("/api/agents"); const content = $("agent-content"); clear(content);
         if (!(data.agents || []).length) { content.textContent = "未启用多机视图"; return; }
         const table = document.createElement("table"); const head = document.createElement("tr");
-        ["代理 ID", "主机名", "模式", "最近心跳", "操作"].forEach((item) => head.append(element("th", item))); table.append(head);
-        data.agents.forEach((agent) => { const row = document.createElement("tr"); const mode = agent.mode === "listen" ? "直连" : agent.mode === "connect" ? "主动连接" : agent.mode; [agent.agentId, agent.hostname, mode, agent.lastSeen].forEach((item) => row.append(element("td", text(item)))); const actions = element("td"); ["查看状态", "查看差异", "拉取"].forEach((label) => actions.append(element("button", label))); row.append(actions); table.append(row); });
+        ["状态", "代理 ID", "主机名", "模式", "最近心跳", "操作"].forEach((item) => head.append(element("th", item))); table.append(head);
+        data.agents.forEach((agent) => { const row = document.createElement("tr"); const mode = agent.mode === "listen" ? "直连" : agent.mode === "connect" ? "主动连接" : agent.mode; const status = element("td", text(agent.stale ? "离线" : "在线")); status.style.color = agent.stale ? "#c33" : "#3c3"; row.append(status); [agent.agentId, agent.hostname, mode, agent.lastSeen].forEach((item) => row.append(element("td", text(item)))); const actions = element("td"); ["查看状态", "查看差异", "拉取"].forEach((label) => actions.append(element("button", label))); row.append(actions); table.append(row); });
         content.append(table);
       } catch (error) { $("agent-content").textContent = error.message; }
     }

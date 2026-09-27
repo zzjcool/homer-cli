@@ -59,6 +59,7 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 			Addr:     info.Addr,
 			LastSeen: info.LastSeen,
 			Version:  info.Version,
+			Stale:    info.Stale,
 		})
 	}
 	return agents

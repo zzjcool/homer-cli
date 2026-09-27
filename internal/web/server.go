@@ -29,6 +29,9 @@ type AgentInfo struct {
 	Addr     string    `json:"addr,omitempty"`
 	LastSeen time.Time `json:"lastSeen"`
 	Version  string    `json:"version,omitempty"`
+	// Stale is true when the hub has not heard from the agent for longer
+	// than hub.AgentStaleAfter; the UI renders it as an offline status dot.
+	Stale bool `json:"stale"`
 }
 
 type DiffParams struct {

@@ -16,10 +16,8 @@ type errorEnvelope struct {
 	Error errorBody `json:"error"`
 }
 
-func marshalJSON(value any) ([]byte, error) { return json.Marshal(value) }
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
-	data, err := marshalJSON(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "内部错误", []string{err.Error()})
 		return
@@ -46,7 +44,7 @@ func writeError(w http.ResponseWriter, status int, code, message string, details
 
 func writeErrorValue(w http.ResponseWriter, err error) {
 	status, code := errorStatusCode(err)
-	message := errorMessage(code, err)
+	message := errorMessage(code)
 	details := []string{}
 	if err != nil {
 		details = []string{err.Error()}
@@ -91,7 +89,7 @@ func agentStatusForCode(code string) int {
 	}
 }
 
-func errorMessage(code string, err error) string {
+func errorMessage(code string) string {
 	switch code {
 	case "unauthorized":
 		return "未授权：请提供有效的 Bearer token"
@@ -114,9 +112,6 @@ func errorMessage(code string, err error) string {
 	case "bad-request":
 		return "请求参数无效"
 	case "internal":
-		if err != nil {
-			return "内部错误"
-		}
 		return "内部错误"
 	default:
 		return code
@@ -126,7 +121,7 @@ func errorMessage(code string, err error) string {
 var errUnauthorized = errors.New("unauthorized")
 
 func mustMarshalJSON(value any) []byte {
-	data, err := marshalJSON(value)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return []byte(`{"error":{"code":"internal","message":"内部错误","details":[]}}`)
 	}

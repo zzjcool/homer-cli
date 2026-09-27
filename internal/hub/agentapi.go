@@ -24,16 +24,6 @@ func NewAgentAPI(reg *Registry, token string) *AgentAPI {
 	return &AgentAPI{Registry: reg, Token: token}
 }
 
-// NewAgentHandler is a descriptive alias for embedders that prefer the
-// handler terminology. NewAgentAPI remains the primary constructor.
-func NewAgentHandler(reg *Registry, token string) http.Handler {
-	return NewAgentAPI(reg, token)
-}
-
-func (a *AgentAPI) Handler() http.Handler {
-	return a
-}
-
 func (a *AgentAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if a == nil || a.Registry == nil {
 		writeAgentError(w, http.StatusInternalServerError, "internal", "hub registry 未初始化")

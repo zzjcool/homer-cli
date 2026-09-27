@@ -48,7 +48,7 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		HomerHome:     options.Home,
 		Token:         token,
 		Agents:        dispatcher,
-		AgentEndpoint: hub.NewAgentHandler(registry, token),
+		AgentEndpoint: hub.NewAgentAPI(registry, token),
 	})
 	if err != nil {
 		_ = listener.Close()
