@@ -1,13 +1,18 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/agentd"
+	"github.com/zzjcool/homer-cli/internal/hub"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -22,9 +27,10 @@ func hubTokenFromEnv(flagToken string) string {
 	return os.Getenv("HOMER_HUB_TOKEN")
 }
 
-// runServe starts the local hub: HTTP API + web console. It blocks until the
-// listener returns. web.NewServer enforces the loopback-without-token rule
-// from plan §2.1; the CLI layer surfaces its error and exits 1.
+// runServe starts the hub: HTTP API + web console + agent registration
+// endpoints + the dispatcher that reaches connected agents. It blocks until
+// the listener returns. web.NewServer enforces the loopback-without-token
+// rule from plan §2.1; the CLI layer surfaces its error and exits 1.
 func runServe(options CommandOptions, out, errOut io.Writer) int {
 	token := hubTokenFromEnv(options.Token)
 	listener, err := net.Listen("tcp", defaultAddr(options.Addr))
@@ -35,10 +41,14 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	// The concrete bound address (ephemeral ports like :0 resolve here) is
 	// what both the loopback check and the startup message must use.
 	boundAddr := listener.Addr().String()
+	registry := hub.NewRegistry()
+	dispatcher := hub.NewDispatcher(registry, token)
 	server, err := web.NewServer(web.ServeOptions{
-		Addr:      boundAddr,
-		HomerHome: options.Home,
-		Token:     token,
+		Addr:          boundAddr,
+		HomerHome:     options.Home,
+		Token:         token,
+		Agents:        dispatcher,
+		AgentEndpoint: hub.NewAgentHandler(registry, token),
 	})
 	if err != nil {
 		_ = listener.Close()
@@ -51,6 +61,7 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	} else {
 		writeLine(out, "未设置 token：仅回环地址访问受信任。")
 	}
+	writeLine(out, "agent 接入: homer agent --connect http://<本机地址>"+agentPortSuffix(boundAddr))
 	httpServer := &http.Server{
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -61,6 +72,50 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// runAgent runs the agent daemon in listen or connect mode. Mode exclusivity
+// is validated by validateCommandOptions; agentd.Config.Mode re-checks it.
+func runAgent(options CommandOptions, out, errOut io.Writer) int {
+	token := hubTokenFromEnv(options.Token)
+	config := agentd.Config{
+		HomerHome:    options.Home,
+		Token:        token,
+		ListenAddr:   options.Listen,
+		AdvertiseURL: options.Advertise,
+		ConnectURL:   options.Connect,
+		HubURL:       options.Hub,
+		AgentID:      options.ID,
+	}
+	if _, err := config.Mode(); err != nil {
+		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
+		return 1
+	}
+	daemon := agentd.New(config, agentd.NewLocalExecutor(options.Home))
+	writeLine(out, fmt.Sprintf("homer agent: %s 模式启动（Ctrl+C 停止）", agentModeLabel(config)))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := daemon.Run(ctx); err != nil && ctx.Err() == nil {
+		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
+		return 1
+	}
+	return 0
+}
+
+func agentModeLabel(config agentd.Config) string {
+	if mode, err := config.Mode(); err == nil {
+		return string(mode)
+	}
+	return "未知"
+}
+
+// agentPortSuffix formats the connect hint so users on another machine can
+// copy-paste the agent bootstrap command.
+func agentPortSuffix(boundAddr string) string {
+	if _, port, err := net.SplitHostPort(boundAddr); err == nil {
+		return ":" + port
+	}
+	return ""
 }
 
 // displayAddr rewrites wildcard binds (0.0.0.0:x, [::]:x) to localhost for

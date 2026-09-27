@@ -1,0 +1,96 @@
+name: homer-hub-e2e
+
+# Shared bare repository volume: all services clone/push over the local
+# filesystem (git supports a plain path remote), avoiding git-daemon.
+volumes:
+  center:
+
+services:
+  origin:
+    image: alpine:3.20
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache git >/dev/null
+        git init -q --bare -b main /srv/center.git
+        chmod -R a+rwX /srv/center.git
+        exec sleep infinity
+    volumes:
+      - center:/srv
+    restart: unless-stopped
+
+  hub:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    depends_on: [origin]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /root/toolhome/.pi/agent
+        printf '{\n  "fromHub": true\n}\n' \
+          > /root/toolhome/.pi/agent/settings.json
+        export HOME=/root/toolhome
+        for i in $(seq 1 60); do
+          if git ls-remote /srv/center.git >/dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        homer init --all --home /root/.homer
+        homer remote /srv/center.git --home /root/.homer
+        homer push --yes --home /root/.homer
+        git -C /srv/center.git symbolic-ref HEAD refs/heads/master
+        exec homer serve --addr 0.0.0.0:7760 --token test-token \
+          --home /root/.homer
+    volumes:
+      - center:/srv
+    ports:
+      - "17760:7760"
+
+  agent-a:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    depends_on: [hub]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /root/toolhome/.pi/agent
+        printf '{\n  "fromHub": true\n}\n' \
+          > /root/toolhome/.pi/agent/settings.json
+        export HOME=/root/toolhome
+        for i in $(seq 1 60); do
+          if git clone -q /srv/center.git /root/.homer 2>/dev/null \
+            && [ -f /root/.homer/homer.json ]; then break; fi
+          rm -rf /root/.homer; sleep 2
+        done
+        exec homer agent --listen 0.0.0.0:7761 \
+          --advertise http://agent-a:7761 \
+          --hub http://hub:7760 \
+          --token test-token --id agent-a --home /root/.homer
+    volumes:
+      - center:/srv
+    restart: unless-stopped
+
+  agent-b:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    depends_on: [hub]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /root/toolhome
+        export HOME=/root/toolhome
+        for i in $(seq 1 60); do
+          if git clone -q /srv/center.git /root/.homer 2>/dev/null \
+            && [ -f /root/.homer/homer.json ]; then break; fi
+          rm -rf /root/.homer; sleep 2
+        done
+        exec homer agent --connect http://hub:7760 \
+          --token test-token --id agent-b --home /root/.homer
+    volumes:
+      - center:/srv
+    restart: unless-stopped
