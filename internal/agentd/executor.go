@@ -61,7 +61,7 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool) (commands.PushRe
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err
 	}
-	report := commands.RunPush(commands.PushOptions{HomerHome: e.homerHome, Yes: confirm}, nil)
+	report := commands.RunPush(commands.PushOptions{HomerHome: e.homerHome, Yes: confirm}, &commands.PushDeps{UI: commands.HeadlessUI{}})
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err
 	}
@@ -72,7 +72,7 @@ func (e *localExecutor) Pull(ctx context.Context, confirm bool) (commands.PullRe
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err
 	}
-	report := commands.RunPull(commands.PullOptions{HomerHome: e.homerHome, Yes: confirm}, nil)
+	report := commands.RunPull(commands.PullOptions{HomerHome: e.homerHome, Yes: confirm}, &commands.PullDeps{UI: commands.HeadlessUI{}})
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err
 	}

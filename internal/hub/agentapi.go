@@ -134,7 +134,10 @@ func (a *AgentAPI) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if request.WaitSeconds != nil {
 		waitSeconds = *request.WaitSeconds
 	}
-	if waitSeconds < 0 {
+	// The ceiling keeps a hostile or buggy poller from parking its handler
+	// far beyond the server WriteTimeout (90s), which would otherwise turn a
+	// legitimate long poll into an opaque connection reset.
+	if waitSeconds < 0 || waitSeconds > agentMaxPollWaitSeconds {
 		writeAgentError(w, http.StatusBadRequest, "bad-request", "请求参数无效")
 		return
 	}
@@ -153,6 +156,11 @@ func (a *AgentAPI) handlePoll(w http.ResponseWriter, r *http.Request) {
 }
 
 const agentDefaultPollWaitSeconds = 25
+
+// agentMaxPollWaitSeconds bounds waitSeconds from clients. The hub-side web
+// server writes with a 90s timeout, so a poll asking to wait longer than
+// that would only end in an opaque connection reset.
+const agentMaxPollWaitSeconds = 80
 
 type reportRequest struct {
 	AgentID string          `json:"agentId"`

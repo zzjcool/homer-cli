@@ -91,7 +91,11 @@ func New(cfg Config, exec Executor) *Daemon {
 		cfg.PollWait = 25 * time.Second
 	}
 	if cfg.ReportTimeout <= 0 {
-		cfg.ReportTimeout = 90 * time.Second
+		// Deliberately below the hub-side dispatcherTimeout (60s) and web
+		// WriteTimeout (90s): an agent execution must finish and report
+		// before the hub gives up waiting, otherwise a task burns the full
+		// window only to deliver its result into a closed connection.
+		cfg.ReportTimeout = 50 * time.Second
 	}
 	if exec == nil {
 		exec = NewLocalExecutor(cfg.HomerHome)
@@ -231,6 +235,17 @@ func (d *Daemon) runConnect(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			// The registry is in-memory on the hub side: a hub restart makes
+			// every poll 404 until this agent re-registers. Recover instead
+			// of retrying a doomed poll forever.
+			if IsAgentNotFound(err) {
+				if regErr := d.registerWithRetry(ctx, hub.AgentModeConnect, localHostname()); regErr != nil {
+					if !sleepContext(ctx, d.cfg.PollInterval) {
+						return nil
+					}
+				}
+				continue
+			}
 			// A transient hub/network error should not terminate a long-running
 			// daemon. Keep the retry bounded by PollInterval.
 			if !sleepContext(ctx, d.cfg.PollInterval) {
@@ -336,6 +351,10 @@ func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool,
 func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 	ctx, cancel := context.WithTimeout(parent, d.cfg.ReportTimeout)
 	defer cancel()
+	// Note: exceeding the timeout reports an error but does NOT abort the
+	// underlying execution — the command layer is not context-aware yet, so
+	// a timed-out push may still commit locally in the background. The hub
+	// treats the task as failed; see plan risk R2 for the ctx-aware follow-up.
 	result := hub.TaskResult{TaskID: task.TaskID, AgentID: d.cfg.AgentID, Kind: task.Kind}
 	type executionResult struct {
 		report any
@@ -485,6 +504,14 @@ type agentAPIError struct {
 
 type agentAPIErrorEnvelope struct {
 	Error *agentAPIError `json:"error"`
+}
+
+// IsAgentNotFound reports whether err is the hub's 404 "agent not found"
+// response, which means the hub lost this agent's registration (typically a
+// hub restart: the registry is in-memory) and the agent must re-register.
+func IsAgentNotFound(err error) bool {
+	apiErr, ok := err.(*agentAPIError)
+	return ok && apiErr != nil && apiErr.Code == "agent-not-found"
 }
 
 func (e *agentAPIError) Error() string {

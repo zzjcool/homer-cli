@@ -164,7 +164,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	report := commands.RunPush(commands.PushOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
-	}, nil)
+	}, &commands.PushDeps{UI: commands.HeadlessUI{}})
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 
@@ -178,7 +178,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	report := commands.RunPull(commands.PullOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
-	}, nil)
+	}, &commands.PullDeps{UI: commands.HeadlessUI{}})
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 
