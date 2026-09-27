@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>homer</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { max-width: 1100px; margin: 0 auto; padding: 1rem; line-height: 1.5; }
+    header { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #8886; padding-bottom: .8rem; }
+    header h1 { margin: 0; }
+    header small { opacity: .75; margin-right: auto; }
+    input, select, button { font: inherit; padding: .35rem .55rem; }
+    button { cursor: pointer; }
+    section { margin: 1rem 0; padding: 1rem; border: 1px solid #8886; border-radius: .5rem; }
+    .cards { display: flex; gap: .7rem; flex-wrap: wrap; }
+    .card { min-width: 8rem; padding: .7rem; border-radius: .4rem; background: #8882; }
+    .ok { color: #16833b; } .bad { color: #c33; }
+    pre { overflow: auto; white-space: pre-wrap; background: #0002; padding: .8rem; min-height: 4rem; }
+    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: .45rem; border-bottom: 1px solid #8885; }
+    dialog { max-width: 38rem; border: 1px solid #8888; border-radius: .5rem; }
+    dialog::backdrop { background: #0008; }
+    .hidden { display: none; }
+    .muted { opacity: .75; }
+    ul { margin-top: .3rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>homer</h1><small id="version">版本：加载中</small>
+    <button id="refresh" type="button">刷新</button>
+    <label>令牌 <input id="token" type="password" autocomplete="off" placeholder="可选"></label>
+  </header>
+
+  <main>
+    <section id="not-initialized" class="hidden">
+      <strong>尚未初始化</strong>：请先在终端运行 homer init 完成初始化，再回到本页。
+    </section>
+
+    <section id="status-cards">
+      <h2>状态</h2>
+      <div id="summary-cards" class="cards"><div class="card">正在加载…</div></div>
+      <div id="adapter-cards" class="cards"></div>
+    </section>
+
+    <section id="diff-view">
+      <h2>差异</h2>
+      <label>适配器 <select id="adapter-filter"><option value="">全部</option></select></label>
+      <label>分类 <select id="category-filter"><option value="">全部</option></select></label>
+      <pre id="diff-text">正在加载…</pre>
+    </section>
+
+    <section id="actions">
+      <h2>操作</h2>
+      <button id="push" type="button">推送</button>
+      <button id="pull" type="button">拉取</button>
+      <div id="action-result" class="muted"></div>
+    </section>
+
+    <section id="agents">
+      <h2>多机代理</h2>
+      <div id="agent-content" class="muted">正在加载…</div>
+    </section>
+  </main>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <h3 id="confirm-title">确认操作</h3>
+      <p id="confirm-summary"></p>
+      <p>受影响文件会先备份。</p>
+      <menu>
+        <button value="cancel">取消</button>
+        <button id="confirm-action" value="confirm">确认</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script>
+  (() => {
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const state = { status: null, pending: null };
+    const token = $("token");
+    token.value = sessionStorage.getItem("homer-token") || "";
+    token.addEventListener("change", () => sessionStorage.setItem("homer-token", token.value));
+
+    async function api(path, options = {}) {
+      const headers = Object.assign({ "Accept": "application/json" }, options.headers || {});
+      if (token.value) headers.Authorization = "Bearer " + token.value;
+      const response = await fetch(path, Object.assign({}, options, { headers }));
+      let data = null;
+      try { data = await response.json(); } catch (_) { data = {}; }
+      if (!response.ok) {
+        const error = data.error || {};
+        const failure = new Error(error.message || ("请求失败（" + response.status + "）"));
+        failure.status = response.status; failure.code = error.code; failure.data = data;
+        throw failure;
+      }
+      return data;
+    }
+
+    function text(value) { return value == null ? "" : String(value); }
+    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+    function element(tag, content, className) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (content != null) node.textContent = content;
+      return node;
+    }
+
+    function renderStatus(report) {
+      state.status = report;
+      const summary = $("summary-cards"); clear(summary);
+      let push = 0, pull = 0, conflicts = 0;
+      (report.adapters || []).forEach((adapter) => {
+        push += adapter.push || 0; pull += adapter.pull || 0; conflicts += adapter.conflicts || 0;
+      });
+      [["↑ 可推送", push], ["↓ 可拉取", pull], ["⚡ 冲突", conflicts]].forEach(([label, value]) => {
+        const card = element("div", null, "card"); card.append(element("strong", label)); card.append(element("div", text(value))); summary.append(card);
+      });
+      const adapters = $("adapter-cards"); clear(adapters);
+      (report.adapters || []).forEach((adapter) => {
+        const card = element("div", null, "card");
+        card.append(element("strong", adapter.id));
+        card.append(element("div", "↑ " + (adapter.push || 0) + "　↓ " + (adapter.pull || 0) + "　⚡ " + (adapter.conflicts || 0)));
+        (adapter.categories || []).forEach((category) => card.append(element("div", category.name + "：↑" + category.push + " ↓" + category.pull + " ⚡" + category.conflicts)));
+        if ((report.disabled || []).includes(adapter.id)) card.append(element("div", "已禁用", "muted"));
+        ["warnings", "errors"].forEach((key) => {
+          if (!(report[key] || []).length) return;
+          const details = document.createElement("details"); details.append(element("summary", key === "warnings" ? "警告" : "错误"));
+          const list = document.createElement("ul"); report[key].forEach((item) => list.append(element("li", item))); details.append(list); card.append(details);
+        });
+        adapters.append(card);
+      });
+      fillFilters(report.adapters || []);
+    }
+
+    function fillFilters(adapters) {
+      const adapterSelect = $("adapter-filter"), categorySelect = $("category-filter");
+      const oldAdapter = adapterSelect.value, oldCategory = categorySelect.value;
+      while (adapterSelect.options.length > 1) adapterSelect.remove(1);
+      adapters.forEach((adapter) => adapterSelect.append(new Option(adapter.id, adapter.id)));
+      adapterSelect.value = oldAdapter;
+      while (categorySelect.options.length > 1) categorySelect.remove(1);
+      const categories = [];
+      adapters.forEach((adapter) => (adapter.categories || []).forEach((category) => { if (!categories.includes(category.name)) categories.push(category.name); }));
+      categories.forEach((category) => categorySelect.append(new Option(category, category)));
+      categorySelect.value = oldCategory;
+    }
+
+    async function loadDiff() {
+      const params = new URLSearchParams();
+      if ($("adapter-filter").value) params.set("adapter", $("adapter-filter").value);
+      if ($("category-filter").value) params.set("category", $("category-filter").value);
+      try {
+        const data = await api("/api/diff?" + params.toString());
+        $("diff-text").textContent = data.empty ? "无漂移" : text(data.text);
+      } catch (error) { $("diff-text").textContent = error.message; }
+    }
+
+    function changedFiles(report) {
+      return (report.changedFiles || []).length || ((report.applied || {}).written || []).length || ((report.applied || {}).deleted || []).length;
+    }
+    function reportMessage(report, action) {
+      if (report.ok) return action + "成功，共处理 " + changedFiles(report) + " 个文件。";
+      if (report.status === "secrets-rejected") return "检测到疑似密钥，已拒绝推送。";
+      if (report.status === "conflicts" || report.status === "conflicts-remain") return "存在冲突，请在终端运行 homer merge。";
+      return (report.errors || []).join("；") || action + "未完成。";
+    }
+    async function execute(action) {
+      try {
+        const data = await api("/api/" + action + "?confirm=true", { method: "POST" });
+        $("action-result").textContent = reportMessage(data, action === "push" ? "推送" : "拉取");
+        await refresh();
+      } catch (error) { $("action-result").textContent = error.message; }
+    }
+    async function confirmAction(action) {
+      const dialog = $("confirm-dialog");
+      try {
+        const latestStatus = await api("/api/status");
+        renderStatus(latestStatus.report);
+        await loadDiff();
+      } catch (error) {
+        $("action-result").textContent = error.message;
+        return;
+      }
+      $("confirm-title").textContent = action === "push" ? "确认推送" : "确认拉取";
+      const count = ((state.status && state.status.adapters) || []).reduce((sum, item) => sum + (action === "push" ? (item.push || 0) : (item.pull || 0)), 0);
+      $("confirm-summary").textContent = "当前预计处理 " + count + " 项状态变更。";
+      state.pending = action;
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else if (window.confirm($("confirm-summary").textContent + "\n受影响文件会先备份。")) execute(action);
+    }
+    $("confirm-dialog").addEventListener("close", () => { if ($("confirm-dialog").returnValue === "confirm" && state.pending) execute(state.pending); state.pending = null; });
+    $("push").addEventListener("click", () => confirmAction("push"));
+    $("pull").addEventListener("click", () => confirmAction("pull"));
+    $("adapter-filter").addEventListener("change", loadDiff); $("category-filter").addEventListener("change", loadDiff);
+
+    async function loadAgents() {
+      try {
+        const data = await api("/api/agents"); const content = $("agent-content"); clear(content);
+        if (!(data.agents || []).length) { content.textContent = "未启用多机视图"; return; }
+        const table = document.createElement("table"); const head = document.createElement("tr");
+        ["代理 ID", "主机名", "模式", "最近心跳", "操作"].forEach((item) => head.append(element("th", item))); table.append(head);
+        data.agents.forEach((agent) => { const row = document.createElement("tr"); const mode = agent.mode === "listen" ? "直连" : agent.mode === "connect" ? "主动连接" : agent.mode; [agent.agentId, agent.hostname, mode, agent.lastSeen].forEach((item) => row.append(element("td", text(item)))); const actions = element("td"); ["查看状态", "查看差异", "拉取"].forEach((label) => actions.append(element("button", label))); row.append(actions); table.append(row); });
+        content.append(table);
+      } catch (error) { $("agent-content").textContent = error.message; }
+    }
+    async function refresh() {
+      try {
+        const health = await api("/api/health"); $("version").textContent = "版本：" + text(health.version);
+        const status = await api("/api/status"); $("not-initialized").classList.add("hidden"); renderStatus(status.report); await loadDiff();
+      } catch (error) {
+        if (error.code === "not-initialized") $("not-initialized").classList.remove("hidden");
+        $("diff-text").textContent = error.message;
+      }
+      await loadAgents();
+    }
+    $("refresh").addEventListener("click", refresh); refresh();
+  })();
+  </script>
+</body>
+</html>
