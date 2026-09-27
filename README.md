@@ -24,6 +24,41 @@ homer push --yes                 # 首次 push 自动 git init + 建立基线
 homer home <配置仓库 URL> --yes
 ```
 
+## Hub 形态（v1.4）：网页控制台 + 多机 agent
+
+单机网页控制台：
+
+```sh
+homer serve                     # http://127.0.0.1:7760
+# 浏览器打开即可看状态卡片、diff、推送/拉取（两段式确认）
+```
+
+多机拓扑（中心节点部署在可达处，其余机器两种接入方式）：
+
+```sh
+# 中心节点（公网/可达机器）：
+HOMER_HUB_TOKEN=<token> homer serve --addr 0.0.0.0:7760
+
+# 机器可达（公网）：等 hub 直连采集
+homer agent --listen 0.0.0.0:7761 \
+  --advertise http://<本机地址>:7761 \
+  --hub http://<hub>:7760 --token <token>
+
+# 机器在 NAT 后：主动拨出（只出不进）
+homer agent --connect http://<hub>:7760 --token <token>
+```
+
+hub 的 `/api/agents` 即可远程查看/采集每台机器的状态、diff，远程推送/拉取
+（`POST /api/agents/<id>/push?confirm=true`），配置经 git 远端在机器间真实
+流转。agent 协议为 HTTP 长轮询（零依赖，NAT 友好）；hub 不自建存储，
+同步语义 100% 复用 engine/sync/gitx。
+
+鉴权：单一 Bearer token（`HOMER_HUB_TOKEN` 或 `--token`）；未设 token 时仅
+允许回环地址（非回环拒绝启动）。生产公网建议再加反代 TLS。
+
+容器化验收：`bash e2e/hub-smoke.sh`（origin + hub + agent-a + agent-b 四容器，
+覆盖双通道采集与配置跨机流转）。
+
 ## 安装
 
 ### 1. release 二进制（推荐）
