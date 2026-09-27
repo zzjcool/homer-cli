@@ -241,6 +241,12 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 			JSON:      options.JSON,
 		}, nil, out, errOut)
 
+	case CommandServe:
+		return runServe(options, out, errOut)
+
+	case CommandAgent:
+		return runAgent(options, out, errOut)
+
 	default:
 		writeLine(errOut, fmt.Sprintf("homer %s: 尚未实现", parsed.Command))
 		return 1
@@ -364,6 +370,34 @@ func unsupportedOptions(command Command, options CommandOptions, names ...string
 			if options.Remote != "" {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --remote", command))
 			}
+		case "listen":
+			if options.Listen != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --listen", command))
+			}
+		case "connect":
+			if options.Connect != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --connect", command))
+			}
+		case "hub":
+			if options.Hub != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --hub", command))
+			}
+		case "advertise":
+			if options.Advertise != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --advertise", command))
+			}
+		case "token":
+			if options.Token != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --token", command))
+			}
+		case "addr":
+			if options.Addr != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --addr", command))
+			}
+		case "id":
+			if options.ID != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --id", command))
+			}
 		}
 	}
 	return nil
@@ -419,6 +453,16 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandPair:
 		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+	case CommandServe:
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "listen", "connect", "hub", "advertise", "id")
+	case CommandAgent:
+		if err := unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "addr", "json"); err != nil {
+			return err
+		}
+		if (options.Listen != "") == (options.Connect != "") {
+			return usageArgumentError("命令 agent 需要 --listen <addr> 或 --connect <url> 二选一")
+		}
+		return nil
 	case CommandUpgrade:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "adapters", "adapter", "category", "mode", "remote", "json")
 	case CommandVersion:
