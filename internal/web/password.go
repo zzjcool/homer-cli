@@ -330,13 +330,24 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	// Trusted peers (loopback/LAN) set up bare; public-internet peers must
 	// present the one-time code printed at serve startup (remote-server
-	// first-run over SSH + browser). The code burns after one success.
-	if !setupPeerAllowed(r) && !s.auth.consumeSetupCode(payload.SetupCode) {
-		writeError(w, http.StatusForbidden, "setup-code-required",
-			"首次设置需要初始化码：请在 hub 机器上查看 serve 启动日志（或 journalctl -u homer-serve），输入 6 位初始化码", nil)
-		return
-	}
-	if s.auth.hasPassword(s.homePath()) {
+	// first-run over SSH + browser). The code burns AFTER all cheap
+	// validations pass — a weak password or duplicate setup must not waste
+	// the one-shot credential.
+	if !setupPeerAllowed(r) {
+		if s.auth.hasPassword(s.homePath()) {
+			writeError(w, http.StatusConflict, "already-configured", "管理员密码已设置", nil)
+			return
+		}
+		if message := validatePassword(payload.Password); message != "" {
+			writeError(w, http.StatusBadRequest, "weak-password", message, nil)
+			return
+		}
+		if !s.auth.consumeSetupCode(payload.SetupCode) {
+			writeError(w, http.StatusForbidden, "setup-code-required",
+				"初始化码无效或已使用：请在 hub 机器上查看 serve 启动日志（journalctl -u homer-serve），输入 6 位初始化码", nil)
+			return
+		}
+	} else if s.auth.hasPassword(s.homePath()) {
 		writeError(w, http.StatusConflict, "already-configured", "管理员密码已设置", nil)
 		return
 	}

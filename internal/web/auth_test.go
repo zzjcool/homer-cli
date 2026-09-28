@@ -387,3 +387,35 @@ func TestAuthStatusRevealsCodeRequirement(t *testing.T) {
 		t.Fatalf("public status = %s", publicResponse.Body)
 	}
 }
+
+// A weak password must NOT burn the one-time code: cheap validations run
+// before the single-shot credential is consumed (deploying restarted serve
+// once wasted a code this way during the live incident).
+func TestWeakPasswordDoesNotBurnCode(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+	code := server.SetupCode()
+
+	// Public peer, weak password, correct code -> 400, code still alive.
+	weak := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"short","setupCode":"`+code+`"}`))
+	weak.Header.Set("Content-Type", "application/json")
+	weak.RemoteAddr = "203.0.113.9:5555"
+	weak.Host = "homerhw.openaaas.org"
+	weakResponse := httptest.NewRecorder()
+	handler.ServeHTTP(weakResponse, weak)
+	if weakResponse.Code != http.StatusBadRequest {
+		t.Fatalf("weak password = %d", weakResponse.Code)
+	}
+
+	// Same code still works with a valid password.
+	good := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"字password12345","setupCode":"`+code+`"}`))
+	good.Header.Set("Content-Type", "application/json")
+	good.RemoteAddr = "203.0.113.9:5555"
+	good.Host = "homerhw.openaaas.org"
+	goodResponse := httptest.NewRecorder()
+	handler.ServeHTTP(goodResponse, good)
+	if goodResponse.Code != http.StatusOK {
+		t.Fatalf("valid retry after weak password = %d body=%s", goodResponse.Code, goodResponse.Body)
+	}
+}
