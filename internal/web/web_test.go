@@ -426,16 +426,16 @@ func TestAgentsRouteP1(t *testing.T) {
 }
 
 type sourceStub struct {
-	list       []AgentInfo
-	removed    []string
-	statusRaw  json.RawMessage
-	diffText   string
-	pushRaw    json.RawMessage
-	pullRaw    json.RawMessage
-	statusErr  error
-	diffErr    error
-	pushErr    error
-	pullErr    error
+	list        []AgentInfo
+	removed     []string
+	statusRaw   json.RawMessage
+	diffText    string
+	pushRaw     json.RawMessage
+	pullRaw     json.RawMessage
+	statusErr   error
+	diffErr     error
+	pushErr     error
+	pullErr     error
 	pushValues  []bool
 	pullValues  []bool
 	pulledAgent []string
