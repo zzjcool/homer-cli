@@ -101,6 +101,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handlePull(w, r)
+	case path == "/api/sync":
+		// Manual sync (MVP): one action, human sentences only.
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleSync(w, r)
 	case path == "/api/config":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)

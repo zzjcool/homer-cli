@@ -436,9 +436,10 @@ type sourceStub struct {
 	diffErr    error
 	pushErr    error
 	pullErr    error
-	pushValues []bool
-	pullValues []bool
-	mu         sync.Mutex
+	pushValues  []bool
+	pullValues  []bool
+	pulledAgent []string
+	mu          sync.Mutex
 }
 
 func (s *sourceStub) ListAgents() []AgentInfo { return append([]AgentInfo(nil), s.list...) }
@@ -471,9 +472,10 @@ func (s *sourceStub) AgentPush(_ context.Context, _ string, confirm bool) (json.
 	s.mu.Unlock()
 	return s.pushRaw, s.pushErr
 }
-func (s *sourceStub) AgentPull(_ context.Context, _ string, confirm bool) (json.RawMessage, error) {
+func (s *sourceStub) AgentPull(_ context.Context, agentID string, confirm bool) (json.RawMessage, error) {
 	s.mu.Lock()
 	s.pullValues = append(s.pullValues, confirm)
+	s.pulledAgent = append(s.pulledAgent, agentID)
 	s.mu.Unlock()
 	return s.pullRaw, s.pullErr
 }
