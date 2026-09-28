@@ -44,14 +44,38 @@ func VirtualFileName(category string) string { return category + ".manifest.txt"
 // ParseIDs converts one-ID-per-line command output into its canonical list.
 // Whitespace around each line is ignored, empty lines are dropped, and the
 // first occurrence of an ID determines its position in the result.
+// ParseIDs keeps every non-empty line (legacy behavior).
 func ParseIDs(stdout []byte) []string {
+	return ParseIDsWithPattern(stdout, "")
+}
+
+// ParseIDsWithPattern filters listCmd output to the ID lines. An empty
+// pattern keeps every non-empty line; a pattern with one capture group
+// extracts the group, and the trimmed full line otherwise.
+func ParseIDsWithPattern(stdout []byte, pattern string) []string {
 	lines := strings.Split(string(stdout), "\n")
 	var ids []string
 	seen := make(map[string]struct{}, len(lines))
+	var compiled *regexp.Regexp
+	if strings.TrimSpace(pattern) != "" {
+		compiled = regexp.MustCompile(pattern)
+	}
 	for _, line := range lines {
 		id := strings.TrimSpace(line)
 		if id == "" {
 			continue
+		}
+		if compiled != nil {
+			match := compiled.FindStringSubmatch(line)
+			if match == nil {
+				continue
+			}
+			if len(match) > 1 {
+				id = strings.TrimSpace(match[1])
+			}
+			if id == "" {
+				continue
+			}
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -70,7 +94,9 @@ func ContentOf(ids []string) string {
 	if len(ids) == 0 {
 		return ""
 	}
-	return strings.Join(ids, "\n") + "\n"
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "\n") + "\n"
 }
 
 var validIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -88,6 +114,14 @@ type ScanProblem struct {
 // ScanCategory runs listCmd and produces the virtual-file snapshot entry.
 // Failure (missing binary, non-zero exit, timeout) => empty Files + one problem.
 func ScanCategory(adapterID, category string, cfg core.CategoryConfig, port CommandPort) (core.CategorySnapshot, []ScanProblem) {
+	return ScanCategoryWithPattern(adapterID, category, cfg, port, cfg.IDPattern)
+}
+
+// ScanCategoryWithPattern runs listCmd and produces the virtual-file
+// snapshot entry, filtering output lines through the optional ID pattern.
+// Failure (missing binary, non-zero exit, timeout) => empty Files + one
+// problem.
+func ScanCategoryWithPattern(adapterID, category string, cfg core.CategoryConfig, port CommandPort, idPattern string) (core.CategorySnapshot, []ScanProblem) {
 	if port == nil {
 		port = DefaultPort()
 	}
@@ -101,7 +135,7 @@ func ScanCategory(adapterID, category string, cfg core.CategoryConfig, port Comm
 	if err != nil {
 		return snapshot, []ScanProblem{{Command: cfg.ListCmd, Message: err.Error(), Err: err}}
 	}
-	ids := ParseIDs(stdout)
+	ids := ParseIDsWithPattern(stdout, idPattern)
 	snapshot.Files[VirtualFileName(category)] = core.SnapshotEntry{
 		Kind:    "file",
 		Content: ContentOf(ids),

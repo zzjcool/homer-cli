@@ -26,6 +26,10 @@ type CategoryConfig struct {
 	Kind        *CategoryKind `json:"kind,omitempty"`
 	ListCmd     string        `json:"listCmd,omitempty"`
 	ApplyCmd    string        `json:"applyCmd,omitempty"`
+	// IDPattern optionally filters listCmd output lines to the installable
+	// IDs (with one capture group). Package managers print headers and
+	// install paths around the IDs; the pattern extracts exactly the IDs.
+	IDPattern   string        `json:"idPattern,omitempty"`
 	Enabled     *bool         `json:"enabled,omitempty"`
 	Exclude     []string      `json:"exclude,omitempty"`
 	ExcludeKeys []string      `json:"excludeKeys,omitempty"`

@@ -485,6 +485,9 @@ func configFromValue(root map[string]orderedjson.Value) (*HomerConfig, error) {
 			if applyCmd, exists := categoryObject["applyCmd"]; exists {
 				category.ApplyCmd, _ = applyCmd.(string)
 			}
+			if idPattern, exists := categoryObject["idPattern"]; exists {
+				category.IDPattern, _ = idPattern.(string)
+			}
 			if exclude, exists := categoryObject["exclude"]; exists {
 				category.Exclude = stringsFromValue(exclude)
 			}

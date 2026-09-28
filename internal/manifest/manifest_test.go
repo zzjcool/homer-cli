@@ -88,7 +88,9 @@ func TestScanCategorySuccessAndProblems(t *testing.T) {
 		Category:  "extensions",
 		Mode:      core.SyncModeMirror,
 		Files: core.SnapshotFiles{
-			"extensions.manifest.txt": {Kind: "file", Content: "pub.two\npub.one\n"},
+			// ContentOf sorts: snapshots are deterministic regardless of
+			// listCmd output order.
+			"extensions.manifest.txt": {Kind: "file", Content: "pub.one\npub.two\n"},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -200,4 +202,63 @@ func TestApplyTasksContinuesAfterFailure(t *testing.T) {
 	if len(result.Failed) != 1 || result.Failed[0].ID != "pub.one" {
 		t.Fatalf("failed = %#v", result.Failed)
 	}
+}
+
+// Manifest categories may declare their own ID line pattern: package
+// managers print noise (headers, install paths) around the IDs, and IDs
+// themselves carry registry prefixes (npm:) or scopes (@org/) that the
+// default pattern rejects. A category-level pattern filters listCmd
+// output to exactly the installable IDs.
+func TestScanCategoryWithIDPattern(t *testing.T) {
+	port := &fakePort{output: []byte(`User packages:
+  npm:pi-lens
+    /home/u/.pi/agent/npm/node_modules/pi-lens
+  npm:@zzjcool/pi-herdr-subagents
+    /home/u/.pi/agent/npm/node_modules/@zzjcool/pi-herdr-subagents
+
+Project packages:
+  npm:local-tool
+`)}
+	cfg := core.CategoryConfig{
+		Mode:      "mirror",
+		Kind:      manifestKindPtr(),
+		ListCmd:   "pi list",
+		ApplyCmd:  "pi install",
+		IDPattern: `^  (npm:[A-Za-z0-9@/._-]+)$`,
+	}
+	snapshot, problems := ScanCategoryWithPattern("pi", "packages", cfg, port, cfg.IDPattern)
+	if len(problems) != 0 {
+		t.Fatalf("problems = %v", problems)
+	}
+	entry := snapshot.Files[VirtualFileName("packages")]
+	got := strings.Split(strings.TrimSuffix(entry.Content, "\n"), "\n")
+	// Sorted and filtered: headers and install paths are gone; user and
+	// project packages share the same line shape, so both ride along
+	// (they are machine-global installs either way).
+	want := []string{"npm:@zzjcool/pi-herdr-subagents", "npm:local-tool", "npm:pi-lens"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ids = %v, want %v (sorted, filtered)", got, want)
+	}
+}
+
+func TestParseIDsWithPattern(t *testing.T) {
+	stdout := []byte(`User packages:
+  npm:pi-lens
+    /some/path/pi-lens
+  npm:other
+`)
+	ids := ParseIDsWithPattern(stdout, `^  (npm:[a-z-]+)$`)
+	if !reflect.DeepEqual(ids, []string{"npm:pi-lens", "npm:other"}) {
+		t.Fatalf("ids = %v", ids)
+	}
+	// empty pattern keeps every non-empty line (legacy behavior).
+	all := ParseIDsWithPattern(stdout, "")
+	if len(all) != 4 {
+		t.Fatalf("legacy ids = %v", all)
+	}
+}
+
+func manifestKindPtr() *core.CategoryKind {
+	kind := core.CategoryKindManifest
+	return &kind
 }

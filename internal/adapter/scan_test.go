@@ -454,7 +454,7 @@ func TestScanManifestWithInjectedPortAndLegacyCall(t *testing.T) {
 	if got := category(t, outcome.Snapshot, "extensions"); got.AdapterID != "fake" || got.Mode != core.SyncModeMirror {
 		t.Fatalf("manifest category metadata = %#v", got)
 	}
-	if got := category(t, outcome.Snapshot, "extensions").Files[manifest.VirtualFileName("extensions")]; got.Kind != "file" || got.Content != "pub.two\npub.one\n" {
+	if got := category(t, outcome.Snapshot, "extensions").Files[manifest.VirtualFileName("extensions")]; got.Kind != "file" || got.Content != "pub.one\npub.two\n" {
 		t.Fatalf("manifest file = %#v", got)
 	}
 	if got := category(t, outcome.Snapshot, "settings").Files["settings.json"].Content; got != "{}\n" {
