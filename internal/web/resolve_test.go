@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 )
 
@@ -15,8 +16,16 @@ import (
 // base "base", local "local", remote "remote".
 func conflictFixture(t *testing.T) webFixture {
 	t.Helper()
-	fixture := pullFixture(t, "remote\n")
-	if err := os.WriteFile(filepath.Join(fixture.tool, "settings.json"), []byte("local\n"), 0o644); err != nil {
+	fixture := makeFixture(t, "base\n", "local\n")
+	// The no-git data plane's center is a published hub generation.
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "remote\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	// The machine store keeps the base content.
+	storeFile := filepath.Join(fixture.home, "store", "pi", "settings", "settings.json")
+	if err := os.WriteFile(storeFile, []byte("base\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return fixture

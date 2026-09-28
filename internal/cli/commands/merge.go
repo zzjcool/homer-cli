@@ -32,6 +32,11 @@ type MergeDeps struct {
 	Sources any
 	NoFetch bool
 	Git     any
+	// No-git data plane seams (see PushDeps/PullDeps): an injected remote
+	// snapshot and/or upload sink replace the git transport. When either
+	// is present the git precondition chain is skipped.
+	HubSnapshot []core.AdapterSnapshot
+	HubSink     func(snapshot []core.AdapterSnapshot) error
 }
 
 type MergeStatus string
@@ -178,9 +183,12 @@ func RunMerge(options MergeOptions, deps *MergeDeps) (report MergeReport) {
 	if deps != nil {
 		git = gitPortFrom(deps.Git)
 	}
-	if err := mergePreconditions(paths, deps, git); err != nil {
-		report.Errors = errorLines(err)
-		return report
+	injected := deps != nil && (deps.HubSnapshot != nil || deps.HubSink != nil)
+	if !injected {
+		if err := mergePreconditions(paths, deps, git); err != nil {
+			report.Errors = errorLines(err)
+			return report
+		}
 	}
 
 	var sourceInput any
@@ -190,7 +198,11 @@ func RunMerge(options MergeOptions, deps *MergeDeps) (report MergeReport) {
 	// The precondition fetch has already happened. The injected-source path is
 	// still accepted for focused command tests; real collection reads the
 	// refreshed upstream without fetching a second time.
-	sources := collectSources(sourceInput, paths, *config, false)
+	var hubRemote []core.AdapterSnapshot
+	if deps != nil {
+		hubRemote = deps.HubSnapshot
+	}
+	sources := collectSources(sourceInput, paths, *config, false, hubRemote)
 	warnings := append([]string{}, sources.Warnings...)
 	errorsOut := append([]string{}, sources.Errors...)
 	plan := syncx.PlanPull(*config, sources.Base, sources.Local, sources.Remote)
@@ -230,26 +242,28 @@ func RunMerge(options MergeOptions, deps *MergeDeps) (report MergeReport) {
 		return result
 	}
 
-	// Re-check at the write boundary in case a user changed store during the
-	// interactive resolution prompts.
-	if err := git.requireCleanStore(paths); err != nil {
-		return tryError(err)
-	}
-	if err := git.requireFastForwardable(paths); err != nil {
-		return tryError(err)
-	}
-	ff := git.mergeFFUpstream(paths.Home)
-	if !ff.OK {
-		return tryError(fmt.Errorf("git merge --ff-only @{upstream} 失败: %s", firstLine(ff.Stderr)))
-	}
-	progressFF = true
-	upstreamHead := git.headCommit(paths.Home)
-	if upstreamHead == "" {
-		warnings = append(warnings, "ff 后无法解析 HEAD，state.lastSyncCommit 未更新")
-	} else if stateErr := nowState(paths, upstreamHead, "merge"); stateErr != nil {
-		return tryError(stateErr)
-	} else {
-		progressState = true
+	if !injected {
+		// Re-check at the write boundary in case a user changed store during the
+		// interactive resolution prompts.
+		if err := git.requireCleanStore(paths); err != nil {
+			return tryError(err)
+		}
+		if err := git.requireFastForwardable(paths); err != nil {
+			return tryError(err)
+		}
+		ff := git.mergeFFUpstream(paths.Home)
+		if !ff.OK {
+			return tryError(fmt.Errorf("git merge --ff-only @{upstream} 失败: %s", firstLine(ff.Stderr)))
+		}
+		progressFF = true
+		upstreamHead := git.headCommit(paths.Home)
+		if upstreamHead == "" {
+			warnings = append(warnings, "ff 后无法解析 HEAD，state.lastSyncCommit 未更新")
+		} else if stateErr := nowState(paths, upstreamHead, "merge"); stateErr != nil {
+			return tryError(stateErr)
+		} else {
+			progressState = true
+		}
 	}
 
 	subPlan := buildMergeResolutionPlan(plan, resolutions, *config, sources, &warnings)
@@ -310,6 +324,23 @@ func RunMerge(options MergeOptions, deps *MergeDeps) (report MergeReport) {
 			return tryError(writeErr)
 		}
 	}
+	if deps != nil && deps.HubSink != nil {
+		// No-git data plane: the resolution publishes to the hub and the
+		// machine store (already written above) is the new baseline.
+		if err := deps.HubSink(prepared); err != nil {
+			return tryError(err)
+		}
+		if stateErr := nowGenerationState(paths, "merge"); stateErr != nil {
+			return tryError(stateErr)
+		}
+		result := newMergeCommandReport(MergeStatusResolved)
+		result.Resolutions = mergeReportResolutions(resolutions)
+		result.Applied = applied
+		result.Warnings = warnings
+		result.Errors = errorsOut
+		return result
+	}
+
 	if git.isStoreClean(paths.Home) {
 		warnings = append(warnings, "重扫出的变更与 store 当前内容一致，无需新的提交")
 		result := newMergeCommandReport(MergeStatusResolved)

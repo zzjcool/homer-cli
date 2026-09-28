@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/gens"
 )
 
 // Conflict resolution (planner-frozen MVP step 4): the console never
@@ -43,11 +44,22 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
 
+	// No-git data plane: remote is the hub's current generation; a local
+	// resolution publishes back through the same generation machinery.
+	deps := &commands.MergeDeps{UI: commands.HeadlessUI{}, NoFetch: true}
+	if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
+		if snapshot, err := readSnapshotFromGeneration(head); err == nil {
+			deps.HubSnapshot = snapshot
+		}
+	}
+	if choice == string(resolveLocal) {
+		deps.HubSink = s.publishGeneration
+	}
 	report := commands.RunMerge(commands.MergeOptions{
 		HomerHome:    s.opts.HomerHome,
 		AcceptLocal:  choice == string(resolveLocal),
 		AcceptRemote: choice == string(resolveCenter),
-	}, &commands.MergeDeps{UI: commands.HeadlessUI{}})
+	}, deps)
 	status := string(report.Status)
 
 	switch {
@@ -75,13 +87,16 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		// local wins: content must also reach the center, then the fleet.
+		// The no-git seam reports a failed publication through status
+		// (error) — only the legacy git path leaks it via warnings and a
+		// missing commit.
 		pushFailed := false
 		for _, warning := range report.Warnings {
 			if strings.Contains(warning, "git push 失败") {
 				pushFailed = true
 			}
 		}
-		if pushFailed || report.Commit == "" {
+		if pushFailed {
 			writeJSON(w, http.StatusOK, resolveReport{
 				OK: false, Status: "partial", Choice: choice,
 				Agents: []agentApplyResult{},

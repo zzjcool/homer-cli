@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 )
 
@@ -104,7 +105,14 @@ func TestSyncToOthersDoesNotPullWhenPushRejected(t *testing.T) {
 }
 
 func TestSyncFromCenterDoesNotFanout(t *testing.T) {
-	fixture := pullFixture(t, "remote\n")
+	// No-git center: the hub's current generation carries the remote
+	// content (fixture tool "base", store "base").
+	fixture := makeFixture(t, "base\n", "base\n")
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "remote\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
 	source := &sourceStub{list: []AgentInfo{{AgentID: "online-1", Hostname: "box", Mode: "listen"}}}
 	server := newWebServer(t, fixture, "test-token", source, nil)
 	response := syncPost(t, server.Handler(), "direction=from-center&confirm=true")
@@ -172,5 +180,41 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	}
 	if snapshot.Store["pi"]["settings.json"] != "one\n" {
 		t.Fatalf("store = %v", snapshot.Store)
+	}
+}
+
+// 4c: the hub's own sync publishes locally (gens) — no git repository is
+// ever needed inside the hub home, and no HTTP self-loop either.
+func TestSyncToOthersPublishesGenerationLocally(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "local\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	response := syncPost(t, server.Handler(), "direction=to-others&confirm=true")
+	if response.Code != http.StatusOK {
+		t.Fatalf("sync = %d body=%s", response.Code, response.Body)
+	}
+	head, ok := gens.New(fixture.home).Read()
+	if !ok || head.Generation < 1 {
+		t.Fatalf("hub did not publish a generation: ok=%v head=%#v", ok, head)
+	}
+	tool, err := os.ReadFile(filepath.Join(head.StoreDir, "pi", "settings", "settings.json"))
+	if err != nil || string(tool) != "local\n" {
+		t.Fatalf("generation store = %q err=%v (want the pushed content)", tool, err)
+	}
+}
+
+// An uninitialized hub home carries no store baseline; sync to-others
+// bootstraps it (first contact semantics: everything is new).
+func TestSyncToOthersBootstrapsEmptyHome(t *testing.T) {
+	fixture := makeFixtureAtHome(t, filepath.Join(t.TempDir(), "hub"), "base\n")
+	setGitIdentity(t, fixture.home)
+	source := &sourceStub{pullRaw: []byte(`{"ok":true}`)}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := syncPost(t, server.Handler(), "direction=to-others&confirm=true")
+	if response.Code != http.StatusOK {
+		t.Fatalf("bootstrap sync = %d body=%s", response.Code, response.Body)
+	}
+	head, ok := gens.New(fixture.home).Read()
+	if !ok || head.Generation < 1 {
+		t.Fatalf("bootstrap generation = %#v ok=%v", head, ok)
 	}
 }

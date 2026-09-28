@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
 )
 
@@ -87,10 +88,16 @@ func (s *Server) syncFromCenter(w http.ResponseWriter, confirmed bool) {
 		})
 		return
 	}
+	deps := &commands.PullDeps{UI: commands.HeadlessUI{}, NoFetch: true}
+	if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
+		if snapshot, err := readSnapshotFromGeneration(head); err == nil {
+			deps.HubSnapshot = snapshot
+		}
+	}
 	report := commands.RunPull(commands.PullOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       true,
-	}, &commands.PullDeps{UI: commands.HeadlessUI{}})
+	}, deps)
 	status := string(report.Status)
 	errors := []string{}
 	if !report.OK {
@@ -119,7 +126,7 @@ func (s *Server) syncToOthers(w http.ResponseWriter, r *http.Request, confirmed 
 	push := commands.RunPush(commands.PushOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       true,
-	}, &commands.PushDeps{UI: commands.HeadlessUI{}})
+	}, &commands.PushDeps{UI: commands.HeadlessUI{}, HubSink: s.publishGeneration})
 	if !push.OK {
 		status := string(push.Status)
 		writeJSON(w, http.StatusUnprocessableEntity, syncReport{
@@ -287,4 +294,83 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) 
 		HomerJSON:  string(head.Meta),
 		Store:      store,
 	})
+}
+
+// publishGeneration is the hub-side push sink: it publishes the prepared
+// snapshots as the hub's new current generation. Local call — the hub
+// never HTTP-loops itself.
+func (s *Server) publishGeneration(snapshot []core.AdapterSnapshot) error {
+	store := map[string]map[string]string{}
+	meta := []byte("{}")
+	if data, err := os.ReadFile(filepath.Join(s.opts.HomerHome, "homer.json")); err == nil {
+		meta = data
+	}
+	for _, adapter := range snapshot {
+		for _, category := range adapter.Categories {
+			for relPath, entry := range category.Files {
+				if store[adapter.AdapterID] == nil {
+					store[adapter.AdapterID] = map[string]string{}
+				}
+				store[adapter.AdapterID][category.Category+"/"+relPath] = entry.Content
+			}
+		}
+	}
+	_, err := gens.New(s.opts.HomerHome).Publish(store, meta)
+	return err
+}
+
+// readSnapshotFromGeneration converts the hub's current generation back
+// into the adapter-snapshot form the pull pipeline consumes.
+func readSnapshotFromGeneration(head gens.Head) ([]core.AdapterSnapshot, error) {
+	store := map[string]map[string]string{}
+	err := filepath.WalkDir(head.StoreDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(head.StoreDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		segments := strings.SplitN(filepath.ToSlash(rel), "/", 3)
+		if len(segments) != 3 {
+			return nil
+		}
+		if store[segments[0]] == nil {
+			store[segments[0]] = map[string]string{}
+		}
+		store[segments[0]][segments[1]+"/"+segments[2]] = string(data)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	snapshots := []core.AdapterSnapshot{}
+	for adapterID, files := range store {
+		categories := map[string]*core.CategorySnapshot{}
+		for name, content := range files {
+			segments := strings.SplitN(name, "/", 2)
+			if len(segments) != 2 {
+				continue
+			}
+			if categories[segments[0]] == nil {
+				categories[segments[0]] = &core.CategorySnapshot{
+					AdapterID: adapterID,
+					Category:  segments[0],
+					Mode:      core.SyncModeMirror,
+					Files:     core.SnapshotFiles{},
+				}
+			}
+			categories[segments[0]].Files[segments[1]] = core.SnapshotEntry{Kind: "file", Content: content}
+		}
+		snapshot := core.AdapterSnapshot{AdapterID: adapterID, Categories: []core.CategorySnapshot{}}
+		for _, category := range categories {
+			snapshot.Categories = append(snapshot.Categories, *category)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
 }
