@@ -81,7 +81,15 @@
     const $ = (id) => document.getElementById(id);
     const state = { status: null, pending: null };
     const token = $("token");
-    token.value = sessionStorage.getItem("homer-token") || "";
+    // URL ?token= 自动登录：主节点浏览器书签一次即永久免填（serve 启动时
+    // 打印含 token 的控制台 URL）。读后立即从地址栏抹掉，避免历史/分享泄漏。
+    const fromURL = new URLSearchParams(location.search).get("token");
+    if (fromURL) {
+      token.value = fromURL; sessionStorage.setItem("homer-token", fromURL);
+      history.replaceState(null, "", location.pathname);
+    } else {
+      token.value = sessionStorage.getItem("homer-token") || "";
+    }
     token.addEventListener("change", () => sessionStorage.setItem("homer-token", token.value));
 
     async function api(path, options = {}) {

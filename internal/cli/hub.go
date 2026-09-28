@@ -96,6 +96,11 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		writeLine(out, "agent 接入: homer agent --connect http://<本机地址>"+agentPortSuffix(boundAddr))
 		writeLine(out, "查看含 token 的接入命令: homer serve --show-join")
 	}
+	// 控制台快捷链接：本机/局域网浏览器带 token 直接打开（书签一次即永久
+	// 免填令牌）。与接入命令同场显示，但只指向回环展示地址。
+	if display, ok := consoleURL(boundAddr, token); ok {
+		writeLine(out, "控制台（含令牌，勿外传）: "+display)
+	}
 	httpServer := &http.Server{
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -234,6 +239,26 @@ func joinCommand(boundAddr, token string) string {
 		}
 	}
 	return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --connect http://%s", token, net.JoinHostPort(host, port))
+}
+
+// consoleURL renders the ?token= console link for the human at the hub
+// machine. Only loopback binds get a localhost link; other binds use the
+// LAN address (same resolution as the agent join command).
+func consoleURL(boundAddr, token string) (string, bool) {
+	host, port, err := net.SplitHostPort(boundAddr)
+	if err != nil {
+		return "", false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return fmt.Sprintf("http://localhost:%s/?token=%s", port, token), true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		if lan, lanErr := hub.LanIPv4(); lanErr == nil {
+			return fmt.Sprintf("http://%s/?token=%s", net.JoinHostPort(lan.String(), port), token), true
+		}
+		return "", false
+	}
+	return fmt.Sprintf("http://%s/?token=%s", net.JoinHostPort(host, port), token), true
 }
 
 // showJoinCommand backs `homer serve --show-join`: resolve the persisted
