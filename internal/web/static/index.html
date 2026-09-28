@@ -237,6 +237,9 @@
       const gate = await api("/api/auth/status");
       if (!gate.configured) {
         showAuthGate(); $("auth-setup").classList.remove("hidden");
+        // Untrusted (public-internet) peers need the one-time code: show
+        // the field on first paint instead of after a rejected submit.
+        if (gate.setupCodeRequired) $("setup-code-row").classList.remove("hidden");
       }
     }
     async function handleAuthError(error) {

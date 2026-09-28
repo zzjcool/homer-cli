@@ -40,8 +40,8 @@ type authStore struct {
 	// fallback: remote servers initialize over the public internet by
 	// reading the code from the journal). It burns after one successful use
 	// and regenerates on every serve start.
-	setupCode    string
-	setupUsed    bool
+	setupCode string
+	setupUsed bool
 
 	failures    int
 	failBackoff time.Time // next allowed login attempt
@@ -282,10 +282,14 @@ func trustedPeerIP(ip net.IP) bool {
 func (s *Server) handleAuthAPI(w http.ResponseWriter, r *http.Request, path string) {
 	switch {
 	case path == "/api/auth/status":
-		// The UI polls this to decide between setup-first vs login form.
+		// The UI polls this to decide between setup-first vs login form. It
+		// also tells the browser up-front whether THIS peer must provide the
+		// one-time setup code — so the code field is visible on first paint,
+		// not after a rejected submit.
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":         true,
-			"configured": s.auth.hasPassword(s.homePath()),
+			"ok":                true,
+			"configured":        s.auth.hasPassword(s.homePath()),
+			"setupCodeRequired": !setupPeerAllowed(r),
 		})
 	case path == "/api/auth/setup" && r.Method == http.MethodPost:
 		s.handleAuthSetup(w, r)

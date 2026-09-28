@@ -360,3 +360,30 @@ func TestSetupCodeNotRequiredForLoopback(t *testing.T) {
 		t.Fatalf("loopback setup without code = %d body=%s", local.Code, local.Body)
 	}
 }
+
+// The status endpoint tells the browser up-front whether this peer needs
+// the one-time code — the code field must be visible on first paint for
+// public peers, never after a rejected submit.
+func TestAuthStatusRevealsCodeRequirement(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+
+	local := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	local.RemoteAddr = "127.0.0.1:5555"
+	local.Host = "127.0.0.1:7760"
+	localResponse := httptest.NewRecorder()
+	handler.ServeHTTP(localResponse, local)
+	if !strings.Contains(localResponse.Body.String(), `"setupCodeRequired":false`) {
+		t.Fatalf("loopback status = %s", localResponse.Body)
+	}
+
+	public := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	public.RemoteAddr = "203.0.113.9:5555"
+	public.Host = "homerhw.openaaas.org"
+	publicResponse := httptest.NewRecorder()
+	handler.ServeHTTP(publicResponse, public)
+	if !strings.Contains(publicResponse.Body.String(), `"setupCodeRequired":true`) {
+		t.Fatalf("public status = %s", publicResponse.Body)
+	}
+}
