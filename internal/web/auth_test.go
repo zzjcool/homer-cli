@@ -284,3 +284,79 @@ func TestPasswordRotationClearsSessions(t *testing.T) {
 		t.Fatalf("stale session survived password removal = %d", response.Code)
 	}
 }
+
+// One-time setup code: public-internet first-run initialization. Trusted
+// peers (loopback/LAN) skip the code; public peers must present it. The
+// code regenerates on serve restart and burns after one use.
+func TestSetupCodeFlows(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+
+	// Public peer without a code is rejected even with a valid password.
+	public := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"字password12345"}`))
+	public.Header.Set("Content-Type", "application/json")
+	public.RemoteAddr = "203.0.113.9:5555"
+	public.Host = "homerhw.openaaas.org"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, public)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("public no-code setup = %d", response.Code)
+	}
+
+	// The setup code is derived deterministically per boot; expose it for
+	// tests via the authStore.
+	code := server.SetupCode()
+	if code == "" || len(code) < 6 {
+		t.Fatalf("setup code = %q", code)
+	}
+
+	// Public peer WITH the correct code succeeds.
+	withCode := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"字password12345","setupCode":"`+code+`"}`))
+	withCode.Header.Set("Content-Type", "application/json")
+	withCode.RemoteAddr = "203.0.113.9:5555"
+	withCode.Host = "homerhw.openaaas.org"
+	withCodeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(withCodeResponse, withCode)
+	if withCodeResponse.Code != http.StatusOK {
+		t.Fatalf("public with-code setup = %d body=%s", withCodeResponse.Code, withCodeResponse.Body)
+	}
+
+	// The code burns after use: a second public setup (password reset by
+	// deleting the file) is refused even with the same code.
+	if err := os.Remove(filepath.Join(fixture.home, "keys", "hub-password")); err != nil {
+		t.Fatal(err)
+	}
+	burned := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"another-password-123","setupCode":"`+code+`"}`))
+	burned.Header.Set("Content-Type", "application/json")
+	burned.RemoteAddr = "203.0.113.9:5555"
+	burned.Host = "homerhw.openaaas.org"
+	burnedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(burnedResponse, burned)
+	if burnedResponse.Code != http.StatusForbidden {
+		t.Fatalf("burned code reused = %d", burnedResponse.Code)
+	}
+
+	// Wrong code on a fresh server is rejected.
+	fresh := newWebServer(t, fixture, "", nil, nil)
+	wrong := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"another-password-123","setupCode":"WRONG99"}`))
+	wrong.Header.Set("Content-Type", "application/json")
+	wrong.RemoteAddr = "203.0.113.9:5555"
+	wrong.Host = "homerhw.openaaas.org"
+	wrongResponse := httptest.NewRecorder()
+	fresh.Handler().ServeHTTP(wrongResponse, wrong)
+	if wrongResponse.Code != http.StatusForbidden {
+		t.Fatalf("wrong code = %d", wrongResponse.Code)
+	}
+}
+
+// Loopback peers never need the code (zero-friction local first-run).
+func TestSetupCodeNotRequiredForLoopback(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	// no setupCode in the payload at all
+	local := setupFromLoopback(t, server.Handler(), `{"password":"字password12345"}`)
+	if local.Code != http.StatusOK {
+		t.Fatalf("loopback setup without code = %d body=%s", local.Code, local.Body)
+	}
+}

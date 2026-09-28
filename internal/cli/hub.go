@@ -80,10 +80,12 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	}
 	writeLine(out, fmt.Sprintf("homer serve: http://%s（Ctrl+C 停止）", displayAddr(boundAddr)))
 	// First-run without a password: the console is locked until the
-	// administrator finishes setup in a browser (advisor rule 4: setup only
-	// from loopback/LAN peers).
+	// administrator finishes setup in a browser. Loopback/LAN browsers set
+	// the password bare; remote administrators use the one-time setup code
+	// below (read it over SSH, enter it in the public page).
 	if !hubReadPasswordFile(options.Home) {
 		writeLine(out, "首次使用：请在浏览器打开上述地址，设置管理员密码完成初始化。")
+		writeLine(out, "远程初始化码（一次性，公网页面需要）: "+server.SetupCode())
 	}
 	if token != "" {
 		writeLine(out, "已启用 agent token 鉴权（keys/hub-token 持久化，--show-join 查看）。")

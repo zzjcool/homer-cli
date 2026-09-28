@@ -37,6 +37,7 @@
       <h2>初始化管理员密码</h2>
       <p class="muted">首次使用：为 homer 控制台设置管理员密码（至少 12 个字符）。此页面仅限本机/局域网访问。</p>
       <form id="setup-form">
+        <label class="hidden" id="setup-code-row">初始化码 <input id="setup-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 位，见 serve 启动日志" autocomplete="one-time-code"></label>
         <label>密码 <input id="setup-password" type="password" autocomplete="new-password" required></label>
         <label>确认 <input id="setup-password2" type="password" autocomplete="new-password" required></label>
         <button type="submit">保存并进入</button>
@@ -278,10 +279,16 @@
       const first = $("setup-password").value, second = $("setup-password2").value;
       $("setup-error").textContent = "";
       if (first !== second) { $("setup-error").textContent = "两次输入不一致"; return; }
+      const body = { password: first };
+      const code = $("setup-code").value.trim();
+      if (code) body.setupCode = code;
       try {
-        await api("/api/auth/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: first }) });
+        await api("/api/auth/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         await refresh();
-      } catch (error) { $("setup-error").textContent = error.message; }
+      } catch (error) {
+        $("setup-error").textContent = error.message;
+        if (error.code === "setup-code-required") $("setup-code-row").classList.remove("hidden");
+      }
     });
     $("login-form").addEventListener("submit", async (event) => {
       event.preventDefault();

@@ -36,6 +36,13 @@ type authStore struct {
 	password bool // keys/hub-password exists and parsed
 	sessions map[string]time.Time
 
+	// setupCode is the one-time first-run code printed at boot (advisor
+	// fallback: remote servers initialize over the public internet by
+	// reading the code from the journal). It burns after one successful use
+	// and regenerates on every serve start.
+	setupCode    string
+	setupUsed    bool
+
 	failures    int
 	failBackoff time.Time // next allowed login attempt
 
@@ -47,6 +54,7 @@ type authStore struct {
 func newAuthStore(home string) *authStore {
 	store := &authStore{sessions: map[string]time.Time{}}
 	store.reload(home)
+	store.regenerateSetupCode()
 	return store
 }
 
@@ -295,7 +303,7 @@ func (s *Server) handleAuthAPI(w http.ResponseWriter, r *http.Request, path stri
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":    true,
+			"ok":      true,
 			"command": s.joinCommandForRequest(r),
 		})
 	default:
@@ -304,20 +312,28 @@ func (s *Server) handleAuthAPI(w http.ResponseWriter, r *http.Request, path stri
 }
 
 func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
-	if !setupPeerAllowed(r) {
-		writeError(w, http.StatusForbidden, "setup-not-allowed",
-			"首次设置仅限本机或局域网访问：请用 http://<本机IP>:<端口> 打开完成设置", nil)
+	// Trusted peers (loopback/LAN) set up bare. Public-internet peers must
+	// present the one-time setup code printed at serve startup — remote
+	// servers read it from the journal over SSH and initialize over the
+	// public internet (advisor fallback path).
+	var payload struct {
+		Password  string `json:"password"`
+		SetupCode string `json:"setupCode"`
+	}
+	if err := readJSONBody(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	// Trusted peers (loopback/LAN) set up bare; public-internet peers must
+	// present the one-time code printed at serve startup (remote-server
+	// first-run over SSH + browser). The code burns after one success.
+	if !setupPeerAllowed(r) && !s.auth.consumeSetupCode(payload.SetupCode) {
+		writeError(w, http.StatusForbidden, "setup-code-required",
+			"首次设置需要初始化码：请在 hub 机器上查看 serve 启动日志（或 journalctl -u homer-serve），输入 6 位初始化码", nil)
 		return
 	}
 	if s.auth.hasPassword(s.homePath()) {
 		writeError(w, http.StatusConflict, "already-configured", "管理员密码已设置", nil)
-		return
-	}
-	var payload struct {
-		Password string `json:"password"`
-	}
-	if err := readJSONBody(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
 		return
 	}
 	if message := validatePassword(payload.Password); message != "" {
@@ -394,4 +410,41 @@ func readJSONBody(r *http.Request, target any) error {
 		return fmt.Errorf("请求体不是有效的 JSON")
 	}
 	return nil
+}
+
+// regenerateSetupCode mints a fresh one-time first-run code (6 digits:
+// easy to read from a journal and retype, enough entropy against online
+// guessing once paired with the rate limit below).
+func (a *authStore) regenerateSetupCode() {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		a.setupCode = ""
+		return
+	}
+	number := (uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3])) % 1000000
+	a.setupCode = fmt.Sprintf("%06d", number)
+	a.setupUsed = false
+}
+
+// SetupCode exposes the current first-run code (for the serve startup
+// message; tests use it to exercise the public-internet flow).
+func (s *Server) SetupCode() string {
+	s.auth.mu.Lock()
+	defer s.auth.mu.Unlock()
+	return s.auth.setupCode
+}
+
+// consumeSetupCode validates and burns the one-time code. Empty candidate
+// means "no code provided".
+func (a *authStore) consumeSetupCode(candidate string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.setupUsed || a.setupCode == "" || candidate == "" {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(candidate), []byte(a.setupCode)) != 1 {
+		return false
+	}
+	a.setupUsed = true
+	return true
 }
