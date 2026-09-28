@@ -34,6 +34,12 @@ type Config struct {
 	PollWait      time.Duration
 	ReportTimeout time.Duration
 	Home          string
+	// AgentSecret: persisted per-agent credential (agent.json) that
+	// supersedes the shared token once this machine has enrolled.
+	AgentSecret string
+	// EnrollCode: one-time code from the install command; consumed at
+	// first successful registration, never persisted.
+	EnrollCode string
 }
 
 func (c Config) Mode() (hub.AgentMode, error) {
@@ -306,17 +312,19 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		Mode     hub.AgentMode `json:"mode"`
 		Addr     string        `json:"addr,omitempty"`
 		Version  string        `json:"version,omitempty"`
+		Code     string        `json:"code,omitempty"`
 	}{
 		AgentID:  d.cfg.AgentID,
 		Hostname: hostname,
 		Mode:     mode,
 		Version:  web.Version,
+		Code:     d.cfg.EnrollCode,
 	}
 	if mode == hub.AgentModeListen {
 		if strings.TrimSpace(d.cfg.AdvertiseURL) == "" {
 			advertiseURL, err := DeriveAdvertiseURL(d.cfg.ListenAddr)
 			if err != nil {
-				return err
+			return err
 			}
 			d.cfg.AdvertiseURL = advertiseURL
 		}
@@ -327,6 +335,40 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		return err
 	}
 	client := d.agentHTTPClient()
+	// With an enrollment code, hit /enroll: the hub binds a fresh
+	// per-agent secret to this agentID and registers it in one step. The
+	// code is one-shot; on success it is dropped from memory for good.
+	if strings.TrimSpace(d.cfg.EnrollCode) != "" {
+		responseBody, err := d.postJSONWithClient(ctx, client, d.endpointURL("enroll"), body)
+		if err != nil {
+			return err
+		}
+		var enrolled struct {
+			OK          bool   `json:"ok"`
+			AgentSecret string `json:"agentSecret"`
+			Error       *struct {
+				Code    string   `json:"code"`
+				Message string   `json:"message"`
+				Details []string `json:"details"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(responseBody, &enrolled); err != nil {
+			return err
+		}
+		if enrolled.Error != nil {
+			return fmt.Errorf("接入失败: %s", enrolled.Error.Message)
+		}
+		if !enrolled.OK || enrolled.AgentSecret == "" {
+			return fmt.Errorf("接入失败: hub 未返回 agent 密钥")
+		}
+		d.cfg.AgentSecret = enrolled.AgentSecret
+		d.cfg.EnrollCode = "" // one-shot: never keep it around
+		if err := d.saveAgentConfig(string(mode)); err != nil {
+			return err
+		}
+		return nil
+	}
+	// Plain registration (already enrolled, or legacy hub-token agents).
 	if _, err := d.postJSONWithClient(ctx, client, d.endpointURL("register"), body); err != nil {
 		return err
 	}
@@ -466,8 +508,13 @@ func (d *Daemon) postJSONWithClient(ctx context.Context, client *http.Client, en
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if d.cfg.Token != "" {
-		request.Header.Set("Authorization", "Bearer "+d.cfg.Token)
+	// Per-agent secret (enrolled machines) supersedes the shared hub token.
+	bearer := d.cfg.AgentSecret
+	if bearer == "" {
+		bearer = d.cfg.Token
+	}
+	if bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	response, err := client.Do(request)
 	if err != nil {

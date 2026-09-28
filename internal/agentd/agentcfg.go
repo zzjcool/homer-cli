@@ -23,6 +23,14 @@ type AgentConfig struct {
 	HubURL       string `json:"hubUrl,omitempty"`     // listen mode registration address
 	ListenAddr   string `json:"listenAddr,omitempty"`
 	AdvertiseURL string `json:"advertiseUrl,omitempty"`
+	// AgentSecret is this machine's per-agent credential issued at
+	// enrollment (Tailscale-style). It replaces the shared hub token for
+	// agent traffic; agent.json stays 0600 so the secret is at rest safe.
+	AgentSecret string `json:"agentSecret,omitempty"`
+	// EnrollCode carries a one-time enrollment code passed via the install
+	// command; it is consumed on first successful registration and never
+	// persisted.
+	EnrollCode string `json:"-"`
 }
 
 func agentConfigPath(home string) string {
@@ -272,8 +280,9 @@ func (d *Daemon) saveAgentConfig(mode string) error {
 		return nil
 	}
 	cfg := AgentConfig{
-		AgentID: d.cfg.AgentID,
-		Mode:    mode,
+		AgentID:     d.cfg.AgentID,
+		Mode:        mode,
+		AgentSecret: d.cfg.AgentSecret,
 	}
 	switch mode {
 	case "connect":

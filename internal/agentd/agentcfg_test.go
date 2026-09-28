@@ -187,13 +187,14 @@ func TestFailedRegisterDoesNotPersist(t *testing.T) {
 
 func TestAgentdAdvertiseFallbackConcreteIP(t *testing.T) {
 	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, ""))
+	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
 	defer hubServer.Close()
 	d := New(Config{
 		Home:       t.TempDir(),
 		HubURL:     hubServer.URL,
 		ListenAddr: "192.168.1.5:7761",
 		AgentID:    "listen-fallback-agent",
+		Token:      "token",
 	}, newRecordingExecutor())
 	if err := d.register(context.Background(), hub.AgentModeListen, "host"); err != nil {
 		t.Fatal(err)

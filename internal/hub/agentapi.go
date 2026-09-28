@@ -16,12 +16,19 @@ const agentHeartbeatSeconds = 60
 // /agent/v1/ through web.ServeOptions.AgentEndpoint or use it directly in a
 // test/server.
 type AgentAPI struct {
-	Registry *Registry
-	Token    string
+	Registry   *Registry
+	Token      string
+	Enrollment *EnrollmentManager
 }
 
 func NewAgentAPI(reg *Registry, token string) *AgentAPI {
-	return &AgentAPI{Registry: reg, Token: token}
+	return &AgentAPI{Registry: reg, Token: token, Enrollment: NewEnrollmentManager()}
+}
+
+// SetEnrollment wires a shared EnrollmentManager (hub process singleton).
+func (a *AgentAPI) SetEnrollment(m *EnrollmentManager) *AgentAPI {
+	a.Enrollment = m
+	return a
 }
 
 func (a *AgentAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +36,26 @@ func (a *AgentAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAgentError(w, http.StatusInternalServerError, "internal", "hub registry 未初始化")
 		return
 	}
+	path := strings.TrimPrefix(r.URL.Path, "/agent/v1")
+	if path == r.URL.Path {
+		// Accept the stripped form as well. This makes the handler usable both
+		// directly and behind http.StripPrefix without changing the wire path.
+		path = strings.TrimPrefix(path, "/")
+		path = "/" + path
+	}
+	path = strings.TrimSuffix(path, "/")
+
+	// Enrollment is the only endpoint reachable with an enrollment code
+	// instead of a live credential.
+	if path == "/enroll" {
+		if r.Method != http.MethodPost {
+			writeAgentError(w, http.StatusMethodNotAllowed, "method-not-allowed", "不支持的请求方法")
+			return
+		}
+		a.handleEnroll(w, r)
+		return
+	}
+
 	if !a.authorized(r) {
 		writeAgentError(w, http.StatusUnauthorized, "unauthorized", "未授权：请提供有效的 Bearer token")
 		return
@@ -38,14 +65,6 @@ func (a *AgentAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/agent/v1")
-	if path == r.URL.Path {
-		// Accept the stripped form as well. This makes the handler usable both
-		// directly and behind http.StripPrefix without changing the wire path.
-		path = strings.TrimPrefix(path, "/")
-		path = "/" + path
-	}
-	path = strings.TrimSuffix(path, "/")
 	switch path {
 	case "/register":
 		a.handleRegister(w, r)
@@ -58,13 +77,23 @@ func (a *AgentAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// authorized accepts either a per-agent enrollment secret (the normal
+// path) or the management hub token (migration window for agents that
+// predate per-agent credentials).
 func (a *AgentAPI) authorized(r *http.Request) bool {
-	if a.Token == "" {
+	if a.Token == "" && a.Enrollment == nil {
 		return true
 	}
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	const prefix = "Bearer "
-	return strings.HasPrefix(value, prefix) && strings.TrimSpace(strings.TrimPrefix(value, prefix)) == a.Token
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	bearer := strings.TrimSpace(strings.TrimPrefix(value, prefix))
+	if a.Enrollment != nil && a.Enrollment.AuthorizedAgent(bearer) != "" {
+		return true
+	}
+	return a.Token != "" && bearer == a.Token
 }
 
 type registerRequest struct {
@@ -73,6 +102,60 @@ type registerRequest struct {
 	Mode     AgentMode `json:"mode"`
 	Addr     string    `json:"addr"`
 	Version  string    `json:"version"`
+}
+
+// enrollRequest is the Tailscale-style onboarding payload: an agent
+// presents a one-time enrollment code and its identity, and receives a
+// per-agent secret that replaces the shared hub token from then on.
+type enrollRequest struct {
+	Code     string    `json:"code"`
+	AgentID  string    `json:"agentId"`
+	Hostname string    `json:"hostname"`
+	Mode     AgentMode `json:"mode"`
+	Addr     string    `json:"addr"`
+	Version  string    `json:"version"`
+}
+
+func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	var request enrollRequest
+	if err := decodeAgentJSON(r, &request); err != nil {
+		writeAgentError(w, http.StatusBadRequest, "bad-request", "请求参数无效")
+		return
+	}
+	if a.Enrollment == nil {
+		writeAgentError(w, http.StatusInternalServerError, "enroll-disabled", "接入未启用（hub 版本不匹配）")
+		return
+	}
+	if strings.TrimSpace(request.AgentID) == "" {
+		writeAgentError(w, http.StatusBadRequest, "bad-request", "agentId 不能为空")
+		return
+	}
+	secret, err := a.Enrollment.Redeem(strings.TrimSpace(request.Code))
+	if err != nil {
+		writeAgentError(w, http.StatusForbidden, "enroll-rejected", err.Error())
+		return
+	}
+	// Bind then register: the agent's first authenticated call may race
+	// with this response, so the binding must exist before we answer.
+	a.Enrollment.BindAgent(request.AgentID, secret)
+	if err := a.Registry.Register(AgentInfo{
+		AgentID:  request.AgentID,
+		Hostname: request.Hostname,
+		Mode:     request.Mode,
+		Addr:     request.Addr,
+		Version:  request.Version,
+	}); err != nil {
+		// Registration validates mode/addr shape; the code stays burned —
+		// a malformed agent should not get a second try with the same code.
+		writeAgentError(w, http.StatusBadRequest, "bad-request", err.Error())
+		return
+	}
+	a.Registry.Touch(request.AgentID)
+	writeAgentJSON(w, http.StatusOK, struct {
+		OK               bool   `json:"ok"`
+		AgentSecret      string `json:"agentSecret"`
+		HeartbeatSeconds int    `json:"heartbeatSeconds"`
+	}{true, secret, agentHeartbeatSeconds})
 }
 
 func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {

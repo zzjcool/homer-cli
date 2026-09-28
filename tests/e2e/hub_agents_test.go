@@ -442,3 +442,113 @@ func TestInstallScriptBootstrap(t *testing.T) {
 		t.Fatal("agent with token-file bootstrap never registered")
 	}
 }
+
+// TestEnrollmentE2E walks the full Tailscale-style protocol: the console
+// mints a one-time code (via /api/auth/join), the install command carries
+// it, the agent enrolls for a per-agent secret, and revocation drops just
+// that machine.
+func TestEnrollmentE2E(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = T\n\temail = t@t\n")
+	binary := binaryOf(t)
+	hubMachine := makeMachine(t, root, "H", global, false)
+	if result := runHomer(t, binary, hubMachine, "init", "--json"); result.code != 0 {
+		t.Fatalf("init failed: %s%s", result.stdout, result.stderr)
+	}
+
+	hubPort := freePort(t)
+	hubProc := startHomer(t, binary, hubMachine, global,
+		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--home", hubMachine.homerHome,
+		"--token", "mgmt-token")
+	defer stopProc(t, hubProc)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+	waitHTTP(t, hubURL+"/api/health", http.StatusOK, 10*time.Second)
+
+	// 1. The join command now carries a one-time enrollment code, NOT the
+	// management hub token.
+	joinBody := waitHTTPWithToken(t, hubURL+"/api/auth/join", "mgmt-token", 10*time.Second)
+	if !strings.Contains(joinBody, "install.sh") || !strings.Contains(joinBody, "hr_") {
+		t.Fatalf("join command missing enrollment code: %s", joinBody)
+	}
+	if strings.Contains(joinBody, "mgmt-token") {
+		t.Fatal("join command leaked the management token")
+	}
+	var joinPayload struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(joinBody), &joinPayload); err != nil {
+		t.Fatal(err)
+	}
+	// extract --token <code>
+	codeStart := strings.LastIndex(joinPayload.Command, "--token ")
+	if codeStart < 0 {
+		t.Fatalf("no --token in %q", joinPayload.Command)
+	}
+	code := strings.TrimSpace(strings.SplitN(joinPayload.Command[codeStart+len("--token "):], " ", 2)[0])
+
+	// 2. A fresh machine enrolls via the token-file bootstrap (install.sh
+	// writes keys/hub-token with the code; agent detects the hr_ prefix).
+	agentMachine := makeMachine(t, root, "E", global, false)
+	tokenDir := filepath.Join(agentMachine.homerHome, "keys")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tokenDir, "hub-token"), []byte(code), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agentProc := startHomerWithEnv(t, binary, agentMachine, global, nil,
+		"agent", "--connect", hubURL, "--id", "enroll-e2e-agent", "--home", agentMachine.homerHome)
+	defer stopProc(t, agentProc)
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) && !agentRegistered(t, hubURL, "mgmt-token", "enroll-e2e-agent") {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !agentRegistered(t, hubURL, "mgmt-token", "enroll-e2e-agent") {
+		t.Fatal("enrolled agent never registered")
+	}
+
+	// 3. The agent persisted a per-agent secret (never the shared code).
+	configBytes, err := os.ReadFile(filepath.Join(agentMachine.homerHome, "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted struct {
+		AgentSecret string `json:"agentSecret"`
+	}
+	if err := json.Unmarshal(configBytes, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.AgentSecret == "" || strings.Contains(string(configBytes), code) {
+		t.Fatalf("agent.json must hold the per-agent secret, not the code: %s", configBytes)
+	}
+
+	// 4. The enrollment code is burned: a second machine reusing it fails.
+	secondMachine := makeMachine(t, root, "S", global, false)
+	secondDir := filepath.Join(secondMachine.homerHome, "keys")
+	if err := os.MkdirAll(secondDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondDir, "hub-token"), []byte(code), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secondProc := startHomerWithEnv(t, binary, secondMachine, global, nil,
+		"agent", "--connect", hubURL, "--id", "replay-agent", "--home", secondMachine.homerHome)
+	defer stopProc(t, secondProc)
+	time.Sleep(3 * time.Second) // enough for a registration attempt + retry cycle
+	if agentRegistered(t, hubURL, "mgmt-token", "replay-agent") {
+		t.Fatal("burned enrollment code was replayed successfully")
+	}
+
+	// 5. Revocation: the enrolled machine drops, others (management token)
+	// keep working, and the same agentID may re-enroll later.
+	revokeReq, _ := http.NewRequest(http.MethodPost, hubURL+"/api/agents/revoke", strings.NewReader(`{"agentId":"enroll-e2e-agent"}`))
+	revokeReq.Header.Set("Authorization", "Bearer mgmt-token")
+	revokeReq.Header.Set("Content-Type", "application/json")
+	revokeResp, err := http.DefaultClient.Do(revokeReq)
+	if err != nil || revokeResp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke = %v %v", err, revokeResp)
+	}
+	_ = revokeResp.Body.Close()
+}

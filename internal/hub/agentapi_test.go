@@ -46,10 +46,10 @@ func TestAgentAPIRegister(t *testing.T) {
 
 func TestAgentAPIPollLongWait(t *testing.T) {
 	registry := NewRegistry()
-	server := httptest.NewServer(NewAgentAPI(registry, ""))
+	server := httptest.NewServer(NewAgentAPI(registry, "test-hub-token"))
 	defer server.Close()
 
-	missing := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "missing", "waitSeconds": 0})
+	missing := postAgentJSON(t, server.URL+"/agent/v1/poll", "test-hub-token", map[string]any{"agentId": "missing", "waitSeconds": 0})
 	if missing.StatusCode != http.StatusNotFound || errorCode(t, missing.Body) != "agent-not-found" {
 		t.Fatalf("missing poll = %d %s", missing.StatusCode, missing.Body)
 	}
@@ -59,7 +59,7 @@ func TestAgentAPIPollLongWait(t *testing.T) {
 
 	pollResult := make(chan agentHTTPResponse, 1)
 	go func() {
-		pollResult <- postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": 1})
+		pollResult <- postAgentJSON(t, server.URL+"/agent/v1/poll", "test-hub-token", map[string]any{"agentId": "agent-a", "waitSeconds": 1})
 	}()
 	time.Sleep(50 * time.Millisecond)
 	task := Task{TaskID: "poll-task", Kind: TaskKindStatus, CreatedAt: time.Now()}
@@ -83,7 +83,7 @@ func TestAgentAPIPollLongWait(t *testing.T) {
 		t.Fatal("poll did not wake after enqueue")
 	}
 
-	next := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": 0})
+	next := postAgentJSON(t, server.URL+"/agent/v1/poll", "test-hub-token", map[string]any{"agentId": "agent-a", "waitSeconds": 0})
 	if next.StatusCode != http.StatusOK {
 		t.Fatalf("second poll status = %d", next.StatusCode)
 	}
@@ -98,7 +98,7 @@ func TestAgentAPIPollLongWait(t *testing.T) {
 
 func TestAgentAPIReport(t *testing.T) {
 	registry := NewRegistry()
-	api := NewAgentAPI(registry, "")
+	api := NewAgentAPI(registry, "test-hub-token")
 	server := httptest.NewServer(api)
 	defer server.Close()
 	if err := registry.Register(AgentInfo{AgentID: "agent-a", Mode: AgentModeConnect}); err != nil {
@@ -108,7 +108,7 @@ func TestAgentAPIReport(t *testing.T) {
 	if err := registry.Enqueue("agent-a", task); err != nil {
 		t.Fatal(err)
 	}
-	polled := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": 0})
+	polled := postAgentJSON(t, server.URL+"/agent/v1/poll", "test-hub-token", map[string]any{"agentId": "agent-a", "waitSeconds": 0})
 	if polled.StatusCode != http.StatusOK {
 		t.Fatalf("poll = %d %s", polled.StatusCode, polled.Body)
 	}
@@ -122,7 +122,7 @@ func TestAgentAPIReport(t *testing.T) {
 		}
 		waitResult <- result
 	}()
-	report := postAgentJSON(t, server.URL+"/agent/v1/report", "", map[string]any{
+	report := postAgentJSON(t, server.URL+"/agent/v1/report", "test-hub-token", map[string]any{
 		"agentId": "agent-a", "taskId": task.TaskID, "ok": true, "report": map[string]any{"ready": true},
 	})
 	if report.StatusCode != http.StatusOK || !json.Valid(report.Body) {
@@ -137,7 +137,7 @@ func TestAgentAPIReport(t *testing.T) {
 		t.Fatal("Wait did not receive report")
 	}
 
-	unknown := postAgentJSON(t, server.URL+"/agent/v1/report", "", map[string]any{
+	unknown := postAgentJSON(t, server.URL+"/agent/v1/report", "test-hub-token", map[string]any{
 		"agentId": "agent-a", "taskId": "unknown", "ok": true,
 	})
 	if unknown.StatusCode != http.StatusNotFound || errorCode(t, unknown.Body) != "task-not-found" {
@@ -196,20 +196,20 @@ func errorCode(t *testing.T, body []byte) string {
 
 func TestAgentAPIPollWaitBounds(t *testing.T) {
 	registry := NewRegistry()
-	server := httptest.NewServer(NewAgentAPI(registry, ""))
+	server := httptest.NewServer(NewAgentAPI(registry, "test-hub-token"))
 	defer server.Close()
 	if err := registry.Register(AgentInfo{AgentID: "agent-a", Mode: AgentModeConnect}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Negative waitSeconds is rejected outright.
-	negative := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": -1})
+	negative := postAgentJSON(t, server.URL+"/agent/v1/poll", "test-hub-token", map[string]any{"agentId": "agent-a", "waitSeconds": -1})
 	if negative.StatusCode != http.StatusBadRequest || errorCode(t, negative.Body) != "bad-request" {
 		t.Fatalf("negative poll = %d %s", negative.StatusCode, negative.Body)
 	}
 
 	// Above the ceiling is rejected too (the guard added in the review fix).
-	oversized := postAgentJSON(t, server.URL+"/agent/v1/poll", "", map[string]any{"agentId": "agent-a", "waitSeconds": agentMaxPollWaitSeconds + 1})
+	oversized := postAgentJSON(t, server.URL+"/agent/v1/poll", "test-hub-token", map[string]any{"agentId": "agent-a", "waitSeconds": agentMaxPollWaitSeconds + 1})
 	if oversized.StatusCode != http.StatusBadRequest || errorCode(t, oversized.Body) != "bad-request" {
 		t.Fatalf("oversized poll = %d %s", oversized.StatusCode, oversized.Body)
 	}
@@ -222,11 +222,67 @@ func TestAgentAPIPollWaitBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	request.Header.Set("Authorization", "Bearer test-hub-token")
 	response, err := http.DefaultClient.Do(request)
 	if err == nil {
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("default poll = %d", response.StatusCode)
 		}
+	}
+}
+
+// The Tailscale-style enrollment flow: an agent redeems a one-time code
+// for a per-agent secret, then authenticates with that secret alone.
+func TestAgentAPIEnrollFlow(t *testing.T) {
+	registry := NewRegistry()
+	api := NewAgentAPI(registry, "hub-token")
+	server := httptest.NewServer(api)
+	defer server.Close()
+
+	code, err := api.Enrollment.Mint(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enroll with a wrong-shaped code: rejected.
+	if response := postAgentJSON(t, server.URL+"/agent/v1/enroll", "", map[string]any{
+		"code": "hr_wrong", "agentId": "agent-e", "mode": "connect",
+	}); response.StatusCode != http.StatusForbidden {
+		t.Fatalf("bad code enroll = %d %s", response.StatusCode, response.Body)
+	}
+
+	// Enroll with the real code: returns a secret.
+	enrolled := postAgentJSON(t, server.URL+"/agent/v1/enroll", "", map[string]any{
+		"code": code, "agentId": "agent-e", "hostname": "box", "mode": "connect", "version": "dev",
+	})
+	if enrolled.StatusCode != http.StatusOK || !strings.Contains(string(enrolled.Body), "agentSecret") {
+		t.Fatalf("enroll = %d %s", enrolled.StatusCode, enrolled.Body)
+	}
+	var payload struct {
+		OK          bool   `json:"ok"`
+		AgentSecret string `json:"agentSecret"`
+	}
+	if err := json.Unmarshal([]byte(enrolled.Body), &payload); err != nil || payload.AgentSecret == "" {
+		t.Fatalf("enroll payload: %v %s", err, enrolled.Body)
+	}
+
+	// The agent now authenticates with its own secret — hub token not
+	// needed (poll is auth-gated, so 200 proves the secret works).
+	polled := postAgentJSON(t, server.URL+"/agent/v1/poll", payload.AgentSecret,
+		map[string]any{"agentId": "agent-e", "waitSeconds": 0})
+	if polled.StatusCode != http.StatusOK {
+		t.Fatalf("poll with agent secret = %d %s", polled.StatusCode, polled.Body)
+	}
+
+	// Revocation: the machine list API drops the binding; poll 401s while
+	// siblings (hub token) keep working.
+	api.Enrollment.Revoke("agent-e")
+	if revoked := postAgentJSON(t, server.URL+"/agent/v1/poll", payload.AgentSecret,
+		map[string]any{"agentId": "agent-e", "waitSeconds": 0}); revoked.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("poll after revoke = %d", revoked.StatusCode)
+	}
+	if still := postAgentJSON(t, server.URL+"/agent/v1/poll", "hub-token",
+		map[string]any{"agentId": "agent-e", "waitSeconds": 0}); still.StatusCode != http.StatusOK {
+		t.Fatalf("hub token poll after revoke = %d (management token must stay valid)", still.StatusCode)
 	}
 }

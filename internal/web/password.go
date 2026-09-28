@@ -407,16 +407,24 @@ func validatePassword(password string) string {
 }
 
 // joinCommandForRequest renders the full one-line bootstrap for
-// authenticated administrators: a Tailscale-style install pipe with the
-// token as the argument. The request's own Host picks the URL so the
-// command matches how the hub was reached.
+// authenticated administrators: a Tailscale-style install pipe carrying a
+// freshly minted one-time enrollment code. The shared hub token is never
+// exposed here — each machine gets its own credential at enrollment.
 func (s *Server) joinCommandForRequest(r *http.Request) string {
-	if s.opts.Token == "" {
-		// Loopback hub without a token: nothing to bootstrap with; point at
-		// the plain connect line.
-		return fmt.Sprintf("homer agent --connect %s", requestBaseURL(r))
+	base := requestBaseURL(r)
+	if s.opts.Enrollment == nil {
+		// Hub without enrollment support: fall back to the legacy
+		// hub-token shape (embedded deployments).
+		if s.opts.Token == "" {
+			return fmt.Sprintf("homer agent --connect %s", base)
+		}
+		return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, s.opts.Token)
 	}
-	return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", requestBaseURL(r), s.opts.Token)
+	code, err := s.opts.Enrollment.Mint(24 * time.Hour)
+	if err != nil {
+		return fmt.Sprintf("# 接入码生成失败: %s", err.Error())
+	}
+	return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, code)
 }
 
 // readJSONBody decodes a small JSON request body (auth payloads only).

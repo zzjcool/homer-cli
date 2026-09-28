@@ -87,6 +87,8 @@ section > h2 { font-size: var(--fs-small); text-transform: uppercase; letter-spa
 .cat-line .cat-name { font-family: var(--mono); min-width: 8em; color: var(--ink-dim); }
 .cat-line .row-actions { margin-left: auto; }
 button.small-btn { min-height: 32px; padding: 0 10px; font-size: var(--fs-small); }
+button.danger-btn { color: var(--danger); border-color: var(--danger); }
+button.danger-btn:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 
 /* diff drawer */
 .diff-drawer { margin: 8px 0 8px 20px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
@@ -524,6 +526,19 @@ function renderAgents(agents, disabledFeature) {
     line.append(el("span", "meta",
       (a.mode === "listen" ? "直连" : "主动连接") + " · " + a.lastSeen + (a.stale ? " · 离线" : "")));
     if (a.stale) line.append(el("span", "small muted", "离线期间不产生同步"));
+    // 吊销：Tailscale 式单机踢除，不影响其他机器。二次确认防止误触。
+    const revoke = el("button", "small-btn danger-btn", "吊销");
+    revoke.type = "button";
+    revoke.title = "吊销该机器的接入凭证（其下次心跳立即失效；不影响其他机器）";
+    revoke.addEventListener("click", async () => {
+      if (!confirm("吊销 " + (a.hostname || a.agentId) + "？\n该机器将立即失去接入权限（重新接入需生成新接入码）。")) return;
+      try {
+        await api("/api/agents/revoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.agentId }) });
+        toast("已吊销 " + (a.hostname || a.agentId));
+        await loadAgents();
+      } catch (e) { toast("吊销失败：" + e.message); }
+    });
+    line.append(revoke);
     list.append(line);
   });
   const joinBtn = el("button", "small-btn", "＋ 接入新机器");

@@ -82,6 +82,18 @@ type ServeOptions struct {
 	Identity      *AgentIdentity
 	Agents        AgentsSource
 	AgentEndpoint http.Handler
+	// Enrollment is the shared Tailscale-style enrollment manager: the
+	// console mints one-time codes and revokes per-agent secrets through
+	// it. Declared as an interface to keep the web package free of the
+	// hub dependency (hub imports web for AgentsSource).
+	Enrollment EnrollmentService
+}
+
+// EnrollmentService is the subset of the enrollment manager the console
+// needs: minting join codes and revoking machines.
+type EnrollmentService interface {
+	Mint(ttl time.Duration) (string, error)
+	Revoke(agentID string) bool
 }
 
 // Server is the P1 HTTP server. Its handler is built once so Handler can be

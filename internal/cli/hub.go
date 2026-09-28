@@ -66,12 +66,14 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	}
 	registry := hub.NewRegistry()
 	dispatcher := hub.NewDispatcher(registry, token)
+	enrollment := hub.NewEnrollmentManager()
 	server, err := web.NewServer(web.ServeOptions{
 		Addr:          boundAddr,
 		HomerHome:     options.Home,
 		Token:         token,
 		Agents:        dispatcher,
-		AgentEndpoint: hub.NewAgentAPI(registry, token),
+		AgentEndpoint: hub.NewAgentAPI(registry, token).SetEnrollment(enrollment),
+		Enrollment:    enrollment,
 	})
 	if err != nil {
 		_ = listener.Close()
@@ -141,18 +143,41 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 func runAgent(options CommandOptions, out, errOut io.Writer) int {
 	token := hubTokenFromEnv(options.Token)
 	paths := ResolveHomerPaths(options.Home)
-	// Tailscale-style bootstrap: the install script lands the token in
-	// keys/hub-token on the agent machine. Priority stays flag > env > file
-	// (same shape as the hub side; the file is written 0600 by the script).
-	if token == "" {
+	// Tailscale-style bootstrap: the install script lands the credential in
+	// keys/hub-token on the agent machine. An hr_-prefixed value is a
+	// one-time enrollment code (consumed at first registration for a
+	// per-agent secret); anything else is a legacy shared hub token.
+	// Priority stays flag > env > file.
+	enrollCode := ""
+	if strings.HasPrefix(token, "hr_") {
+		enrollCode, token = token, ""
+	}
+	if token == "" && enrollCode == "" {
 		if fileToken, ok := hub.ReadHubToken(paths.Home); ok {
-			token = fileToken
+			if strings.HasPrefix(fileToken, "hr_") {
+				enrollCode = fileToken
+			} else {
+				token = fileToken
+			}
+		}
+	}
+	// A persisted per-agent secret (agent.json) supersedes shared tokens.
+	var persisted agentd.AgentConfig
+	if loaded, ok := agentd.LoadAgentConfig(paths.Home); ok {
+		persisted = loaded
+	}
+	if persisted.AgentSecret != "" {
+		// Already enrolled: keep using this machine's own secret.
+		if token == "" && enrollCode == "" {
+			token = persisted.AgentSecret
 		}
 	}
 	config := agentd.Config{
 		Home:         paths.Home,
 		HomerHome:    options.Home,
 		Token:        token,
+		AgentSecret:  persisted.AgentSecret,
+		EnrollCode:   enrollCode,
 		ListenAddr:   options.Listen,
 		AdvertiseURL: options.Advertise,
 		ConnectURL:   options.Connect,

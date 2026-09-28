@@ -159,10 +159,10 @@ func TestAgentdConnectLoop(t *testing.T) {
 
 func TestAgentdDispatchPerKind(t *testing.T) {
 	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, ""))
+	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
 	defer hubServer.Close()
 	exec := newRecordingExecutor()
-	cfg := Config{ConnectURL: hubServer.URL, AgentID: "dispatch-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
+	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "dispatch-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan error, 1)
@@ -215,11 +215,11 @@ func TestAgentdDispatchPerKind(t *testing.T) {
 
 func TestAgentdExecutorError(t *testing.T) {
 	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, ""))
+	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
 	defer hubServer.Close()
 	exec := newRecordingExecutor()
 	exec.statusErr = errors.New("status failed")
-	cfg := Config{ConnectURL: hubServer.URL, AgentID: "error-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
+	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "error-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan error, 1)
@@ -246,11 +246,11 @@ func TestAgentdExecutorError(t *testing.T) {
 
 func TestAgentdReportTimeout(t *testing.T) {
 	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, ""))
+	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
 	defer hubServer.Close()
 	exec := newRecordingExecutor()
 	exec.blockStatus = true
-	cfg := Config{ConnectURL: hubServer.URL, AgentID: "timeout-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: 30 * time.Millisecond}
+	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "timeout-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: 30 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan error, 1)
@@ -293,9 +293,9 @@ func TestAgentdReportTimeout(t *testing.T) {
 
 func TestAgentdCtxCancel(t *testing.T) {
 	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, ""))
+	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
 	defer hubServer.Close()
-	cfg := Config{ConnectURL: hubServer.URL, AgentID: "cancel-agent", PollWait: 10 * time.Second, PollInterval: time.Millisecond}
+	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "cancel-agent", PollWait: 10 * time.Second, PollInterval: time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- New(cfg, newRecordingExecutor()).Run(ctx) }()

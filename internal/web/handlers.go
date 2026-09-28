@@ -68,7 +68,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveSelfBinary(w, r)
 		return
 	}
-	if strings.HasPrefix(path, "/api/") || path == "/api" || strings.HasPrefix(path, "/agent/") {
+	if strings.HasPrefix(path, "/api/") || path == "/api" || (strings.HasPrefix(path, "/agent/") && path != "/agent/v1/enroll") {
+		// /agent/v1/enroll carries its own one-time-code credential —
+		// the whole point is that the machine has nothing else yet.
 		if !s.requireAuth(w, r) {
 			return
 		}
@@ -111,6 +113,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAgents(w, r)
+	case path == "/api/agents/revoke":
+		// Tailscale-style machine revocation: drops the per-agent secret.
+		// The machine's next poll 401s immediately; siblings unaffected.
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleAgentRevoke(w, r)
 	case path == "/agent/v1/info":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
@@ -514,4 +524,30 @@ func (s *Server) serveSelfBinary(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, "homer", info.ModTime(), file)
+}
+
+// handleAgentRevoke drops a machine's per-agent enrollment secret. The
+// revoked machine 401s on its next poll; other machines are unaffected.
+// The agentID stays eligible for a fresh enrollment (re-install scenario).
+func (s *Server) handleAgentRevoke(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Enrollment == nil {
+		writeError(w, http.StatusNotImplemented, "enroll-disabled", "此 hub 未启用机器接入（旧版本）", nil)
+		return
+	}
+	var payload struct {
+		AgentID string `json:"agentId"`
+	}
+	if err := readJSONBody(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	if strings.TrimSpace(payload.AgentID) == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "agentId 不能为空", nil)
+		return
+	}
+	if !s.opts.Enrollment.Revoke(strings.TrimSpace(payload.AgentID)) {
+		writeError(w, http.StatusConflict, "not-enrolled", "该机器没有有效凭证（可能从未接入或已吊销）", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
