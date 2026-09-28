@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -93,8 +95,11 @@ func (e *localExecutor) Pull(ctx context.Context, confirm bool) (commands.PullRe
 	}
 	deps := &commands.PullDeps{UI: commands.HeadlessUI{}, NoFetch: true}
 	if e.hubURL != "" {
-		snapshot, err := e.downloadHubSnapshot(ctx)
+		snapshot, meta, err := e.downloadHubSnapshot(ctx)
 		if err != nil {
+			return commands.PullReport{}, err
+		}
+		if err := e.bootstrapFromGeneration(snapshot, meta); err != nil {
 			return commands.PullReport{}, err
 		}
 		deps.HubSnapshot = snapshot
@@ -138,28 +143,55 @@ type hubSnapshotPayload struct {
 
 // downloadHubSnapshot fetches the hub's current generation and converts it
 // into the adapter-snapshot form the pull pipeline consumes.
-func (e *localExecutor) downloadHubSnapshot(ctx context.Context) ([]core.AdapterSnapshot, error) {
+func (e *localExecutor) downloadHubSnapshot(ctx context.Context) ([]core.AdapterSnapshot, []byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(e.hubURL, "/")+"/api/snapshot", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if e.credential != "" {
 		request.Header.Set("Authorization", "Bearer "+e.credential)
 	}
 	response, err := e.hubClient().Do(request)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, fmt.Errorf("hub snapshot: %s %s", response.Status, strings.TrimSpace(string(body)))
+		return nil, nil, fmt.Errorf("hub snapshot: %s %s", response.Status, strings.TrimSpace(string(body)))
 	}
 	var payload hubSnapshotPayload
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return snapshotsFromWire(payload.Store), nil
+	return snapshotsFromWire(payload.Store), []byte(payload.HomerJSON), nil
+}
+
+// bootstrapFromGeneration seeds an uninitialized workspace from the hub's
+// current generation: homer.json becomes the machine's config. The store
+// stays EMPTY on purpose — with an empty baseline the first pull judges
+// every center file as new content and applies it cleanly; seeding the
+// store with the generation would instead read the fresh machine's empty
+// tool directories as "deleted everything" and conflict. The post-apply
+// step of that first pull writes the real baseline. An existing config is
+// never overwritten (a configured machine pulls normally).
+func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta []byte) error {
+	paths := core.GetHomerPaths(func(key string) string {
+		if key == "HOMER_HOME" {
+			return e.homerHome
+		}
+		return os.Getenv(key)
+	})
+	if _, err := os.Stat(paths.ConfigFile); err == nil {
+		return nil // already configured
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(paths.ConfigFile, meta, 0o644)
 }
 
 // uploadHubSnapshot pushes prepared snapshots to the hub.
@@ -235,4 +267,36 @@ func (e *localExecutor) hubClient() *http.Client {
 		return e.hubHTTP
 	}
 	return &http.Client{Timeout: 120 * time.Second}
+}
+
+// agentSyncDeps adapts the executor's hub transport into the web server's
+// SyncDepsSource: the listen agent's own /api/pull and /api/push (invoked
+// by the hub's dispatcher over direct HTTP) run through the same no-git
+// transport as task execution.
+type agentSyncDeps struct {
+	executor *localExecutor
+}
+
+func (d agentSyncDeps) PullDeps() *commands.PullDeps {
+	deps := &commands.PullDeps{NoFetch: true}
+	if d.executor.hubURL != "" {
+		// Download eagerly: the deps are consumed within one request.
+		snapshot, meta, err := d.executor.downloadHubSnapshot(context.Background())
+		if err == nil {
+			if bootstrapErr := d.executor.bootstrapFromGeneration(snapshot, meta); bootstrapErr == nil {
+				deps.HubSnapshot = snapshot
+			}
+		}
+	}
+	return deps
+}
+
+func (d agentSyncDeps) PushDeps() *commands.PushDeps {
+	deps := &commands.PushDeps{}
+	if d.executor.hubURL != "" {
+		deps.HubSink = func(snapshot []core.AdapterSnapshot) error {
+			return d.executor.uploadHubSnapshot(context.Background(), snapshot)
+		}
+	}
+	return deps
 }

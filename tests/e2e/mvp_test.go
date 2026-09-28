@@ -679,8 +679,10 @@ func TestMVPSevenGroups(t *testing.T) {
 			t.Fatalf("isolated init adapters = %#v", init["adapters"])
 		}
 		result := runHomer(t, world.binary, m, "doctor", "--offline", "--json")
-		if result.code == 0 {
-			t.Fatalf("doctor should report repo fail before git init")
+		// The no-git data plane: an unsynced machine is warn-only; the
+		// doctor exits 0.
+		if result.code != 0 {
+			t.Fatalf("doctor should pass (warn-only) before first sync: %s", result.stdout)
 		}
 		if result.stderr != "" {
 			t.Fatalf("doctor readonly stderr: %s", result.stderr)

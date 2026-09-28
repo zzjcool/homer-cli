@@ -153,6 +153,7 @@ func (d *Daemon) runListen(ctx context.Context) error {
 		HomerHome: d.cfg.HomerHome,
 		Token:     d.cfg.Token,
 		Identity:  identity,
+		SyncDeps:  d.syncDeps(),
 	})
 	if err != nil {
 		return err
@@ -533,6 +534,19 @@ func (d *Daemon) postJSONWithClient(ctx context.Context, client *http.Client, en
 		return nil, fmt.Errorf("hub returned %s", response.Status)
 	}
 	return responseBody, nil
+}
+
+// syncDeps exposes the executor's hub transport for the listen agent's
+// own web endpoints (/api/push, /api/pull).
+func (d *Daemon) syncDeps() web.SyncDepsSource {
+	if d == nil || d.exec == nil {
+		return nil
+	}
+	executor, ok := d.exec.(*localExecutor)
+	if !ok {
+		return nil
+	}
+	return agentSyncDeps{executor: executor}
 }
 
 func (d *Daemon) endpointURL(operation string) string {

@@ -44,7 +44,9 @@ func TestAllDoctorChecksCoverOKWarnFail(t *testing.T) {
 	if got := CheckConfig(paths); got.Status != CheckFail {
 		t.Fatalf("missing config status = %s", got.Status)
 	}
-	if got := CheckRepoAndStore(paths); got[0].Status != CheckFail || got[1].Status != CheckWarn {
+	// No-git data plane: an uninitialized machine reports warn (not fail)
+	// for repo and OK for store-clean.
+	if got := CheckRepoAndStore(paths); got[0].Status != CheckWarn || got[1].Status != CheckOK {
 		t.Fatalf("non-repo checks = %#v", got)
 	}
 	if got := CheckRemote(paths, RemoteCheckOptions{Offline: true}); got.Status != CheckOK || !strings.Contains(got.Message, "跳过") {
@@ -158,7 +160,7 @@ func TestDoctorHealthyChecks(t *testing.T) {
 	if err := agecrypto.EncryptSecretToFile(nil, paths, "token", []byte("doctor-secret-content\n"), []string{identity.Recipient}); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.SaveState(paths, core.HomerState{Version: 1, LastSyncCommit: gitx.HeadCommit(paths.Home)}); err != nil {
+	if err := core.SaveState(paths, core.HomerState{Version: 1, LastSyncAt: "2026-09-29T00:00:00Z", LastSyncCommand: "pull"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -230,8 +232,10 @@ func TestDoctorRemoteReachabilityAndStoreDirty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(paths.Home, "store", "pi", "dirty"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The store is plain data in the no-git data plane: a stray file is
+	// not a "dirty worktree" and never blocks anything.
 	got := CheckRepoAndStore(paths)
-	if got[1].Status != CheckWarn || !strings.Contains(strings.Join(got[1].Details, "\n"), "store/pi/dirty") {
-		t.Fatalf("dirty store = %#v", got[1])
+	if got[1].Status != CheckOK {
+		t.Fatalf("store-clean must stay OK in the no-git data plane: %#v", got[1])
 	}
 }

@@ -136,65 +136,25 @@ func CheckRepoAndStore(paths core.HomerPaths) []DoctorCheck {
 	return []DoctorCheck{checkRepo(paths), checkStoreClean(paths)}
 }
 
+// checkRepo reports the no-git data plane's center state: whether this
+// workspace has synced with a hub generation. A local store without any
+// generation is a normal never-synced machine, not a failure.
 func checkRepo(paths core.HomerPaths) DoctorCheck {
-	if !gitx.IsGitRepo(paths.Home) {
-		return DoctorCheck{
-			ID:      CheckRepoID,
-			Status:  CheckFail,
-			Message: fmt.Sprintf("工作区不是 git 仓库: %s", paths.Home),
-			Details: []string{"请先运行 `homer push` 建立 git 历史与 remote。"},
-		}
+	state := core.LoadState(paths)
+	if state.LastSyncAt != "" {
+		return DoctorCheck{ID: CheckRepoID, Status: CheckOK, Message: fmt.Sprintf("最近同步: %s（%s）", state.LastSyncAt, state.LastSyncCommand)}
 	}
-
-	ref := gitx.UpstreamRef(paths.Home)
-	if ref == "" {
-		return DoctorCheck{
-			ID:      CheckRepoID,
-			Status:  CheckWarn,
-			Message: "git 仓库已就绪，但未配置 upstream（同步将停留在本地）",
-			Details: []string{"配置远端：`git push -u <remote> <branch>`（或在 home 内 `git branch --set-upstream-to`）。"},
-		}
+	if _, err := os.Stat(filepath.Join(paths.StoreDir)); err == nil {
+		return DoctorCheck{ID: CheckRepoID, Status: CheckWarn, Message: "已有本地 store，但尚未与中心同步过", Details: []string{"在控制台执行「同步」，或运行 `homer pull`。"}}
 	}
-	return DoctorCheck{ID: CheckRepoID, Status: CheckOK, Message: fmt.Sprintf("git 仓库（upstream: %s）", ref)}
+	return DoctorCheck{ID: CheckRepoID, Status: CheckWarn, Message: "尚未初始化（无 store）", Details: []string{"运行 `homer init` 完成首次设置。"}}
 }
 
+// checkStoreClean: in the no-git data plane the store is plain data, not a
+// git worktree — no dirty-state concept exists. The check reports OK.
 func checkStoreClean(paths core.HomerPaths) DoctorCheck {
-	if !gitx.IsGitRepo(paths.Home) {
-		return DoctorCheck{
-			ID:      CheckStoreCleanID,
-			Status:  CheckWarn,
-			Message: "store 工作区状态不可判定（不是 git 仓库）",
-		}
-	}
-	if gitx.IsStoreClean(paths.Home) {
-		return DoctorCheck{ID: CheckStoreCleanID, Status: CheckOK, Message: "store 工作区干净"}
-	}
-
-	status := gitx.Exec(paths.Home, []string{"status", "--porcelain", "--untracked-files=all", "--", "store/"}, 0)
-	lines := make([]string, 0)
-	if status.OK {
-		for _, line := range strings.Split(status.Stdout, "\n") {
-			line = strings.TrimRight(line, "\r")
-			if line != "" {
-				lines = append(lines, line)
-			}
-		}
-	}
-	details := append([]string(nil), lines...)
-	if len(details) > maxStoreDetails {
-		details = details[:maxStoreDetails]
-		details = append(details, fmt.Sprintf("… 其余 %d 条省略", len(lines)-maxStoreDetails))
-	}
-	if len(details) == 0 {
-		details = append(details, "git status 无法判定（git 不可用？）")
-	}
-	details = append(details, "先运行 `homer push` 提交 store 改动，否则 pull / merge 会拒绝执行。")
-	return DoctorCheck{
-		ID:      CheckStoreCleanID,
-		Status:  CheckWarn,
-		Message: "store 工作区有未提交的改动",
-		Details: details,
-	}
+	_ = paths
+	return DoctorCheck{ID: CheckStoreCleanID, Status: CheckOK, Message: "store 就绪（无 git 数据面）"}
 }
 
 // CheckRemote checks remote reachability. Offline is deliberately checked
@@ -203,8 +163,11 @@ func CheckRemote(paths core.HomerPaths, options RemoteCheckOptions) DoctorCheck 
 	if options.Offline {
 		return DoctorCheck{ID: CheckRemoteID, Status: CheckOK, Message: "远端可达性检查已跳过（--offline）"}
 	}
+	// The no-git data plane has no git remote to probe; the hub is reached
+	// per sync operation. Retain the entry for the frozen eight-check
+	// report shape.
 	if !gitx.IsGitRepo(paths.Home) {
-		return DoctorCheck{ID: CheckRemoteID, Status: CheckWarn, Message: "跳过远端检查：工作区不是 git 仓库"}
+		return DoctorCheck{ID: CheckRemoteID, Status: CheckOK, Message: "远端检查不适用（无 git 数据面）"}
 	}
 
 	url := upstreamURL(paths.Home)
@@ -484,36 +447,20 @@ func safeCheckError(err error, privateKey string) string {
 	return message
 }
 
-// CheckMachine compares the acceleration state with HEAD. Missing or stale
-// state is a warning because the sync layer has safe fallbacks.
+// CheckMachine reports the machine's last sync recency. In the no-git
+// data plane there is no HEAD to compare against; a missing state simply
+// means "never synced".
 func CheckMachine(paths core.HomerPaths) DoctorCheck {
 	state := core.LoadState(paths)
-	head := gitx.HeadCommit(paths.Home)
-	if state.LastSyncCommit == "" {
+	if state.LastSyncAt == "" {
 		return DoctorCheck{
 			ID:      CheckMachineID,
 			Status:  CheckWarn,
-			Message: "state.json 未记录同步状态（lastSyncCommit 缺失）",
-			Details: []string{fmt.Sprintf("state 文件: %s", paths.StateFile), "首次同步（`homer push` / `homer pull`）会自动写入；仅影响三方判定的基准。"},
+			Message: "state.json 未记录同步状态（这台机器从未同步过）",
+			Details: []string{fmt.Sprintf("state 文件: %s", paths.StateFile), "首次同步（控制台「同步」或 `homer pull`）会自动写入。"},
 		}
 	}
-	if head == "" {
-		return DoctorCheck{
-			ID:      CheckMachineID,
-			Status:  CheckWarn,
-			Message: "无法解析 HEAD（仓库没有 commit？），state 与 HEAD 的关系不可判定",
-			Details: []string{fmt.Sprintf("state.lastSyncCommit: %s", shortCommit(state.LastSyncCommit))},
-		}
-	}
-	if state.LastSyncCommit != head {
-		return DoctorCheck{
-			ID:      CheckMachineID,
-			Status:  CheckWarn,
-			Message: "本地有未同步 commit（state.lastSyncCommit 落后于 HEAD）",
-			Details: []string{fmt.Sprintf("state: %s", shortCommit(state.LastSyncCommit)), fmt.Sprintf("HEAD:  %s", shortCommit(head))},
-		}
-	}
-	return DoctorCheck{ID: CheckMachineID, Status: CheckOK, Message: fmt.Sprintf("state 与 HEAD 一致（%s）", shortCommit(head))}
+	return DoctorCheck{ID: CheckMachineID, Status: CheckOK, Message: fmt.Sprintf("最近同步: %s（%s）", state.LastSyncAt, state.LastSyncCommand)}
 }
 
 // CheckRequiredPlaceholders scans only top-level JSON keys in store entries.

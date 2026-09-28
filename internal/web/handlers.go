@@ -12,6 +12,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
 
@@ -228,20 +229,35 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
+	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
+	if s.opts.SyncDeps != nil {
+		deps = s.opts.SyncDeps.PushDeps()
+		deps.UI = commands.HeadlessUI{}
+	}
 	report := commands.RunPush(commands.PushOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
-	}, &commands.PushDeps{UI: commands.HeadlessUI{}})
+	}, deps)
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
+	deps := &commands.PullDeps{UI: commands.HeadlessUI{}, NoFetch: true}
+	if s.opts.SyncDeps != nil {
+		deps = s.opts.SyncDeps.PullDeps()
+		deps.UI = commands.HeadlessUI{}
+	} else if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
+		// No-git data plane: the hub's current generation IS the remote.
+		if snapshot, err := readSnapshotFromGeneration(head); err == nil {
+			deps.HubSnapshot = snapshot
+		}
+	}
 	report := commands.RunPull(commands.PullOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
-	}, &commands.PullDeps{UI: commands.HeadlessUI{}})
+	}, deps)
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 

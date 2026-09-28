@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -234,18 +235,23 @@ type snapshotPayload struct {
 	Generation int                          `json:"generation"`
 }
 
+// generationMutex serializes generation publication only. It must NOT be
+// the global writeMutex: an agent push invoked by the hub's dispatcher
+// (which holds writeMutex) uploads back to /api/snapshot — sharing the
+// lock would deadlock hub -> agent -> hub.
+var generationMutex sync.Mutex
+
 // handleSnapshotUpload backs POST /api/snapshot (agent push transport).
-// It publishes the payload as a new hub generation under the write lock —
-// the generation counter itself is the compare-and-swap the advisor
-// ruling requires.
+// It publishes the payload as a new hub generation — the generation
+// counter itself is the compare-and-swap the advisor ruling requires.
 func (s *Server) handleSnapshotUpload(w http.ResponseWriter, r *http.Request) {
 	var payload snapshotPayload
 	if err := readJSONBody(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
 		return
 	}
-	writeMutex.Lock()
-	defer writeMutex.Unlock()
+	generationMutex.Lock()
+	defer generationMutex.Unlock()
 	layout := gens.New(s.opts.HomerHome)
 	generation, err := layout.Publish(payload.Store, []byte(payload.HomerJSON))
 	if err != nil {

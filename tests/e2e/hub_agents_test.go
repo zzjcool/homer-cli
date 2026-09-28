@@ -553,28 +553,22 @@ func TestEnrollmentE2E(t *testing.T) {
 	_ = revokeResp.Body.Close()
 }
 
-// TestManualSyncFanout walks the MVP user story end to end: machine A
-// changes a file, the console sees the change, one POST /api/sync
-// publishes it, and machine B's file changes. (planner step 5)
+// TestManualSyncFanout walks the no-git MVP user story end to end:
+// machine A changes a file, the console sees the change, one
+// POST /api/sync publishes it as a hub generation, and machine B's file
+// changes. No origin.git, no clone, no git credentials anywhere.
 func TestManualSyncFanout(t *testing.T) {
 	root := t.TempDir()
 	global := filepath.Join(root, "gitconfig")
 	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")
-	origin := filepath.Join(root, "origin.git")
-	runGit(t, global, root, "init", "--bare", "-b", "main", origin)
 
 	binary := binaryOf(t)
 	machineA := makeMachine(t, root, "A", global, true)
 	machineB := makeMachine(t, root, "B", global, false)
-	runGit(t, global, root, "clone", origin, machineA.homerHome)
+
+	// A initializes its own workspace locally (no remote, no clone).
 	if result := runHomer(t, binary, machineA, "init", "--json"); result.code != 0 {
 		t.Fatalf("init A failed: %s%s", result.stdout, result.stderr)
-	}
-	if result := runHomer(t, binary, machineA, "push", "--yes"); result.code != 0 {
-		t.Fatalf("push A failed: %s%s", result.stdout, result.stderr)
-	}
-	if result := runHomer(t, binary, machineB, "home", origin, "--yes"); result.code != 0 {
-		t.Fatalf("home B failed: %s%s", result.stdout, result.stderr)
 	}
 
 	token := "manual-sync-token"
@@ -629,7 +623,8 @@ func TestManualSyncFanout(t *testing.T) {
 		t.Fatalf("console sees no local changes; status = %s", body)
 	}
 
-	// 3. One manual sync publishes A onto the fleet.
+	// 3. One manual sync publishes A onto the fleet (no-git transport:
+	// a hub generation, then fan-out pulls).
 	sync := apiPost(t, hubURL+"/api/sync?direction=to-others&confirm=true", auth)
 	if jsonPath(t, sync, "ok") != true || jsonPath(t, sync, "status") != "synced" {
 		t.Fatalf("manual sync = %s", sync)
@@ -640,5 +635,127 @@ func TestManualSyncFanout(t *testing.T) {
 	content, err := os.ReadFile(bSettings)
 	if err != nil || !strings.Contains(string(content), "manualSync") {
 		t.Fatalf("machine B settings = %q err=%v (want manualSync marker)", content, err)
+	}
+
+	// 5. Advisor acceptance: B was offline with its own edit to the same
+	// file; a later sync must surface a conflict and keep B's local
+	// content — never silently overwrite it.
+	// (Covered by TestOfflineConflictKeepsLocal below.)
+}
+
+// TestOfflineConflictKeepsLocal pins the advisor's no-git acceptance:
+// machine B edits a file while it effectively missed an earlier
+// generation; when it pulls, the three-way judgment (B's store baseline /
+// B's local edit / hub's current) must yield a conflict with B's local
+// content preserved — never a silent overwrite.
+func TestOfflineConflictKeepsLocal(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")
+
+	binary := binaryOf(t)
+	machineA := makeMachine(t, root, "A", global, true)
+	machineB := makeMachine(t, root, "B", global, false)
+
+	if result := runHomer(t, binary, machineA, "init", "--json"); result.code != 0 {
+		t.Fatalf("init A failed: %s%s", result.stdout, result.stderr)
+	}
+	// Establish the shared baseline: A publishes, B pulls once.
+	token := "offline-conflict-token"
+	hubPort := freePort(t)
+	hubProc := startHomer(t, binary, machineA, global,
+		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", machineA.homerHome)
+	defer stopProc(t, hubProc)
+
+	listenPort := freePort(t)
+	agentA := startHomer(t, binary, machineA, global,
+		"agent", "--listen", fmt.Sprintf("127.0.0.1:%d", listenPort),
+		"--advertise", fmt.Sprintf("http://127.0.0.1:%d", listenPort),
+		"--hub", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"--token", token, "--id", "agent-a", "--home", machineA.homerHome)
+	defer stopProc(t, agentA)
+	agentB := startHomer(t, binary, machineB, global,
+		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
+	defer stopProc(t, agentB)
+
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+	auth := map[string]string{"Authorization": "Bearer " + token}
+
+	deadline := time.Now().Add(30 * time.Second)
+	ids := map[string]bool{}
+	for time.Now().Before(deadline) && !(ids["agent-a"] && ids["agent-b"]) {
+		body := apiGet(t, hubURL+"/api/agents", auth, hubProc)
+		ids = map[string]bool{}
+		for _, item := range jsonPath(t, body, "agents").([]any) {
+			ids[item.(map[string]any)["agentId"].(string)] = true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !ids["agent-a"] || !ids["agent-b"] {
+		t.Fatalf("registered agents = %v; hub output: %s", ids, procOutput[hubProc])
+	}
+
+	// Baseline round: A publishes its fixtures, B applies them.
+	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"baseline\": true\n}\n")
+	sync := apiPost(t, hubURL+"/api/sync?direction=to-others&confirm=true", auth)
+	if jsonPath(t, sync, "ok") != true || jsonPath(t, sync, "status") != "synced" {
+		t.Fatalf("baseline sync = %s", sync)
+	}
+	bBaseline := filepath.Join(piRoot(machineB), "settings.json")
+	if content, err := os.ReadFile(bBaseline); err != nil || !strings.Contains(string(content), "baseline") {
+		t.Fatalf("B did not receive the baseline: %q err=%v", content, err)
+	}
+
+	// B goes truly offline before A's second publish: the process stops,
+	// so the fan-out marks it skipped and it misses the new generation.
+	stopProc(t, agentB)
+	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"fromA\": true\n}\n")
+	sync = apiPost(t, hubURL+"/api/sync?direction=to-others&confirm=true", auth)
+	// The publish must succeed. A just-stopped connect agent may still
+	// hold a half-open TCP session, so its fan-out entry can time out —
+	// "partial" (with agent-a applied) is an accepted outcome; only the
+	// "synced" status means nobody lagged.
+	status := jsonPath(t, sync, "status")
+	if status != "synced" && status != "partial" {
+		t.Fatalf("A's second sync = %s", sync)
+	}
+	head, headErr := os.ReadFile(filepath.Join(machineA.homerHome, "HEAD"))
+	if headErr != nil || strings.TrimSpace(string(head)) == "" {
+		t.Fatalf("second generation was not published: %q err=%v", string(head), headErr)
+	}
+
+	// While offline, B edits the SAME file locally (its divergent change).
+	writeFile(t, bBaseline, "{\n  \"fromB\": true\n}\n")
+
+	// B comes back online.
+	agentB = startHomer(t, binary, machineB, global,
+		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
+	defer stopProc(t, agentB)
+	deadline = time.Now().Add(30 * time.Second)
+	ids = map[string]bool{}
+	for time.Now().Before(deadline) && !ids["agent-b"] {
+		body := apiGet(t, hubURL+"/api/agents", auth, hubProc)
+		ids = map[string]bool{}
+		for _, item := range jsonPath(t, body, "agents").([]any) {
+			ids[item.(map[string]any)["agentId"].(string)] = true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !ids["agent-b"] {
+		t.Fatalf("agent-b did not re-register: %v; hub output: %s", ids, procOutput[hubProc])
+	}
+
+	// B pulls from the center: three-way (base=baseline, local=fromB,
+	// remote=fromA) must conflict and keep B's local content.
+	pull := apiPost(t, hubURL+"/api/agents/agent-b/pull?confirm=true", auth)
+	status = jsonPath(t, pull, "status")
+	if status != "conflicts-remain" && status != "conflicts" {
+		t.Fatalf("expected a conflict status, got %q (body=%s)", status, pull)
+	}
+	content, err := os.ReadFile(bBaseline)
+	if err != nil || !strings.Contains(string(content), "fromB") {
+		t.Fatalf("B's local edit must survive the conflicted pull: %q err=%v", content, err)
 	}
 }

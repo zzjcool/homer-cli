@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
@@ -340,6 +341,12 @@ func TestPushSecretsRejected(t *testing.T) {
 
 func TestPullRequiresConfirm(t *testing.T) {
 	fixture := pullFixture(t, "remote\n")
+	// The no-git data plane's center is a published hub generation.
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "remote\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
 	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/pull")
 	if response.Code != http.StatusConflict {
@@ -357,6 +364,11 @@ func TestPullRequiresConfirm(t *testing.T) {
 
 func TestPullConfirmed(t *testing.T) {
 	fixture := pullFixture(t, "remote\n")
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "remote\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
 	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/pull?confirm=true")
 	if response.Code != http.StatusOK {
@@ -571,16 +583,23 @@ func TestWriteMutexSerializes(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "local\n")
 	setGitIdentity(t, fixture.home)
 	server := newWebServer(t, fixture, "test-token", nil, nil)
+	// Channel handoff: each goroutine reports through the channel; the
+	// main goroutine alone touches the collected slice.
 	var wait sync.WaitGroup
-	responses := make([]*httptest.ResponseRecorder, 2)
-	for i := range responses {
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for i := 0; i < 2; i++ {
 		wait.Add(1)
-		go func(index int) {
+		go func() {
 			defer wait.Done()
-			responses[index] = request(t, server.Handler(), http.MethodPost, "/api/push?confirm=true")
-		}(i)
+			results <- request(t, server.Handler(), http.MethodPost, "/api/push?confirm=true")
+		}()
 	}
 	wait.Wait()
+	close(results)
+	responses := make([]*httptest.ResponseRecorder, 0, 2)
+	for response := range results {
+		responses = append(responses, response)
+	}
 	for i, response := range responses {
 		if response.Code != http.StatusOK {
 			t.Fatalf("push %d = %d, body=%s", i, response.Code, response.Body)

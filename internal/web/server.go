@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
 )
 
 // Version is injected by the command package when it knows the build version.
@@ -90,6 +92,20 @@ type ServeOptions struct {
 	// it. Declared as an interface to keep the web package free of the
 	// hub dependency (hub imports web for AgentsSource).
 	Enrollment EnrollmentService
+	// SyncDeps supplies the no-git data-plane transport for this server's
+	// /api/push and /api/pull (an agent's own web endpoint executes pulls
+	// pushed by the hub's dispatcher). When nil the legacy git transport
+	// runs.
+	SyncDeps SyncDepsSource
+}
+
+// SyncDepsSource builds command deps per request. The snapshot/secret
+// pair is the no-git transport; the sink uploads prepared snapshots.
+type SyncDepsSource interface {
+	// PullDeps returns deps for /api/pull on this server's home.
+	PullDeps() *commands.PullDeps
+	// PushDeps returns deps for /api/push on this server's home.
+	PushDeps() *commands.PushDeps
 }
 
 // EnrollmentService is the subset of the enrollment manager the console
