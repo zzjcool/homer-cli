@@ -33,6 +33,7 @@ type Config struct {
 	PollInterval  time.Duration
 	PollWait      time.Duration
 	ReportTimeout time.Duration
+	Home          string
 }
 
 func (c Config) Mode() (hub.AgentMode, error) {
@@ -128,6 +129,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) runListen(ctx context.Context) error {
+	if strings.TrimSpace(d.cfg.AdvertiseURL) == "" {
+		advertiseURL, err := DeriveAdvertiseURL(d.cfg.ListenAddr)
+		if err != nil {
+			return err
+		}
+		d.cfg.AdvertiseURL = advertiseURL
+	}
 	hostname := localHostname()
 	identity := &web.AgentIdentity{
 		AgentID:  d.cfg.AgentID,
@@ -305,18 +313,27 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		Version:  web.Version,
 	}
 	if mode == hub.AgentModeListen {
-		payload.Addr = d.cfg.AdvertiseURL
-		if strings.TrimSpace(payload.Addr) == "" {
-			payload.Addr = d.cfg.ListenAddr
+		if strings.TrimSpace(d.cfg.AdvertiseURL) == "" {
+			advertiseURL, err := DeriveAdvertiseURL(d.cfg.ListenAddr)
+			if err != nil {
+				return err
+			}
+			d.cfg.AdvertiseURL = advertiseURL
 		}
+		payload.Addr = d.cfg.AdvertiseURL
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	client := d.agentHTTPClient()
-	_, postErr := d.postJSONWithClient(ctx, client, d.endpointURL("register"), body)
-	return postErr
+	if _, err := d.postJSONWithClient(ctx, client, d.endpointURL("register"), body); err != nil {
+		return err
+	}
+	if err := d.saveAgentConfig(string(mode)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool, error) {
