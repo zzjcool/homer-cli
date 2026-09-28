@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>homer · 交互原型</title>
+<title>homer</title>
 <style>
 /* ============ design tokens ============ */
 :root {
@@ -301,9 +301,9 @@ function toast(msg) {
 }
 function fmtCounts(push, pull, conflicts) {
   const parts = [];
-  if (push) parts.push("↑" + push + " 可推送");
-  if (pull) parts.push("↓" + pull + " 可拉取");
-  if (conflicts) parts.push("⚡" + conflicts + " 冲突");
+  if (push) parts.push("↑" + push + " 项本机改动");
+  if (pull) parts.push("↓" + pull + " 项中心改动");
+  if (conflicts) parts.push(conflicts + " 项冲突");
   return parts.join(" · ");
 }
 
@@ -337,20 +337,18 @@ function renderHero() {
 
   if (conflicts > 0) {
     hero.classList.add("warn");
-    concl.append(el("span", "dot conflict"), document.createTextNode("有冲突，需要终端处理"));
-    numbers.textContent = conflicts + " 个冲突" + (push + pull ? "，另有 " + fmtCounts(push, pull, 0) : "");
+    concl.append(el("span", "dot conflict"), document.createTextNode("有冲突，需要选择保留哪一边"));
+    numbers.textContent = conflicts + " 项冲突" + (push + pull ? "，另有 " + fmtCounts(push, pull, 0) : "");
     const note = el("div", "hero-note");
-    note.append(el("div", null, "冲突无法用网页解决。在终端运行："));
-    note.append(el("div", "mono", "$ homer merge"));
-    note.append(el("div", "small muted", "解决后回到这里刷新。下方可查看冲突差异。"));
+    note.append(el("div", null, "两边都改过同一处。这一步只能查看下方差异。"));
     hero.append(concl, numbers, note);
     return;
   }
   if (push + pull > 0) {
-    concl.append(el("span", "dot drift"), document.createTextNode("有漂移"));
+    concl.append(el("span", "dot drift"), document.createTextNode("有尚未同步的改动"));
     numbers.textContent = fmtCounts(push, pull, 0) + "，分布在 " +
       r.adapters.filter(a => a.push + a.pull > 0).length + " 个适配器";
-    const btn = el("button", "primary", "处理漂移 ↓");
+    const btn = el("button", "primary", "查看改动 ↓");
     btn.type = "button";
     btn.addEventListener("click", () => {
       // 自动展开有漂移的适配器
@@ -361,7 +359,7 @@ function renderHero() {
     hero.append(concl, numbers, btn);
     return;
   }
-  concl.append(el("span", "dot ok"), document.createTextNode("一切同步"));
+  concl.append(el("span", "dot ok"), document.createTextNode("都已对齐"));
   const nAdapters = (r.adapters || []).length;
   numbers.textContent = nAdapters + " 个适配器全部干净 · 刚刚刷新";
   hero.append(concl, numbers);
@@ -454,7 +452,7 @@ function buildDiffDrawer(adapter, category) {
     .then(d => {
       clear(pre);
       if (d.empty) { pre.textContent = "无漂移"; return; }
-      // diff 着色：语义编码（+=仓库将新增 / -=将被覆盖），不是装饰
+      // diff 着色：语义编码（+=中心将新增 / -=将被覆盖），不是装饰
       d.text.split("\n").forEach(line => {
         const cls = line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") ? "ln-meta"
           : line.startsWith("@@") ? "ln-hunk"
@@ -478,16 +476,16 @@ function buildDiffDrawer(adapter, category) {
     if (c) {
       const actions = el("div", "diff-actions");
       if (c.push > 0 && !hasConflicts()) {
-        const pb = el("button", "primary", "推送本机改动（↑" + c.push + "）");
+        const pb = el("button", "primary", "把本机改动写入中心");
         pb.type = "button"; pb.addEventListener("click", () => confirmWrite("push"));
         actions.append(pb);
       }
       if (c.pull > 0 && !hasConflicts()) {
-        const pl = el("button", null, "拉取仓库改动（↓" + c.pull + "）");
+        const pl = el("button", null, "把中心改动应用到本机");
         pl.type = "button"; pl.addEventListener("click", () => confirmWrite("pull"));
         actions.append(pl);
       }
-      if (c.conflicts > 0) actions.append(el("span", "small muted", "冲突需终端 homer merge，此处仅查看"));
+      if (c.conflicts > 0) actions.append(el("span", "small muted", "两边都改过同一处，这次没有写入。"));
       if (actions.childNodes.length) drawer.append(actions);
     }
   }
@@ -587,11 +585,11 @@ async function loadAgents() {
 function confirmWrite(action) {
   const r = app.report;
   const n = (r.adapters || []).reduce((s, a) => s + (action === "push" ? a.push : a.pull), 0);
-  $("confirm-title").textContent = action === "push" ? "确认推送" : "确认拉取";
+  $("confirm-title").textContent = action === "push" ? "确认写入中心" : "确认应用到本机";
   $("confirm-desc").textContent = action === "push"
-    ? "推送 " + n + " 项改动到仓库（以本机为准）。"
-    : "拉取 " + n + " 项改动到本机（覆盖本地文件前先备份）。";
-  $("btn-confirm-ok").textContent = action === "push" ? "确认推送" : "确认拉取";
+    ? "把 " + n + " 项本机改动写入中心。"
+    : "把 " + n + " 项中心改动应用到本机。写入前会先备份。";
+  $("btn-confirm-ok").textContent = action === "push" ? "确认写入中心" : "确认应用到本机";
   app.pendingAction = action;
   $("dlg-confirm").showModal();
 }
@@ -618,17 +616,17 @@ async function executeWrite(action) {
   try {
     const d = await api("/api/" + action + "?confirm=true", { method: "POST" });
     const n = (d.changedFiles || []).length || (d.applied?.written || []).length;
-    toast((action === "push" ? "推送成功" : "拉取成功") + "，处理 " + n + " 个文件");
+    toast((action === "push" ? "已写入中心，处理 " : "已应用到本机，处理 ") + n + " 个文件");
     clearAlert();
     await refresh();
   } catch (e) {
     if (e.status === 422 || e.code === "secrets-rejected") {
-      showAlert("推送被拒绝：检测到疑似密钥", e.errors, "确认不是密钥后请在终端用 homer push --allow-secrets 处理。");
+      showAlert("已停止：检测到疑似密钥", e.errors, null);
     } else if (e.code === "conflicts") {
-      toast("存在冲突，请终端 homer merge");
+      toast("两边都改过同一处，这次没有写入。");
       await refresh();
     } else {
-      showAlert((action === "push" ? "推送" : "拉取") + "未完成", e.errors.length ? e.errors : [e.message], null);
+      showAlert("同步没有完成", e.errors.length ? e.errors : [e.message], null);
     }
   } finally {
     okBtn.disabled = false;
@@ -711,12 +709,10 @@ async function refresh() {
     if (e.code === "not-initialized") {
       app.report = null;
       const hero = $("hero"); clear(hero); hero.classList.remove("warn");
-      const concl = el("p", "conclusion"); concl.append(el("span", "dot off"), document.createTextNode("尚未初始化"));
-      hero.append(concl, el("p", "numbers", "homer 还没在这台机器上初始化"));
+      const concl = el("p", "conclusion"); concl.append(el("span", "dot off"), document.createTextNode("还没选择要同步的目录"));
+      hero.append(concl, el("p", "numbers", "这台机器还没有完成首次设置"));
       const note = el("div", "hero-note info");
-      note.append(el("div", null, "在终端运行："));
-      note.append(el("div", "mono", "$ homer init"));
-      note.append(el("div", "small muted", "完成后回到这里点右上角「刷新」。"));
+      note.append(el("div", null, "请在这台机器上完成首次设置。向导会让你选择要同步的目录。完成后点右上角「刷新」。"));
       hero.append(note);
       clear($("adapter-list")); $("sec-adapters").classList.add("hidden");
     } else {
