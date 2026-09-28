@@ -209,10 +209,30 @@
     async function refresh() {
       try {
         const health = await api("/api/health"); $("version").textContent = "版本：" + text(health.version);
-        const status = await api("/api/status"); $("not-initialized").classList.add("hidden"); renderStatus(status.report); await loadDiff();
+        const status = await api("/api/status");
+        $("not-initialized").classList.add("hidden");
+        renderStatus(status.report); await loadDiff();
       } catch (error) {
-        if (error.code === "not-initialized") $("not-initialized").classList.remove("hidden");
-        $("diff-text").textContent = error.message;
+        // 卡片区不能永远停在「正在加载…」：失败时显式清空并给出行动指引，
+        // 否则用户看到的是一片死寂的加载态，分不清是慢还是坏。
+        const summary = $("summary-cards"); clear(summary);
+        const card = element("div", null, "card");
+        card.append(element("strong", "状态加载失败"));
+        if (error.status === 401) {
+          card.append(element("div", "请先在右上角填写令牌（hub 机器上 homer serve --show-join 可查看）"));
+        } else {
+          card.append(element("div", text(error.message)));
+        }
+        if (error.code === "not-initialized") {
+          summary.append(card);
+          $("not-initialized").classList.remove("hidden");
+        } else {
+          summary.append(card);
+          $("not-initialized").classList.add("hidden");
+        }
+        $("diff-text").textContent = error.status === 401
+          ? "未授权：请先在右上角填写令牌"
+          : text(error.message);
       }
       await loadAgents();
     }
