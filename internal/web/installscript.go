@@ -49,13 +49,14 @@ chmod 700 "$HOMER_HOME/keys"
 printf '%s' "$TOKEN" > "$HOMER_HOME/keys/hub-token"
 chmod 600 "$HOMER_HOME/keys/hub-token"
 
-# 2. 安装二进制：平台匹配 → 直接下载 hub 自身的二进制（/dl/homer）
+# 2. 安装二进制：平台匹配 → 直接下载 hub 自身的二进制（/dl/homer
+#    需要 Bearer 鉴权，token 同携带）
 if [ "$GOOS_ACTUAL" = "$GOOS_EXPECT" ] && [ "$GOARCH_ACTUAL" = "$GOARCH_EXPECT" ]; then
   echo ">> 平台匹配（$GOOS_ACTUAL/$GOARCH_ACTUAL），下载 homer 二进制…"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$HUB/dl/homer" -o "$BIN_DIR/homer.tmp"
+    curl -fsSL -H "Authorization: Bearer $TOKEN" "$HUB/dl/homer" -o "$BIN_DIR/homer.tmp"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "$HUB/dl/homer" > "$BIN_DIR/homer.tmp"
+    wget -qO- --header="Authorization: Bearer $TOKEN" "$HUB/dl/homer" > "$BIN_DIR/homer.tmp"
   else
     echo "!! 需要 curl 或 wget" >&2; exit 1
   fi

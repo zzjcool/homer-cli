@@ -20,6 +20,7 @@ func TestRenderInstallScript(t *testing.T) {
 		"keys/hub-token",
 		"homer agent --connect",
 		"chmod 600",
+		`Authorization: Bearer $TOKEN`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("install script missing %q\n%s", want, script)
