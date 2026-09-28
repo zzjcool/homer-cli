@@ -133,3 +133,44 @@ func TestSyncRejectsBadDirection(t *testing.T) {
 		}
 	}
 }
+
+// The no-git data plane's transfer protocol: agents upload snapshots to
+// the hub and pull the hub's current snapshot over authenticated HTTP.
+func TestSnapshotRoundTrip(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	handler := server.Handler()
+
+	// Upload a snapshot (agent push): two files across one adapter.
+	upload := request(t, handler, http.MethodPost, "/api/snapshot",
+		`{"homerJson":"{\"version\":1}","store":{"pi":{"settings.json":"one\n","agents/designer.md":"hi\n"}}}`)
+	if upload.Code != http.StatusOK {
+		t.Fatalf("upload = %d body=%s", upload.Code, upload.Body)
+	}
+	var uploadBody struct {
+		Generation int `json:"generation"`
+	}
+	if err := json.Unmarshal(upload.Body.Bytes(), &uploadBody); err != nil || uploadBody.Generation < 1 {
+		t.Fatalf("upload body = %s (%v)", upload.Body, err)
+	}
+
+	// Download the current snapshot (agent pull): same content back.
+	download := request(t, handler, http.MethodGet, "/api/snapshot", "")
+	if download.Code != http.StatusOK {
+		t.Fatalf("download = %d body=%s", download.Code, download.Body)
+	}
+	var snapshot struct {
+		Generation int                          `json:"generation"`
+		HomerJSON  string                       `json:"homerJson"`
+		Store      map[string]map[string]string `json:"store"`
+	}
+	if err := json.Unmarshal(download.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("download parse: %v %s", err, download.Body)
+	}
+	if snapshot.Generation != uploadBody.Generation {
+		t.Fatalf("generation = %d, uploaded %d", snapshot.Generation, uploadBody.Generation)
+	}
+	if snapshot.Store["pi"]["settings.json"] != "one\n" {
+		t.Fatalf("store = %v", snapshot.Store)
+	}
+}

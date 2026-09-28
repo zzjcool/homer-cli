@@ -18,14 +18,18 @@ type PairedDevice struct {
 	PairedAt  string `json:"pairedAt"`
 }
 
-// HomerState records the last successfully synchronized repository revision.
+// HomerState records the last successfully synchronized center generation.
 // It is acceleration metadata, not synchronization content.
 type HomerState struct {
-	Version         int            `json:"version"`
-	LastSyncCommit  string         `json:"lastSyncCommit,omitempty"`
-	LastSyncAt      string         `json:"lastSyncAt,omitempty"`
-	LastSyncCommand string         `json:"lastSyncCommand,omitempty"`
-	Paired          []PairedDevice `json:"paired,omitempty"`
+	Version        int    `json:"version"`
+	LastSyncCommit string `json:"lastSyncCommit,omitempty"`
+	// LastSyncGeneration is the hub generation this machine last synced
+	// with (the no-git data plane's monotonic counter). It supersedes
+	// LastSyncCommit, which stays parseable for pre-migration state files.
+	LastSyncGeneration int            `json:"lastSyncGeneration,omitempty"`
+	LastSyncAt         string         `json:"lastSyncAt,omitempty"`
+	LastSyncCommand    string         `json:"lastSyncCommand,omitempty"`
+	Paired             []PairedDevice `json:"paired,omitempty"`
 }
 
 // AddPairedDevice returns a copy with device merged into the recorded list.
@@ -101,6 +105,9 @@ func LoadState(paths HomerPaths) HomerState {
 	state := emptyState()
 	if commit, ok := object.M["lastSyncCommit"].(string); ok && strings.TrimSpace(commit) != "" {
 		state.LastSyncCommit = commit
+	}
+	if generation, ok := object.M["lastSyncGeneration"].(float64); ok && generation >= 1 {
+		state.LastSyncGeneration = int(generation)
 	}
 	if at, ok := object.M["lastSyncAt"].(string); ok && strings.TrimSpace(at) != "" {
 		state.LastSyncAt = at

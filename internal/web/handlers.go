@@ -108,6 +108,17 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSync(w, r)
+	case path == "/api/snapshot":
+		// No-git data plane transport: agents upload prepared snapshots
+		// (push) and download the hub's current one (pull).
+		switch r.Method {
+		case http.MethodPost:
+			s.handleSnapshotUpload(w, r)
+		case http.MethodGet:
+			s.handleSnapshotDownload(w, r)
+		default:
+			writeMethodNotAllowed(w)
+		}
 	case path == "/api/resolve":
 		// Conflict resolution (MVP): keep this machine or the center.
 		if r.Method != http.MethodPost {

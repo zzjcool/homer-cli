@@ -113,15 +113,11 @@ func parseFetchOptions(options []any) (bool, error) {
 }
 
 func collectBase(paths core.HomerPaths, config core.HomerConfig, warnings, errors *[]string) ([]core.AdapterSnapshot, SyncBaseMode, string) {
-	state := core.LoadState(paths)
-	if state.LastSyncCommit == "" {
-		return readStoreBase(paths, config, errors)
-	}
-	if !isReadableCommit(paths, state.LastSyncCommit) {
-		*warnings = append(*warnings, fmt.Sprintf("state.lastSyncCommit=%s 在 git 历史中不可读，base 回落到 store 工作区", state.LastSyncCommit))
-		return readStoreBase(paths, config, errors)
-	}
-	return gitx.ReadStoreSnapshotAtCommit(paths, &config, state.LastSyncCommit), SyncBaseModeGit, state.LastSyncCommit
+	// No-git data plane (advisor ruling 2026-09-28): the machine's own
+	// store/ IS the baseline — the content at the last successful sync.
+	// The former LastSyncCommit acceleration path (reading base from a git
+	// commit) is gone together with the git engine.
+	return readStoreBase(paths, config, errors)
 }
 
 func readStoreBase(paths core.HomerPaths, config core.HomerConfig, errors *[]string) ([]core.AdapterSnapshot, SyncBaseMode, string) {

@@ -228,24 +228,13 @@ func TestCollectSyncSourcesFallbackMatrix(t *testing.T) {
 		t.Fatalf("store fallback sources = %#v", sources)
 	}
 
-	// Historical state commit is preferred over the mutable store worktree.
-	if err := gitx.EnsureGitRepo(paths.Home); err != nil {
-		t.Fatal(err)
-	}
-	mustSyncGit(t, paths.Home, "config", "--local", "user.email", "homer-test@example.invalid")
-	mustSyncGit(t, paths.Home, "config", "--local", "user.name", "Homer Test")
-	if commit := gitx.CommitAllStore(paths.Home, "baseline"); commit == "" {
-		t.Fatal("baseline commit failed")
-	} else {
-		state := core.HomerState{Version: 1, LastSyncCommit: commit}
-		if err := core.SaveState(paths, state); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// No-git data plane: the machine's store IS the baseline regardless of
+	// any legacy git state — the former "state commit preferred" path is
+	// gone together with the git engine.
 	writeSyncFile(t, filepath.Join(paths.StoreDir, "pi", "settings", "settings.json"), `{"store":2}`)
 	sources = CollectSyncSources(paths, config, CollectSyncSourcesOptions{Fetch: false})
-	if sources.Mode != SyncBaseModeGit || sources.BaseCommit == "" || sources.Base[0].Categories[0].Files["settings.json"].Content != `{"store":1}` {
-		t.Fatalf("git base fallback = %#v", sources)
+	if sources.Mode != SyncBaseModeStore || sources.Base[0].Categories[0].Files["settings.json"].Content != `{"store":2}` {
+		t.Fatalf("store-is-baseline = %#v", sources)
 	}
 
 	// An unreadable adapter root is not interpreted as a full local deletion.

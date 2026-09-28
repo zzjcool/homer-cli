@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/gens"
 )
 
 // Manual sync (planner-frozen MVP step 2): one console action collapses
@@ -213,4 +217,74 @@ func humanStatusSentence(status string, messages []string) string {
 		}
 	}
 	return msgGenericFailure
+}
+
+// snapshotPayload is the wire format of the no-git data plane: an agent
+// uploads its prepared snapshot; pullers download the hub's current one.
+type snapshotPayload struct {
+	HomerJSON  string                       `json:"homerJson"`
+	Store      map[string]map[string]string `json:"store"`
+	Generation int                          `json:"generation"`
+}
+
+// handleSnapshotUpload backs POST /api/snapshot (agent push transport).
+// It publishes the payload as a new hub generation under the write lock —
+// the generation counter itself is the compare-and-swap the advisor
+// ruling requires.
+func (s *Server) handleSnapshotUpload(w http.ResponseWriter, r *http.Request) {
+	var payload snapshotPayload
+	if err := readJSONBody(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	writeMutex.Lock()
+	defer writeMutex.Unlock()
+	layout := gens.New(s.opts.HomerHome)
+	generation, err := layout.Publish(payload.Store, []byte(payload.HomerJSON))
+	if err != nil {
+		writeErrorValue(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "generation": generation})
+}
+
+// handleSnapshotDownload backs GET /api/snapshot (agent pull transport).
+// It streams the generation HEAD names — a concurrent publish never yields
+// a mixed tree.
+func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) {
+	layout := gens.New(s.opts.HomerHome)
+	head, ok := layout.Read()
+	if !ok {
+		writeError(w, http.StatusConflict, "no-snapshot", "中心还没有任何快照（先从一台机器同步到其他机器）", nil)
+		return
+	}
+	store := map[string]map[string]string{}
+	_ = filepath.WalkDir(head.StoreDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(head.StoreDir, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		segments := strings.SplitN(rel, "/", 2)
+		if len(segments) != 2 {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		if store[segments[0]] == nil {
+			store[segments[0]] = map[string]string{}
+		}
+		store[segments[0]][segments[1]] = string(data)
+		return nil
+	})
+	writeJSON(w, http.StatusOK, snapshotPayload{
+		Generation: head.Generation,
+		HomerJSON:  string(head.Meta),
+		Store:      store,
+	})
 }
