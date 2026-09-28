@@ -101,7 +101,7 @@ func TestEnsureGitRepoIsIdempotentAndMaintainsPrivateLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"state.json", "backups/", "keys/"} {
+	for _, required := range []string{"state.json", "backups/", "keys/", "agent.json"} {
 		if strings.Count(string(first), "\n"+required+"\n") != 1 && !strings.HasPrefix(string(first), required+"\n") {
 			t.Fatalf("required line %q missing from %q", required, first)
 		}
@@ -128,7 +128,7 @@ func TestEnsureGitRepoIsIdempotentAndMaintainsPrivateLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "state.json\n*.log\nbackups/\nkeys/\n"
+	want := "state.json\n*.log\nbackups/\nkeys/\nagent.json\n"
 	if string(got) != want {
 		t.Fatalf("custom .gitignore = %q, want %q", got, want)
 	}

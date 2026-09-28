@@ -156,6 +156,7 @@ type CommandOptions struct {
 	Advertise string
 	Token     string
 	ID        string
+	ShowJoin  bool
 }
 
 type argumentError struct{ message string }
@@ -356,6 +357,8 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 				return options, err
 			}
 			options.ID = value
+		case "--show-join":
+			options.ShowJoin = true
 		default:
 			return options, usageArgumentError(fmt.Sprintf("未知选项: %s", arg))
 		}
@@ -368,9 +371,9 @@ func commandUsage(command Command) string {
 	case CommandInit:
 		return "用法: homer init [options]\n\n扫描 adapter，生成 homer.json + store 快照。\n\n选项: --home <dir> --adapters <ids> --all --force --remote <url> --json -h, --help"
 	case CommandServe:
-		return "用法: homer serve [options]\n\n启动本地 hub：HTTP API + 网页控制台（浏览器访问）。\n\n选项:\n  --addr <addr>       监听地址（默认 127.0.0.1:7760）\n  --home <dir>        homer 工作区\n  --token <t>         hub 鉴权 token（默认读 HOMER_HUB_TOKEN；非回环地址必须提供）\n  -h, --help          显示本帮助"
+		return "用法: homer serve [options]\n\n启动本地 hub：HTTP API + 网页控制台（浏览器访问）。\n\n选项:\n  --addr <addr>       监听地址（默认 127.0.0.1:7760）\n  --home <dir>        homer 工作区\n  --token <t>         hub 鉴权 token（非回环地址必须提供；未提供时自动生成并落盘 keys/hub-token）\n  --show-join         打印含 token 的机器接入命令后退出\n  -h, --help          显示本帮助"
 	case CommandAgent:
-		return "用法: homer agent (--listen <addr> | --connect <url>) [options]\n\n把本机作为 agent 接入 hub。\n  --listen <addr>      监听地址，等 hub 直连采集（机器可达时用）\n  --connect <url>      主动拨出连接 hub（NAT 后机器用）\n\n选项:\n  --hub <url>          listen 模式注册用的 hub 地址\n  --advertise <url>    listen 模式自报的可达地址\n  --token <t>          hub token（默认读 HOMER_HUB_TOKEN）\n  --home <dir>         homer 工作区\n  --id <agentId>       覆盖默认 agent ID\n  -h, --help           显示本帮助"
+		return "用法: homer agent [--listen <addr> | --connect <url>] [options]\n\n把本机作为 agent 接入 hub。无参数时用上次注册成功的持久化配置重启。\n\n选项:\n  --listen <addr>      监听地址，等 hub 直连采集（机器可达时用）\n  --connect <url>      主动拨出连接 hub（NAT 后机器用）\n\n选项:\n  --hub <url>          listen 模式注册用的 hub 地址\n  --advertise <url>    listen 模式自报的可达地址（0.0.0.0 监听时自动用唯一全局 IPv4）\n  --token <t>          hub token（默认读 HOMER_HUB_TOKEN）\n  --home <dir>         homer 工作区\n  --id <agentId>       覆盖默认 agent ID\n  -h, --help           显示本帮助"
 	case CommandRemote:
 		return "用法: homer remote <url> [options]\n\n配置 origin，不自动推送。\n\n选项: --home <dir> --json -h, --help"
 	case CommandStatus:

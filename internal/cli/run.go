@@ -398,6 +398,10 @@ func unsupportedOptions(command Command, options CommandOptions, names ...string
 			if options.ID != "" {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --id", command))
 			}
+		case "show-join":
+			if options.ShowJoin {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --show-join", command))
+			}
 		}
 	}
 	return nil
@@ -456,8 +460,14 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 	case CommandServe:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "listen", "connect", "hub", "advertise", "id")
 	case CommandAgent:
-		if err := unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "addr", "json"); err != nil {
+		if err := unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "addr", "json", "show-join"); err != nil {
 			return err
+		}
+		// Parameters are optional when a prior successful registration was
+		// persisted (agentd.ResolveConfig): `homer agent` with no flags means
+		// "restart with the persisted join state".
+		if (options.Listen != "") == (options.Connect != "") && options.Listen == "" && options.Connect == "" {
+			return nil
 		}
 		if (options.Listen != "") == (options.Connect != "") {
 			return usageArgumentError("命令 agent 需要 --listen <addr> 或 --connect <url> 二选一")
