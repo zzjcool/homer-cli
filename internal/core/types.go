@@ -21,18 +21,18 @@ const (
 
 // CategoryConfig describes the files belonging to one adapter category.
 type CategoryConfig struct {
-	Paths       []string      `json:"paths"`
-	Mode        SyncMode      `json:"mode"`
-	Kind        *CategoryKind `json:"kind,omitempty"`
-	ListCmd     string        `json:"listCmd,omitempty"`
-	ApplyCmd    string        `json:"applyCmd,omitempty"`
+	Paths    []string      `json:"paths"`
+	Mode     SyncMode      `json:"mode"`
+	Kind     *CategoryKind `json:"kind,omitempty"`
+	ListCmd  string        `json:"listCmd,omitempty"`
+	ApplyCmd string        `json:"applyCmd,omitempty"`
 	// IDPattern optionally filters listCmd output lines to the installable
 	// IDs (with one capture group). Package managers print headers and
 	// install paths around the IDs; the pattern extracts exactly the IDs.
-	IDPattern   string        `json:"idPattern,omitempty"`
-	Enabled     *bool         `json:"enabled,omitempty"`
-	Exclude     []string      `json:"exclude,omitempty"`
-	ExcludeKeys []string      `json:"excludeKeys,omitempty"`
+	IDPattern   string   `json:"idPattern,omitempty"`
+	Enabled     *bool    `json:"enabled,omitempty"`
+	Exclude     []string `json:"exclude,omitempty"`
+	ExcludeKeys []string `json:"excludeKeys,omitempty"`
 }
 
 // IsManifest is the single behavior switch; file and dir kinds stay
