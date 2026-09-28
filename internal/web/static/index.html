@@ -29,10 +29,30 @@
   <header>
     <h1>homer</h1><small id="version">版本：加载中</small>
     <button id="refresh" type="button">刷新</button>
-    <label>令牌 <input id="token" type="password" autocomplete="off" placeholder="可选"></label>
+    <span id="auth-area"><button id="logout" type="button" class="hidden">退出登录</button></span>
   </header>
 
   <main>
+    <section id="auth-setup" class="hidden">
+      <h2>初始化管理员密码</h2>
+      <p class="muted">首次使用：为 homer 控制台设置管理员密码（至少 12 个字符）。此页面仅限本机/局域网访问。</p>
+      <form id="setup-form">
+        <label>密码 <input id="setup-password" type="password" autocomplete="new-password" required></label>
+        <label>确认 <input id="setup-password2" type="password" autocomplete="new-password" required></label>
+        <button type="submit">保存并进入</button>
+        <div id="setup-error" class="bad"></div>
+      </form>
+    </section>
+
+    <section id="auth-login" class="hidden">
+      <h2>登录</h2>
+      <form id="login-form">
+        <label>管理员密码 <input id="login-password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">登录</button>
+        <div id="login-error" class="bad"></div>
+      </form>
+    </section>
+
     <section id="not-initialized" class="hidden">
       <strong>尚未初始化</strong>：请先在终端运行 homer init 完成初始化，再回到本页。
     </section>
@@ -79,23 +99,11 @@
   (() => {
     "use strict";
     const $ = (id) => document.getElementById(id);
-    const state = { status: null, pending: null };
-    const token = $("token");
-    // URL ?token= 自动登录：主节点浏览器书签一次即永久免填（serve 启动时
-    // 打印含 token 的控制台 URL）。读后立即从地址栏抹掉，避免历史/分享泄漏。
-    const fromURL = new URLSearchParams(location.search).get("token");
-    if (fromURL) {
-      token.value = fromURL; sessionStorage.setItem("homer-token", fromURL);
-      history.replaceState(null, "", location.pathname);
-    } else {
-      token.value = sessionStorage.getItem("homer-token") || "";
-    }
-    token.addEventListener("change", () => sessionStorage.setItem("homer-token", token.value));
+    const state = { status: null, pending: null, authed: false };
 
     async function api(path, options = {}) {
       const headers = Object.assign({ "Accept": "application/json" }, options.headers || {});
-      if (token.value) headers.Authorization = "Bearer " + token.value;
-      const response = await fetch(path, Object.assign({}, options, { headers }));
+      const response = await fetch(path, Object.assign({}, options, { headers, credentials: "same-origin" }));
       let data = null;
       try { data = await response.json(); } catch (_) { data = {}; }
       if (!response.ok) {
@@ -214,37 +222,86 @@
         content.append(table);
       } catch (error) { $("agent-content").textContent = error.message; }
     }
+    function showAuthGate() {
+      // Hide the working sections until the user authenticates.
+      ["status-cards", "diff-view", "actions", "agents"].forEach((id) => $(id).classList.add("hidden"));
+    }
+    function showWorkspace() {
+      ["status-cards", "diff-view", "actions", "agents"].forEach((id) => $(id).classList.remove("hidden"));
+      $("auth-setup").classList.add("hidden"); $("auth-login").classList.add("hidden");
+      $("logout").classList.remove("hidden");
+      state.authed = true;
+    }
+    async function routeAuth() {
+      const gate = await api("/api/auth/status");
+      if (!gate.configured) {
+        showAuthGate(); $("auth-setup").classList.remove("hidden");
+      }
+    }
+    async function handleAuthError(error) {
+      if (error.status !== 401) return false;
+      const gate = await api("/api/auth/status");
+      showAuthGate();
+      if (gate.configured) { $("auth-login").classList.remove("hidden"); $("login-password").focus(); }
+      else { $("auth-setup").classList.remove("hidden"); }
+      return true;
+    }
+
     async function refresh() {
       try {
         const health = await api("/api/health"); $("version").textContent = "版本：" + text(health.version);
         const status = await api("/api/status");
+        showWorkspace();
         $("not-initialized").classList.add("hidden");
         renderStatus(status.report); await loadDiff();
       } catch (error) {
-        // 卡片区不能永远停在「正在加载…」：失败时显式清空并给出行动指引，
-        // 否则用户看到的是一片死寂的加载态，分不清是慢还是坏。
+        if (error.status === 401) {
+          await handleAuthError(error);
+          await loadAgents();
+          return;
+        }
+        // Any non-401 failure means we are authenticated: show the workspace
+        // (with its error state) instead of a blank gate.
+        showWorkspace();
         const summary = $("summary-cards"); clear(summary);
         const card = element("div", null, "card");
         card.append(element("strong", "状态加载失败"));
-        if (error.status === 401) {
-          card.append(element("div", "请先在右上角填写令牌（hub 机器上 homer serve --show-join 可查看）"));
-        } else {
-          card.append(element("div", text(error.message)));
-        }
-        if (error.code === "not-initialized") {
-          summary.append(card);
-          $("not-initialized").classList.remove("hidden");
-        } else {
-          summary.append(card);
-          $("not-initialized").classList.add("hidden");
-        }
-        $("diff-text").textContent = error.status === 401
-          ? "未授权：请先在右上角填写令牌"
-          : text(error.message);
+        card.append(element("div", text(error.message)));
+        summary.append(card);
+        $("not-initialized").classList.toggle("hidden", error.code !== "not-initialized");
+        $("diff-text").textContent = text(error.message);
       }
       await loadAgents();
     }
-    $("refresh").addEventListener("click", refresh); refresh();
+    $("setup-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const first = $("setup-password").value, second = $("setup-password2").value;
+      $("setup-error").textContent = "";
+      if (first !== second) { $("setup-error").textContent = "两次输入不一致"; return; }
+      try {
+        await api("/api/auth/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: first }) });
+        await refresh();
+      } catch (error) { $("setup-error").textContent = error.message; }
+    });
+    $("login-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      $("login-error").textContent = "";
+      try {
+        await api("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: $("login-password").value }) });
+        $("login-password").value = "";
+        await refresh();
+      } catch (error) { $("login-error").textContent = error.message; }
+    });
+    $("logout").addEventListener("click", async () => {
+      try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
+      state.authed = false; $("logout").classList.add("hidden");
+      showAuthGate(); $("auth-login").classList.remove("hidden");
+    });
+
+    $("refresh").addEventListener("click", refresh);
+    // First paint: the 401 handler inside refresh() routes to the auth gate;
+    // /api/auth/status decides setup vs login without leaking state.
+    routeAuth(); refresh();
   })();
   </script>
 </body>

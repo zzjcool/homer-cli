@@ -92,6 +92,7 @@ func request(t *testing.T, handler http.Handler, method, path string, body ...st
 		reader = strings.NewReader("")
 	}
 	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Authorization", "Bearer test-token") // rule 6: no implicit loopback trust
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
 	return recorder
@@ -222,7 +223,7 @@ func TestHealthRoute(t *testing.T) {
 
 func TestStatusRoute(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "local\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodGet, "/api/status")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body)
@@ -236,7 +237,7 @@ func TestStatusRoute(t *testing.T) {
 
 func TestStatusNotInitialized(t *testing.T) {
 	home := t.TempDir()
-	server := newWebServer(t, webFixture{home: home}, "", nil, nil)
+	server := newWebServer(t, webFixture{home: home}, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodGet, "/api/status")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body)
@@ -261,7 +262,7 @@ func TestStatusInvalidConfig(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	server := newWebServer(t, webFixture{home: home}, "", nil, nil)
+	server := newWebServer(t, webFixture{home: home}, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodGet, "/api/status")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body)
@@ -273,7 +274,7 @@ func TestStatusInvalidConfig(t *testing.T) {
 
 func TestDiffRoute(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "local\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodGet, "/api/diff?adapter=pi")
 	if response.Code != http.StatusOK {
 		t.Fatalf("diff = %d, body=%s", response.Code, response.Body)
@@ -295,7 +296,7 @@ func TestDiffRoute(t *testing.T) {
 func TestPushRequiresConfirm(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "local\n")
 	setGitIdentity(t, fixture.home)
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/push")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("push = %d, body=%s", response.Code, response.Body)
@@ -312,7 +313,7 @@ func TestPushRequiresConfirm(t *testing.T) {
 func TestPushConfirmed(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "local\n")
 	setGitIdentity(t, fixture.home)
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/push?confirm=true")
 	if response.Code != http.StatusOK {
 		t.Fatalf("push = %d, body=%s", response.Code, response.Body)
@@ -326,7 +327,7 @@ func TestPushConfirmed(t *testing.T) {
 func TestPushSecretsRejected(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890\n")
 	setGitIdentity(t, fixture.home)
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/push?confirm=true")
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("push = %d, body=%s", response.Code, response.Body)
@@ -339,7 +340,7 @@ func TestPushSecretsRejected(t *testing.T) {
 
 func TestPullRequiresConfirm(t *testing.T) {
 	fixture := pullFixture(t, "remote\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/pull")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("pull = %d, body=%s", response.Code, response.Body)
@@ -356,7 +357,7 @@ func TestPullRequiresConfirm(t *testing.T) {
 
 func TestPullConfirmed(t *testing.T) {
 	fixture := pullFixture(t, "remote\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPost, "/api/pull?confirm=true")
 	if response.Code != http.StatusOK {
 		t.Fatalf("pull = %d, body=%s", response.Code, response.Body)
@@ -373,7 +374,7 @@ func TestPullConfirmed(t *testing.T) {
 
 func TestConfigRoute(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodGet, "/api/config")
 	if response.Code != http.StatusOK {
 		t.Fatalf("config = %d, body=%s", response.Code, response.Body)
@@ -398,7 +399,7 @@ func TestConfigRoute(t *testing.T) {
 	if !strings.Contains(string(configBytes), `"version"`) || !strings.Contains(response.Body.String(), `"version"`) {
 		t.Fatal("config response omitted source keys")
 	}
-	missing := newWebServer(t, webFixture{home: t.TempDir()}, "", nil, nil)
+	missing := newWebServer(t, webFixture{home: t.TempDir()}, "test-token", nil, nil)
 	response = request(t, missing.Handler(), http.MethodGet, "/api/config")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("uninitialized config = %d, body=%s", response.Code, response.Body)
@@ -410,7 +411,7 @@ func TestConfigRoute(t *testing.T) {
 
 func TestAgentsRouteP1(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodGet, "/api/agents")
 	if response.Code != http.StatusOK || decodeBody(t, response)["agents"] == nil {
 		t.Fatalf("agents = %d, body=%s", response.Code, response.Body)
@@ -468,7 +469,7 @@ func TestAgentsRouteWithSource(t *testing.T) {
 		pushRaw:   json.RawMessage(`{"ok":true,"status":"pushed"}`),
 		pullRaw:   json.RawMessage(`{"ok":false,"status":"aborted"}`),
 	}
-	server := newWebServer(t, fixture, "", source, nil)
+	server := newWebServer(t, fixture, "test-token", source, nil)
 	if response := request(t, server.Handler(), http.MethodGet, "/api/agents"); response.Code != http.StatusOK {
 		t.Fatalf("list = %d", response.Code)
 	}
@@ -514,7 +515,7 @@ func TestAgentsRouteWithSource(t *testing.T) {
 
 func TestAuthLoopbackNoToken(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	if response := request(t, server.Handler(), http.MethodGet, "/api/status"); response.Code != http.StatusOK {
 		t.Fatalf("loopback status = %d, body=%s", response.Code, response.Body)
 	}
@@ -549,7 +550,7 @@ func TestNonLoopbackRequiresToken(t *testing.T) {
 func TestWriteMutexSerializes(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "local\n")
 	setGitIdentity(t, fixture.home)
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	var wait sync.WaitGroup
 	responses := make([]*httptest.ResponseRecorder, 2)
 	for i := range responses {
@@ -572,7 +573,7 @@ func TestWriteMutexSerializes(t *testing.T) {
 
 func TestMethodNotAllowedAndNotFound(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
-	server := newWebServer(t, fixture, "", nil, nil)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
 	response := request(t, server.Handler(), http.MethodPut, "/api/status")
 	if response.Code != http.StatusMethodNotAllowed || decodeBody(t, response)["error"].(map[string]any)["code"] != "method-not-allowed" {
 		t.Fatalf("method response = %d, body=%s", response.Code, response.Body)

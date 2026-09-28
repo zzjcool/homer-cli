@@ -38,6 +38,10 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleHealth(w)
 		return
 	}
+	if strings.HasPrefix(path, "/api/auth/") {
+		s.handleAuthAPI(w, r, path)
+		return
+	}
 	if strings.HasPrefix(path, "/api/") || path == "/api" || strings.HasPrefix(path, "/agent/") {
 		if !s.requireAuth(w, r) {
 			return

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -78,10 +79,14 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		return 1
 	}
 	writeLine(out, fmt.Sprintf("homer serve: http://%s（Ctrl+C 停止）", displayAddr(boundAddr)))
+	// First-run without a password: the console is locked until the
+	// administrator finishes setup in a browser (advisor rule 4: setup only
+	// from loopback/LAN peers).
+	if !hubReadPasswordFile(options.Home) {
+		writeLine(out, "首次使用：请在浏览器打开上述地址，设置管理员密码完成初始化。")
+	}
 	if token != "" {
-		writeLine(out, "已启用 token 鉴权（keys/hub-token 持久化）。")
-	} else {
-		writeLine(out, "未设置 token：仅回环地址访问受信任。")
+		writeLine(out, "已启用 agent token 鉴权（keys/hub-token 持久化，--show-join 查看）。")
 	}
 	// The join command embeds the token exactly once — at generation time.
 	// Later boots only point at --show-join, keeping the credential out of
@@ -95,11 +100,6 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	} else {
 		writeLine(out, "agent 接入: homer agent --connect http://<本机地址>"+agentPortSuffix(boundAddr))
 		writeLine(out, "查看含 token 的接入命令: homer serve --show-join")
-	}
-	// 控制台快捷链接：本机/局域网浏览器带 token 直接打开（书签一次即永久
-	// 免填令牌）。与接入命令同场显示，但只指向回环展示地址。
-	if display, ok := consoleURL(boundAddr, token); ok {
-		writeLine(out, "控制台（含令牌，勿外传）: "+display)
 	}
 	httpServer := &http.Server{
 		Handler:           server.Handler(),
@@ -224,6 +224,14 @@ func resolveServeToken(paths core.HomerPaths, flagToken string, loopback bool) (
 	return token, created, nil
 }
 
+// hubReadPasswordFile reports whether the administrator password has been
+// set (keys/hub-password). First-run messaging depends on it.
+func hubReadPasswordFile(home string) bool {
+	paths := ResolveHomerPaths(home)
+	_, err := os.Stat(filepath.Join(paths.Home, "keys", "hub-password"))
+	return err == nil
+}
+
 // joinCommand renders the copy-paste agent bootstrap line. The token rides
 // in an env prefix so it never shows in ps output on the agent machine.
 func joinCommand(boundAddr, token string) string {
@@ -239,26 +247,6 @@ func joinCommand(boundAddr, token string) string {
 		}
 	}
 	return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --connect http://%s", token, net.JoinHostPort(host, port))
-}
-
-// consoleURL renders the ?token= console link for the human at the hub
-// machine. Only loopback binds get a localhost link; other binds use the
-// LAN address (same resolution as the agent join command).
-func consoleURL(boundAddr, token string) (string, bool) {
-	host, port, err := net.SplitHostPort(boundAddr)
-	if err != nil {
-		return "", false
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return fmt.Sprintf("http://localhost:%s/?token=%s", port, token), true
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		if lan, lanErr := hub.LanIPv4(); lanErr == nil {
-			return fmt.Sprintf("http://%s/?token=%s", net.JoinHostPort(lan.String(), port), token), true
-		}
-		return "", false
-	}
-	return fmt.Sprintf("http://%s/?token=%s", net.JoinHostPort(host, port), token), true
 }
 
 // showJoinCommand backs `homer serve --show-join`: resolve the persisted

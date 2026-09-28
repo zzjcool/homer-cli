@@ -36,7 +36,7 @@ func TestServeSmoke(t *testing.T) {
 	// gate matters (no-drift pushes are legitimately 200 without confirm).
 	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"served\": true\n}\n")
 
-	serve := exec.Command(binary, "serve", "--home", machineA.homerHome, "--addr", "127.0.0.1:0")
+	serve := exec.Command(binary, "serve", "--home", machineA.homerHome, "--addr", "127.0.0.1:0", "--token", "e2e-serve-token")
 	serve.Env = serveEnv(machineA, global)
 	var serveOut strings.Builder
 	serve.Stdout = &serveOut
@@ -54,25 +54,29 @@ func TestServeSmoke(t *testing.T) {
 	if !strings.Contains(health, `"ok":true`) {
 		t.Fatalf("health body = %q", health)
 	}
-	status := waitHTTP(t, "http://"+addr+"/api/status", http.StatusOK, 10*time.Second)
+	// Rule 6: the API requires a credential even on loopback now.
+	if unauth := waitHTTP(t, "http://"+addr+"/api/status", http.StatusUnauthorized, 10*time.Second); !strings.Contains(unauth, "unauthorized") {
+		t.Fatalf("unauthenticated status body = %q", unauth)
+	}
+	status := waitHTTPWithToken(t, "http://"+addr+"/api/status", "e2e-serve-token", 10*time.Second)
 	if !strings.Contains(status, `"adapters"`) {
 		t.Fatalf("status body = %q", status)
 	}
-	config := waitHTTP(t, "http://"+addr+"/api/config", http.StatusOK, 10*time.Second)
+	config := waitHTTPWithToken(t, "http://"+addr+"/api/config", "e2e-serve-token", 10*time.Second)
 	if !strings.Contains(config, `"adapters"`) {
 		t.Fatalf("config body = %q", config)
 	}
-	diff := waitHTTP(t, "http://"+addr+"/api/diff", http.StatusOK, 10*time.Second)
+	diff := waitHTTPWithToken(t, "http://"+addr+"/api/diff", "e2e-serve-token", 10*time.Second)
 	if !strings.Contains(diff, `"text"`) {
 		t.Fatalf("diff body = %q", diff)
 	}
 
 	// Unconfirmed push must be a 409 (aborted, non-TTY confirm fallback).
-	if code := postStatus(t, "http://"+addr+"/api/push"); code != http.StatusConflict {
+	if code := postStatusWithToken(t, "http://"+addr+"/api/push", "e2e-serve-token"); code != http.StatusConflict {
 		t.Fatalf("push without confirm = %d, want 409", code)
 	}
 	// Confirmed push goes through and commits.
-	if code := postStatus(t, "http://"+addr+"/api/push?confirm=true"); code != http.StatusOK {
+	if code := postStatusWithToken(t, "http://"+addr+"/api/push?confirm=true", "e2e-serve-token"); code != http.StatusOK {
 		t.Fatalf("confirmed push = %d, want 200", code)
 	}
 
@@ -273,9 +277,14 @@ func firstServeURL(output string) (string, bool) {
 	return "", false
 }
 
-func postStatus(t *testing.T, url string) int {
+func postStatusWithToken(t *testing.T, url, token string) int {
 	t.Helper()
-	response, err := http.Post(url, "application/json", nil)
+	request, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,5 +383,34 @@ func waitAuthorized(t *testing.T, addr, token string) string {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("authorized status never reached 200")
+	return ""
+}
+
+func waitHTTPWithToken(t *testing.T, url, token string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		request, err := http.NewRequest(http.MethodGet, url, nil)
+		if err == nil {
+			request.Header.Set("Authorization", "Bearer "+token)
+			response, reqErr := http.DefaultClient.Do(request)
+			if reqErr == nil {
+				body := make([]byte, 8192)
+				n, _ := response.Body.Read(body)
+				_ = response.Body.Close()
+				last = string(body[:n])
+				if response.StatusCode == http.StatusOK {
+					return last
+				}
+			} else {
+				last = reqErr.Error()
+			}
+		} else {
+			last = err.Error()
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("GET %s (with token) did not reach 200 within %s: %q", url, timeout, last)
 	return ""
 }

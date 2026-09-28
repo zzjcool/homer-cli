@@ -34,8 +34,15 @@ func isLoopbackAddr(addr string) bool {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	if s.opts.Token == "" {
+	// Dual channel (advisor ruling): humans carry an opaque session cookie
+	// minted by password login; agents and scripts keep the Bearer hub token.
+	if s.auth != nil && s.auth.validSession(s.opts.HomerHome, r) {
 		return true
+	}
+	if s.opts.Token == "" {
+		// Rule 6: no more implicit loopback trust. Without any credential
+		// configured the API stays locked (setup/login endpoints aside).
+		return false
 	}
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	const prefix = "Bearer "

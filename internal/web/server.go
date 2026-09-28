@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -87,6 +89,7 @@ type ServeOptions struct {
 type Server struct {
 	opts    ServeOptions
 	handler http.Handler
+	auth    *authStore
 }
 
 // writeMutex is intentionally package-global. Multiple Server values in one
@@ -98,10 +101,18 @@ func NewServer(opts ServeOptions) (*Server, error) {
 	if strings.TrimSpace(opts.Addr) == "" {
 		return nil, errors.New("web server address is required")
 	}
-	if opts.Token == "" && !isLoopbackAddr(opts.Addr) {
-		return nil, fmt.Errorf("token 为空时 Addr 必须是回环地址: %s", opts.Addr)
+	// Advisor rule 4: a hub without an administrator password refuses to
+	// bind beyond loopback — finish first-run setup on the machine itself
+	// (or over LAN) before exposing the console publicly. The token-only
+	// path stays available for scripted deployments.
+	hasPassword := false
+	if info, err := os.Stat(filepath.Join(opts.HomerHome, "keys", "hub-password")); err == nil && !info.IsDir() {
+		hasPassword = true
 	}
-	server := &Server{opts: opts}
+	if opts.Token == "" && !hasPassword && !isLoopbackAddr(opts.Addr) {
+		return nil, fmt.Errorf("尚未设置管理员密码：请先用回环地址启动（homer serve）并在浏览器完成初始化，或用 --token 提供机器令牌")
+	}
+	server := &Server{opts: opts, auth: newAuthStore(opts.HomerHome)}
 	server.handler = http.HandlerFunc(server.serveHTTP)
 	return server, nil
 }
