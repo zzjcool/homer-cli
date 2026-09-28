@@ -251,8 +251,8 @@ func TestJoinCommandRequiresAuth(t *testing.T) {
 	if response := requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x"); response.Code != http.StatusOK {
 		t.Fatalf("bearer join = %d body=%s", response.Code, response.Body)
 	}
-	if !strings.Contains(requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x").Body.String(), "HOMER_HUB_TOKEN=") {
-		t.Fatal("join response missing the env-prefix command")
+	if !strings.Contains(requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x").Body.String(), "curl -fsSL http://example.com/install.sh | sh -s -- --token hub-token-x") {
+		t.Fatal("join response missing the install-pipe command")
 	}
 }
 
@@ -417,5 +417,27 @@ func TestWeakPasswordDoesNotBurnCode(t *testing.T) {
 	handler.ServeHTTP(goodResponse, good)
 	if goodResponse.Code != http.StatusOK {
 		t.Fatalf("valid retry after weak password = %d body=%s", goodResponse.Code, goodResponse.Body)
+	}
+}
+
+// Tailscale-style bootstrap: /install.sh is public (token arrives as an
+// argument, never embedded); /dl/homer (the hub's own binary) requires the
+// hub token — the binary itself is not public infrastructure.
+func TestInstallEndpoints(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "hub-token-x", nil, nil)
+	handler := server.Handler()
+
+	script := request(t, handler, http.MethodGet, "/install.sh")
+	if script.Code != http.StatusOK {
+		t.Fatalf("install.sh = %d", script.Code)
+	}
+	if ct := script.Header().Get("Content-Type"); ct != "text/x-shellscript; charset=utf-8" {
+		t.Fatalf("install.sh content-type = %q", ct)
+	}
+
+	// /dl/homer without a token: 401.
+	if response := request(t, handler, http.MethodGet, "/dl/homer"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated dl = %d", response.Code)
 	}
 }

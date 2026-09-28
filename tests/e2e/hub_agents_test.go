@@ -352,3 +352,93 @@ func startHomerWithEnv(t *testing.T, binary string, m machine, global string, ex
 	})
 	return command
 }
+
+// TestInstallScriptBootstrap walks the Tailscale-style onboarding: fetch
+// /install.sh from the hub (public), verify the token is NOT embedded,
+// then simulate the script's effect (token → keys/hub-token on a fresh
+// machine) and run a zero-flag agent that must register via the token-file
+// fallback.
+func TestInstallScriptBootstrap(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = T\n\temail = t@t\n")
+	binary := binaryOf(t)
+	hubMachine := makeMachine(t, root, "H", global, false)
+	if result := runHomer(t, binary, hubMachine, "init", "--json"); result.code != 0 {
+		t.Fatalf("init failed: %s%s", result.stdout, result.stderr)
+	}
+
+	hubPort := freePort(t)
+	hubProc := startHomer(t, binary, hubMachine, global,
+		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--home", hubMachine.homerHome,
+		"--token", "install-e2e-token")
+	defer stopProc(t, hubProc)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+
+	if health := waitHTTP(t, hubURL+"/api/health", http.StatusOK, 10*time.Second); !strings.Contains(health, `"ok":true`) {
+		t.Fatalf("hub health = %q", health)
+	}
+
+	// 1. The script is public and does not leak the token.
+	scriptResp, err := http.Get(hubURL + "/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _ := io.ReadAll(scriptResp.Body)
+	_ = scriptResp.Body.Close()
+	if scriptResp.StatusCode != http.StatusOK {
+		t.Fatalf("install.sh = %d", scriptResp.StatusCode)
+	}
+	if strings.Contains(string(script), "install-e2e-token") {
+		t.Fatal("install.sh must not embed the hub token")
+	}
+	for _, marker := range []string{hubURL, "keys/hub-token", "homer agent --connect", "/dl/homer"} {
+		if !strings.Contains(string(script), marker) {
+			t.Fatalf("install.sh missing %q", marker)
+		}
+	}
+
+	// 2. The hub serves its own binary (token-authenticated).
+	dl, err := http.NewRequest(http.MethodGet, hubURL+"/dl/homer", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl.Header.Set("Authorization", "Bearer install-e2e-token")
+	dlResp, err := http.DefaultClient.Do(dl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := make([]byte, 4)
+	_, _ = io.ReadFull(dlResp.Body, head)
+	size := dlResp.ContentLength
+	_ = dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusOK || string(head) != "\x7fELF" || size < 1_000_000 {
+		t.Fatalf("dl/homer = %d head=%q size=%d (want an ELF binary > 1MB)", dlResp.StatusCode, head, size)
+	}
+
+	// 3. Simulate the script on a fresh agent machine: token file, no flags.
+	agentMachine := makeMachine(t, root, "A", global, false)
+	tokenDir := filepath.Join(agentMachine.homerHome, "keys")
+	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tokenDir, "hub-token"), []byte("install-e2e-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agentProc := startHomerWithEnv(t, binary, agentMachine, global, nil,
+		"agent", "--connect", hubURL, "--id", "install-script-agent", "--home", agentMachine.homerHome)
+	defer stopProc(t, agentProc)
+
+	deadline := time.Now().Add(20 * time.Second)
+	registered := false
+	for time.Now().Before(deadline) {
+		if agentRegistered(t, hubURL, "install-e2e-token", "install-script-agent") {
+			registered = true
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !registered {
+		t.Fatal("agent with token-file bootstrap never registered")
+	}
+}

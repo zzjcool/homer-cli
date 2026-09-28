@@ -406,15 +406,17 @@ func validatePassword(password string) string {
 	return ""
 }
 
-// joinCommandForRequest renders the agent join line with the real hub token
-// for authenticated administrators; the request's own Host picks the URL so
-// the command matches how the hub was reached.
+// joinCommandForRequest renders the full one-line bootstrap for
+// authenticated administrators: a Tailscale-style install pipe with the
+// token as the argument. The request's own Host picks the URL so the
+// command matches how the hub was reached.
 func (s *Server) joinCommandForRequest(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "https"
+	if s.opts.Token == "" {
+		// Loopback hub without a token: nothing to bootstrap with; point at
+		// the plain connect line.
+		return fmt.Sprintf("homer agent --connect %s", requestBaseURL(r))
 	}
-	return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --connect %s://%s", s.opts.Token, scheme, r.Host)
+	return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", requestBaseURL(r), s.opts.Token)
 }
 
 // readJSONBody decodes a small JSON request body (auth payloads only).

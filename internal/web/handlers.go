@@ -3,8 +3,11 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
@@ -40,6 +43,29 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(path, "/api/auth/") {
 		s.handleAuthAPI(w, r, path)
+		return
+	}
+	// Tailscale-style bootstrap endpoints. /install.sh is public — the
+	// script never embeds the token (it arrives as the --token argument on
+	// the agent machine). /dl/homer streams the hub's own binary and needs
+	// the hub token like every other API.
+	if path == "/install.sh" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.serveInstallScript(w, r)
+		return
+	}
+	if path == "/dl/homer" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		if !s.requireAuth(w, r) {
+			return
+		}
+		s.serveSelfBinary(w, r)
 		return
 	}
 	if strings.HasPrefix(path, "/api/") || path == "/api" || strings.HasPrefix(path, "/agent/") {
@@ -441,3 +467,51 @@ func (s *Server) paths() core.HomerPaths {
 }
 
 func (s *Server) homePath() string { return s.paths().Home }
+
+// requestBaseURL reconstructs how THIS request reached the hub (scheme
+// honors X-Forwarded-Proto behind the reverse proxy; host from the request
+// itself) so the install script points agents at a URL that actually works.
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+// serveInstallScript renders the public Tailscale-style bootstrap script.
+// The hub token is never embedded — the script's usage line tells the user
+// to copy the complete command (with token) from the console.
+func (s *Server) serveInstallScript(w http.ResponseWriter, r *http.Request) {
+	script := RenderInstallScript(requestBaseURL(r), runtime.GOOS, runtime.GOARCH)
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, script)
+}
+
+// serveSelfBinary streams the hub's own executable for same-platform
+// agents (already token-authenticated by the router).
+func (s *Server) serveSelfBinary(w http.ResponseWriter, r *http.Request) {
+	self, err := os.Executable()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no-binary", "定位 homer 二进制失败: "+err.Error(), nil)
+		return
+	}
+	file, err := os.Open(self)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no-binary", "读取 homer 二进制失败: "+err.Error(), nil)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.IsDir() {
+		writeError(w, http.StatusInternalServerError, "no-binary", "homer 二进制不可读", nil)
+		return
+	}
+	// The executable may have been replaced since boot (deploy); stream
+	// what is on disk now, not a boot-time snapshot.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeContent(w, r, "homer", info.ModTime(), file)
+}

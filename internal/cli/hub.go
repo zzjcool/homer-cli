@@ -141,6 +141,14 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 func runAgent(options CommandOptions, out, errOut io.Writer) int {
 	token := hubTokenFromEnv(options.Token)
 	paths := ResolveHomerPaths(options.Home)
+	// Tailscale-style bootstrap: the install script lands the token in
+	// keys/hub-token on the agent machine. Priority stays flag > env > file
+	// (same shape as the hub side; the file is written 0600 by the script).
+	if token == "" {
+		if fileToken, ok := hub.ReadHubToken(paths.Home); ok {
+			token = fileToken
+		}
+	}
 	config := agentd.Config{
 		Home:         paths.Home,
 		HomerHome:    options.Home,
