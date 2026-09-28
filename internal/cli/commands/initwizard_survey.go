@@ -18,10 +18,26 @@ func (identityWizardPort) MultiSelect(_ string, _ []WizardOption, checked []stri
 // equivalent of pressing a select-all key) and keeps the interaction stable.
 type surveyWizardPort struct{}
 
+// surveyWithSelectAllDisabled asks one survey MultiSelect. When the port
+// knows the interaction is a wizard level that carries the back sentinel, it
+// disables survey's select-all shortcut: survey prints a "<right> to all"
+// hint that would check the back row too, turning a plain confirm into an
+// accidental back navigation. (Select-none is left intact: clearing
+// everything including the sentinel is a legitimate, unambiguous state.)
+func surveyWithSelectAllDisabled(hasBack bool) func(*survey.AskOptions) error {
+	return func(options *survey.AskOptions) error {
+		if hasBack {
+			options.PromptConfig.RemoveSelectAll = true
+		}
+		return nil
+	}
+}
+
 func (surveyWizardPort) MultiSelect(message string, options []WizardOption, checked []string) ([]string, error) {
 	if len(options) == 0 {
 		return []string{}, nil
 	}
+	hasBack := optionsContainBack(options)
 	labels := make([]string, len(options))
 	defaultLabels := make([]string, 0, len(checked))
 	checkedSet := make(map[string]struct{}, len(checked))
@@ -40,13 +56,17 @@ func (surveyWizardPort) MultiSelect(message string, options []WizardOption, chec
 	}
 
 	selectedLabels := make([]string, 0, len(defaultLabels))
+	help := "空格勾选；Enter 确认；输入文字过滤；默认全选（全选快捷键由终端实现）"
+	if hasBack {
+		help = "空格勾选；Enter 确认；输入文字过滤；返回请选最后一项（含返回项时不支持全选快捷键）"
+	}
 	prompt := &survey.MultiSelect{
 		Message: message,
 		Options: labels,
 		Default: defaultLabels,
-		Help:    "空格勾选；Enter 确认；输入文字过滤；默认全选（全选快捷键由终端实现）",
+		Help:    help,
 	}
-	if err := survey.AskOne(prompt, &selectedLabels); err != nil {
+	if err := survey.AskOne(prompt, &selectedLabels, surveyWithSelectAllDisabled(hasBack)); err != nil {
 		return nil, err
 	}
 	selectedSet := make(map[string]struct{}, len(selectedLabels))

@@ -104,12 +104,28 @@ func withBackOption(options []WizardOption) []WizardOption {
 	return append(append([]WizardOption(nil), options...), backOption())
 }
 
+// optionsContainBack reports whether a prompt's option list carries the back
+// sentinel. The survey port uses it to disable the select-all shortcut,
+// which would otherwise check the sentinel and turn a plain confirm into an
+// accidental "go back".
+func optionsContainBack(options []WizardOption) bool {
+	for _, option := range options {
+		if option.Value == WizardBackValue {
+			return true
+		}
+	}
+	return false
+}
+
 // RunSelectionWizard orchestrates adapter -> category -> entry MultiSelects.
 // It is deliberately pure apart from calls to the injected port, making all
 // cancellation and selection cases testable without a terminal.
 // Every question below the adapter level offers a "< 返回上一级" sentinel;
 // picking it restarts the previous question with the user's in-progress
-// choices preserved as the new defaults.
+// choices preserved as the new defaults. Going back from a category question
+// re-asks the adapter question and then replays the adapter walk: adapters
+// whose enabled flag did not change keep their recorded answers, changed
+// ones are asked again.
 func RunSelectionWizard(port WizardPort, state WizardState) (WizardSelection, error) {
 	if port == nil {
 		port = identityWizardPort{}
@@ -144,131 +160,190 @@ func RunSelectionWizard(port WizardPort, state WizardState) (WizardSelection, er
 	lastCategoryChoice := make(map[string][]string)
 	lastEntryChoice := make(map[string]map[string][]string)
 
-	for _, adapterState := range state.Adapters {
-		adapterSelected := selectedAdapters[adapterState.ID]
-		selection.Adapters[adapterState.ID] = adapterSelected
-		categorySelection := make(map[string]bool, len(adapterState.Categories))
-		selection.Categories[adapterState.ID] = categorySelection
+	// categoryDone marks adapters whose category question already completed
+	// (or that were skipped as unselected), with categoryDoneSelected
+	// snapshotting the adapter flag at that moment. A back navigation
+	// re-asks the adapter question and replays the adapter walk from the
+	// top: adapters whose flag is unchanged keep their recorded answers
+	// while changed ones are asked again, so unchecking an earlier adapter
+	// from a later question actually takes effect.
+	categoryDone := make(map[string]bool)
+	categoryDoneSelected := make(map[string]bool)
 
-		categoryOptions := make([]WizardOption, 0, len(adapterState.Categories))
-		categoryChecked := make([]string, 0, len(adapterState.Categories))
-		for _, category := range adapterState.Categories {
-			categoryOptions = append(categoryOptions, WizardOption{
-				Value: category.Name,
-				Label: wizardCountLabel(category.Name, category.FileCount, "文件"),
-			})
-			if category.Enabled {
-				categoryChecked = append(categoryChecked, category.Name)
+	adapterQuestion := "选择要初始化的 adapter（空格勾选，Enter 确认）"
+
+adapterWalk:
+	for {
+		for _, adapterState := range state.Adapters {
+			if categoryDone[adapterState.ID] && categoryDoneSelected[adapterState.ID] == selectedAdapters[adapterState.ID] {
+				continue
 			}
-		}
+			adapterSelected := selectedAdapters[adapterState.ID]
+			selection.Adapters[adapterState.ID] = adapterSelected
+			categorySelection := make(map[string]bool, len(adapterState.Categories))
+			selection.Categories[adapterState.ID] = categorySelection
+			// Re-asking this adapter invalidates any exclusion recorded by an
+			// abandoned earlier pass; the new answers re-record from scratch.
+			delete(selection.Excluded, adapterState.ID)
 
-		if !adapterSelected {
+			categoryOptions := make([]WizardOption, 0, len(adapterState.Categories))
+			categoryChecked := make([]string, 0, len(adapterState.Categories))
 			for _, category := range adapterState.Categories {
-				categorySelection[category.Name] = false
+				categoryOptions = append(categoryOptions, WizardOption{
+					Value: category.Name,
+					Label: wizardCountLabel(category.Name, category.FileCount, "文件"),
+				})
+				if category.Enabled {
+					categoryChecked = append(categoryChecked, category.Name)
+				}
 			}
-			continue
-		}
 
-		categoryDefault := categoryChecked
-		if previous, ok := lastCategoryChoice[adapterState.ID]; ok {
-			categoryDefault = previous
-		}
-
-	categoryLoop:
-		for {
-			checkedCategories, err := port.MultiSelect(
-				"选择 "+adapterState.ID+" 的分类（空格勾选，Enter 确认；选 "+backOptionLabel+" 回到 adapter 选择）",
-				withBackOption(categoryOptions),
-				categoryDefault,
-			)
-			if err != nil {
-				return WizardSelection{}, err
+			if !adapterSelected {
+				for _, category := range adapterState.Categories {
+					categorySelection[category.Name] = false
+				}
+				categoryDone[adapterState.ID] = true
+				categoryDoneSelected[adapterState.ID] = false
+				continue
 			}
-			if containsBack(checkedCategories) {
-				// Go back to the adapter question, preserving in-progress state.
-				lastCategoryChoice[adapterState.ID] = stripBack(categoryDefault)
-				checkedAdapters, err = port.MultiSelect("选择要初始化的 adapter（空格勾选，Enter 确认）", adapterOptions, checkedAdapters)
+
+			categoryDefault := categoryChecked
+			if previous, ok := lastCategoryChoice[adapterState.ID]; ok {
+				categoryDefault = previous
+			}
+
+		categoryLoop:
+			for {
+				checkedCategories, err := port.MultiSelect(
+					"选择 "+adapterState.ID+" 的分类（空格勾选，Enter 确认；选 "+backOptionLabel+" 回到 adapter 选择）",
+					withBackOption(categoryOptions),
+					categoryDefault,
+				)
 				if err != nil {
 					return WizardSelection{}, err
 				}
-				selectedAdapters = optionSet(adapterOptions, checkedAdapters)
-				adapterSelected = selectedAdapters[adapterState.ID]
-				selection.Adapters[adapterState.ID] = adapterSelected
-				if !adapterSelected {
-					for _, category := range adapterState.Categories {
-						categorySelection[category.Name] = false
+				if containsBack(checkedCategories) {
+					// Preserve the in-progress toggles (not the pre-prompt
+					// defaults) so the resumed question starts where the user
+					// left off. An empty result means the user cleared every
+					// real category before going back; treat that as "no recorded
+					// in-progress state" rather than "all categories deselected",
+					// so a later replay of this adapter (whose category question
+					// never completed) falls back to the config defaults instead
+					// of silently unchecking everything on a plain Enter.
+					if stripped := stripBack(checkedCategories); len(stripped) > 0 {
+						lastCategoryChoice[adapterState.ID] = stripped
 					}
-					break categoryLoop
-				}
-				continue
-			}
-			categoryDefault = stripBack(checkedCategories)
-
-			selectedCategories := optionSet(categoryOptions, categoryDefault)
-			for _, category := range adapterState.Categories {
-				selected := selectedCategories[category.Name]
-				categorySelection[category.Name] = selected
-				// The state builder emits Entries only for categories above the
-				// threshold. A caller may also populate Entries explicitly to mark
-				// a small directory as drillable, so the orchestration keys off the
-				// non-empty marker rather than reapplying the threshold here.
-				if !selected || len(category.Entries) == 0 {
-					continue
-				}
-
-				entryOptions := make([]WizardOption, 0, len(category.Entries))
-				entryChecked := make([]string, 0, len(category.Entries))
-				for _, entry := range category.Entries {
-					if entry.Key == "" {
-						continue
-					}
-					label := entry.Label
-					if label == "" {
-						label = entry.Key
-					}
-					entryOptions = append(entryOptions, WizardOption{Value: entry.Key, Label: label})
-					if entry.Included {
-						entryChecked = append(entryChecked, entry.Key)
-					}
-				}
-				if len(entryOptions) == 0 {
-					continue
-				}
-
-				entryDefault := entryChecked
-				if previous, ok := lastEntryChoice[adapterState.ID][category.Name]; ok {
-					entryDefault = previous
-				}
-
-			entryLoop:
-				for {
-					checkedEntries, err := port.MultiSelect(
-						"选择 "+adapterState.ID+"/"+category.Name+" 的目录条目（空格勾选，Enter 确认；选 "+backOptionLabel+" 回到分类选择）",
-						withBackOption(entryOptions),
-						entryDefault,
-					)
+					replayedAdapters, err := port.MultiSelect(adapterQuestion, adapterOptions, checkedAdapters)
 					if err != nil {
 						return WizardSelection{}, err
 					}
-					if containsBack(checkedEntries) {
-						lastEntryChoice[adapterState.ID] = map[string][]string{category.Name: stripBack(entryDefault)}
-						continue categoryLoop
+					replayedSelection := optionSet(adapterOptions, replayedAdapters)
+					unchanged := len(replayedSelection) == len(selectedAdapters)
+					if unchanged {
+						for id, picked := range replayedSelection {
+							if selectedAdapters[id] != picked {
+								unchanged = false
+								break
+							}
+						}
 					}
-					entryDefault = stripBack(checkedEntries)
-					selectedEntries := optionSet(entryOptions, entryDefault)
+					if unchanged {
+						// The user went back but confirmed the same adapters: stay
+						// on this category question with the in-progress toggles
+						// restored as defaults, instead of replaying the walk into
+						// the same back answer forever.
+						if stripped := stripBack(checkedCategories); len(stripped) > 0 {
+							categoryDefault = stripped
+						}
+						continue
+					}
+					checkedAdapters = replayedAdapters
+					selectedAdapters = replayedSelection
+					// Replay the whole adapter walk: unchecking an earlier
+					// adapter here must invalidate its recorded selection.
+					continue adapterWalk
+				}
+				categoryDefault = stripBack(checkedCategories)
+
+				selectedCategories := optionSet(categoryOptions, categoryDefault)
+				for _, category := range adapterState.Categories {
+					selected := selectedCategories[category.Name]
+					categorySelection[category.Name] = selected
+					// The state builder emits Entries only for categories above the
+					// threshold. A caller may also populate Entries explicitly to mark
+					// a small directory as drillable, so the orchestration keys off the
+					// non-empty marker rather than reapplying the threshold here.
+					if !selected || len(category.Entries) == 0 {
+						continue
+					}
+
+					entryOptions := make([]WizardOption, 0, len(category.Entries))
+					entryChecked := make([]string, 0, len(category.Entries))
 					for _, entry := range category.Entries {
-						if entry.Key == "" || selectedEntries[entry.Key] {
+						if entry.Key == "" {
 							continue
 						}
-						appendWizardExclude(&selection, adapterState.ID, category.Name, entry.Key)
+						label := entry.Label
+						if label == "" {
+							label = entry.Key
+						}
+						entryOptions = append(entryOptions, WizardOption{Value: entry.Key, Label: label})
+						if entry.Included {
+							entryChecked = append(entryChecked, entry.Key)
+						}
 					}
-					break entryLoop
+					if len(entryOptions) == 0 {
+						continue
+					}
+
+					entryDefault := entryChecked
+					if previous, ok := lastEntryChoice[adapterState.ID][category.Name]; ok {
+						entryDefault = previous
+					}
+
+				entryLoop:
+					for {
+						checkedEntries, err := port.MultiSelect(
+							"选择 "+adapterState.ID+"/"+category.Name+" 的目录条目（空格勾选，Enter 确认；选 "+backOptionLabel+" 回到分类选择）",
+							withBackOption(entryOptions),
+							entryDefault,
+						)
+						if err != nil {
+							return WizardSelection{}, err
+						}
+						if containsBack(checkedEntries) {
+							// Save the in-progress entry toggles, merging into the
+							// per-adapter map so other categories keep theirs. As
+							// above, an empty result is "no recorded state": a later
+							// replay falls back to Included defaults instead of
+							// unchecking every entry.
+							if stripped := stripBack(checkedEntries); len(stripped) > 0 {
+								if lastEntryChoice[adapterState.ID] == nil {
+									lastEntryChoice[adapterState.ID] = make(map[string][]string)
+								}
+								lastEntryChoice[adapterState.ID][category.Name] = stripped
+							}
+							continue categoryLoop
+						}
+						entryDefault = stripBack(checkedEntries)
+						selectedEntries := optionSet(entryOptions, entryDefault)
+						for _, entry := range category.Entries {
+							if entry.Key == "" || selectedEntries[entry.Key] {
+								continue
+							}
+							appendWizardExclude(&selection, adapterState.ID, category.Name, entry.Key)
+						}
+						break entryLoop
+					}
 				}
+				break categoryLoop
 			}
-			break categoryLoop
+			categoryDone[adapterState.ID] = true
+			categoryDoneSelected[adapterState.ID] = true
 		}
+		return selection, nil
 	}
-	return selection, nil
 }
 
 func wizardCountLabel(name string, count int, noun string) string {
