@@ -27,6 +27,7 @@ func TestConsoleUserCopy(t *testing.T) {
 		"有尚未同步的改动",
 		"都已对齐",
 		"同步到其他机器", "从中心同步", "确认同步", "/api/sync?",
+		"以本机为准", "以中心为准", "/api/resolve?",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)

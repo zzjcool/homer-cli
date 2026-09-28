@@ -108,6 +108,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSync(w, r)
+	case path == "/api/resolve":
+		// Conflict resolution (MVP): keep this machine or the center.
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleResolve(w, r)
 	case path == "/api/config":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)

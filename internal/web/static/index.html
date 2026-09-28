@@ -341,8 +341,14 @@ function renderHero() {
     concl.append(el("span", "dot conflict"), document.createTextNode("有冲突，需要选择保留哪一边"));
     numbers.textContent = conflicts + " 项冲突" + (push + pull ? "，另有 " + fmtCounts(push, pull, 0) : "");
     const note = el("div", "hero-note");
-    note.append(el("div", null, "两边都改过同一处。这一步只能查看下方差异。"));
-    hero.append(concl, numbers, note);
+    note.append(el("div", null, "两边都改过同一处。选择保留哪一边（全部 " + conflicts + " 项冲突一起处理）。"));
+    const localBtn = el("button", "primary", "以本机为准");
+    localBtn.type = "button"; localBtn.addEventListener("click", () => confirmResolve("local"));
+    const centerBtn = el("button", null, "以中心为准");
+    centerBtn.type = "button"; centerBtn.addEventListener("click", () => confirmResolve("center"));
+    const row = el("div", "hero-actions");
+    row.append(localBtn, centerBtn);
+    hero.append(concl, numbers, note, row);
     return;
   }
   if (push + pull > 0) {
@@ -484,7 +490,14 @@ function buildDiffDrawer(adapter, category) {
         sb.type = "button"; sb.addEventListener("click", confirmSync);
         actions.append(sb);
       }
-      if (c.conflicts > 0) actions.append(el("span", "small muted", "两边都改过同一处，这次没有写入。"));
+      if (c.conflicts > 0) {
+        actions.append(el("span", "small muted", "两边都改过同一处。"));
+        const rb1 = el("button", "small-btn danger-btn", "以本机为准");
+        rb1.type = "button"; rb1.addEventListener("click", () => confirmResolve("local"));
+        const rb2 = el("button", "small-btn", "以中心为准");
+        rb2.type = "button"; rb2.addEventListener("click", () => confirmResolve("center"));
+        actions.append(rb1, rb2);
+      }
       if (actions.childNodes.length) drawer.append(actions);
     }
   }
@@ -613,6 +626,19 @@ function confirmSync() {
   app.pendingAction = { kind: "sync" };
   $("dlg-confirm").showModal();
 }
+function confirmResolve(choice) {
+  const r = app.report;
+  const n = (r.adapters || []).reduce((s, a) => s + (a.conflicts || 0), 0);
+  const local = choice === "local";
+  $("confirm-title").textContent = local ? "以本机为准" : "以中心为准";
+  $("confirm-desc").textContent = local
+    ? "全部 " + n + " 项冲突都保留这台机器上的内容，并写入中心。在线的其他机器会接着应用这份内容。离线机器这次不动。"
+    : "全部 " + n + " 项冲突都改成中心已有的内容。这台机器上的对应文件会被覆盖，覆盖前先备份。其他机器不动。";
+  $("confirm-choices").replaceChildren();
+  $("btn-confirm-ok").textContent = local ? "确认以本机为准" : "确认以中心为准";
+  app.pendingAction = { kind: "resolve", choice };
+  $("dlg-confirm").showModal();
+}
 $("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
 // 显式接线，不依赖 dialog 表单的隐式提交行为（兼容性兜底）
 $("btn-confirm-ok").addEventListener("click", ev => {
@@ -629,11 +655,30 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
   if (action && action.kind === "sync" && direction) executeSync(direction);
+  if (action && action.kind === "resolve") executeResolve(action.choice);
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
   $("dlg-confirm").close("cancel");
 });
+async function executeResolve(choice) {
+  const okBtn = $("btn-confirm-ok"); okBtn.disabled = true; okBtn.textContent = "处理中…";
+  try {
+    const d = await api("/api/resolve?choice=" + choice + "&confirm=true", { method: "POST" });
+    if (d.ok && d.status === "resolved" && choice === "local") toast("已按本机内容写回中心");
+    else if (d.ok && d.status === "resolved") toast("已按中心内容覆盖本机");
+    else if (d.status === "no-conflicts") toast("没有需要选择的冲突");
+    else {
+      const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
+      showAlert("同步没有全部完成", lines.length ? lines : ["同步没有完成。"], null);
+    }
+    await refresh();
+  } catch (e) {
+    showAlert("同步没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+  } finally {
+    okBtn.disabled = false; okBtn.textContent = "确认";
+  }
+}
 async function executeSync(direction) {
   const okBtn = $("btn-confirm-ok"); okBtn.disabled = true; okBtn.textContent = "处理中…";
   try {
