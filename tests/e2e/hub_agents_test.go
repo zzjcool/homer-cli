@@ -552,3 +552,93 @@ func TestEnrollmentE2E(t *testing.T) {
 	}
 	_ = revokeResp.Body.Close()
 }
+
+// TestManualSyncFanout walks the MVP user story end to end: machine A
+// changes a file, the console sees the change, one POST /api/sync
+// publishes it, and machine B's file changes. (planner step 5)
+func TestManualSyncFanout(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")
+	origin := filepath.Join(root, "origin.git")
+	runGit(t, global, root, "init", "--bare", "-b", "main", origin)
+
+	binary := binaryOf(t)
+	machineA := makeMachine(t, root, "A", global, true)
+	machineB := makeMachine(t, root, "B", global, false)
+	runGit(t, global, root, "clone", origin, machineA.homerHome)
+	if result := runHomer(t, binary, machineA, "init", "--json"); result.code != 0 {
+		t.Fatalf("init A failed: %s%s", result.stdout, result.stderr)
+	}
+	if result := runHomer(t, binary, machineA, "push", "--yes"); result.code != 0 {
+		t.Fatalf("push A failed: %s%s", result.stdout, result.stderr)
+	}
+	if result := runHomer(t, binary, machineB, "home", origin, "--yes"); result.code != 0 {
+		t.Fatalf("home B failed: %s%s", result.stdout, result.stderr)
+	}
+
+	token := "manual-sync-token"
+	hubPort := freePort(t)
+	// The hub's home IS machine A's home: hero numbers reflect A's changes.
+	hubProc := startHomer(t, binary, machineA, global,
+		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", machineA.homerHome)
+	defer stopProc(t, hubProc)
+
+	listenPort := freePort(t)
+	agentA := startHomer(t, binary, machineA, global,
+		"agent", "--listen", fmt.Sprintf("127.0.0.1:%d", listenPort),
+		"--advertise", fmt.Sprintf("http://127.0.0.1:%d", listenPort),
+		"--hub", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"--token", token, "--id", "agent-a", "--home", machineA.homerHome)
+	defer stopProc(t, agentA)
+	agentB := startHomer(t, binary, machineB, global,
+		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
+	defer stopProc(t, agentB)
+
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+	auth := map[string]string{"Authorization": "Bearer " + token}
+
+	// Wait for both machines to appear in the registry.
+	deadline := time.Now().Add(30 * time.Second)
+	ids := map[string]bool{}
+	for time.Now().Before(deadline) && !(ids["agent-a"] && ids["agent-b"]) {
+		body := apiGet(t, hubURL+"/api/agents", auth, hubProc)
+		ids = map[string]bool{}
+		for _, item := range jsonPath(t, body, "agents").([]any) {
+			ids[item.(map[string]any)["agentId"].(string)] = true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !ids["agent-a"] || !ids["agent-b"] {
+		t.Fatalf("registered agents = %v; hub output: %s", ids, procOutput[hubProc])
+	}
+
+	// 1. Machine A changes a file.
+	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"manualSync\": true\n}\n")
+
+	// 2. The console sees the change (this is what the hero renders).
+	body := apiGet(t, hubURL+"/api/status", auth, hubProc)
+	pushSum := 0
+	for _, item := range jsonPath(t, body, "report", "adapters").([]any) {
+		if number, ok := item.(map[string]any)["push"].(float64); ok {
+			pushSum += int(number)
+		}
+	}
+	if pushSum == 0 {
+		t.Fatalf("console sees no local changes; status = %s", body)
+	}
+
+	// 3. One manual sync publishes A onto the fleet.
+	sync := apiPost(t, hubURL+"/api/sync?direction=to-others&confirm=true", auth)
+	if jsonPath(t, sync, "ok") != true || jsonPath(t, sync, "status") != "synced" {
+		t.Fatalf("manual sync = %s", sync)
+	}
+
+	// 4. Machine B's file now carries the change.
+	bSettings := filepath.Join(piRoot(machineB), "settings.json")
+	content, err := os.ReadFile(bSettings)
+	if err != nil || !strings.Contains(string(content), "manualSync") {
+		t.Fatalf("machine B settings = %q err=%v (want manualSync marker)", content, err)
+	}
+}
