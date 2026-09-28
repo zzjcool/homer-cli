@@ -112,16 +112,118 @@ func waitExit(command *exec.Cmd) <-chan error {
 	return done
 }
 
-// TestServeNonLoopbackWithoutToken verifies the CLI exits 1 with the Chinese
-// error when serving a non-loopback address without a token (plan §2.1).
-func TestServeNonLoopbackWithoutToken(t *testing.T) {
+// TestServeNonLoopbackAutoToken verifies the Tailscale-style zero-friction
+// behavior: serving a non-loopback address without any token auto-generates
+// one, persists it under keys/hub-token, prints the join command exactly
+// once, and a second boot loads the persisted token without re-printing it.
+func TestServeNonLoopbackAutoToken(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = T\n\temail = t@t\n")
 	binary := binaryOf(t)
-	result := runProcess(t, t.TempDir(), filepath.Join(t.TempDir(), "gitconfig"), nil, binary, "serve", "--addr", "0.0.0.0:7760", "--home", t.TempDir())
-	if result.code != 1 {
-		t.Fatalf("exit = %d, want 1; out=%q err=%q", result.code, result.stdout, result.stderr)
+	home := filepath.Join(root, "homer")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(result.stderr, "token") && !strings.Contains(result.stderr, "回环") {
-		t.Fatalf("missing token/loopback error: %q", result.stderr)
+
+	// First boot: auto-generates, prints the join command with the token.
+	first := startServeProc(t, binary, home, global, "0.0.0.0:17790")
+	output := readServeOutput(t, first)
+	stopServe(t, first)
+	if !strings.Contains(output, "HOMER_HUB_TOKEN=") || !strings.Contains(output, "homer agent --connect") {
+		t.Fatalf("first boot missing join command: %q", output)
+	}
+	if !strings.Contains(output, "仅本次显示") {
+		t.Fatalf("first boot missing one-time hint: %q", output)
+	}
+	tokenData, err := os.ReadFile(filepath.Join(home, "keys", "hub-token"))
+	if err != nil {
+		t.Fatalf("token not persisted: %v", err)
+	}
+	token := strings.TrimSpace(string(tokenData))
+	if !strings.Contains(output, token) {
+		t.Fatal("printed join command does not embed the persisted token")
+	}
+	info, err := os.Stat(filepath.Join(home, "keys", "hub-token"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %v err=%v", info.Mode().Perm(), err)
+	}
+
+	// Second boot: same token, no re-print.
+	second := startServeProc(t, binary, home, global, "0.0.0.0:17791")
+	output = readServeOutput(t, second)
+	stopServe(t, second)
+	if strings.Contains(output, token) {
+		t.Fatal("second boot must not re-print the token")
+	}
+	if !strings.Contains(output, "--show-join") {
+		t.Fatalf("second boot missing show-join hint: %q", output)
+	}
+
+	// --show-join re-renders the join command without serving.
+	result := runProcess(t, home, global, nil, binary, "serve", "--show-join", "--addr", "0.0.0.0:17792", "--home", home)
+	if result.code != 0 || !strings.Contains(result.stdout, token) {
+		t.Fatalf("show-join = %d %q", result.code, result.stdout)
+	}
+}
+
+func startServeProc(t *testing.T, binary, home, global, addr string) *exec.Cmd {
+	t.Helper()
+	command := exec.Command(binary, "serve", "--addr", addr, "--home", home)
+	command.Env = []string{
+		"HOME=" + t.TempDir(),
+		"HOMER_HOME=" + home,
+		"GIT_CONFIG_GLOBAL=" + global,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"PATH=" + os.Getenv("PATH"),
+	}
+	var output strings.Builder
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Attach the buffer through a wrapper the reader can wait on.
+	command.Stdout = &output
+	command.Stderr = &output
+	t.Cleanup(func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+	})
+	serveOutput[command] = &output
+	return command
+}
+
+var serveOutput = map[*exec.Cmd]*strings.Builder{}
+
+func readServeOutput(t *testing.T, command *exec.Cmd) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if builder, ok := serveOutput[command]; ok {
+			text := builder.String()
+			if strings.Contains(text, "agent") {
+				return text
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return ""
+}
+
+func stopServe(t *testing.T, command *exec.Cmd) {
+	t.Helper()
+	if command == nil || command.Process == nil {
+		return
+	}
+	_ = command.Process.Signal(syscall.SIGINT)
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
 	}
 }
 

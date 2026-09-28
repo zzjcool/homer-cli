@@ -3,6 +3,7 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -228,4 +229,126 @@ func jsonPath(t *testing.T, body string, path ...string) any {
 		}
 	}
 	return current
+}
+
+// TestAgentZeroArgRestart verifies the full Tailscale-style onboarding
+// closed loop: a join command copied from the hub works verbatim, and a
+// later bare `homer agent` restart reuses the persisted join state (same
+// agent ID — the hub sees no new machine).
+func TestAgentZeroArgRestart(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = T\n\temail = t@t\n")
+	binary := binaryOf(t)
+	machine := makeMachine(t, root, "A", global, false)
+	if result := runHomer(t, binary, machine, "init", "--json"); result.code != 0 {
+		t.Fatalf("init failed: %s%s", result.stdout, result.stderr)
+	}
+
+	hubPort := freePort(t)
+	// Non-loopback bind without a token: auto-generation path.
+	hubProc := startHomer(t, binary, machine, global,
+		"serve", "--addr", fmt.Sprintf("0.0.0.0:%d", hubPort), "--home", machine.homerHome)
+	defer stopProc(t, hubProc)
+
+	// The join command embeds the generated token; extract it from the hub
+	// home's keys/hub-token (the printed line is the same value).
+	tokenBytes, err := os.ReadFile(filepath.Join(machine.homerHome, "keys", "hub-token"))
+	if err != nil {
+		t.Fatalf("hub token not persisted: %v", err)
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+
+	// First start: the verbatim join-command shape (env token, --connect).
+	first := startHomerWithEnv(t, binary, machine, global,
+		[]string{"HOMER_HUB_TOKEN=" + token},
+		"agent", "--connect", hubURL, "--id", "restart-agent", "--home", machine.homerHome)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if agentRegistered(t, hubURL, token, "restart-agent") {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !agentRegistered(t, hubURL, token, "restart-agent") {
+		t.Fatal("first agent run never registered")
+	}
+	stopProc(t, first)
+
+	// agent.json now exists with the join state; token is NOT in it.
+	configData, err := os.ReadFile(filepath.Join(machine.homerHome, "agent.json"))
+	if err != nil {
+		t.Fatalf("agent.json missing: %v", err)
+	}
+	if strings.Contains(string(configData), token) {
+		t.Fatal("agent.json must not embed the token")
+	}
+
+	// Bare restart: no flags, no env — everything comes from agent.json.
+	second := startHomerWithEnv(t, binary, machine, global, nil,
+		"agent", "--home", machine.homerHome)
+	defer stopProc(t, second)
+	deadline = time.Now().Add(20 * time.Second)
+	registered := false
+	for time.Now().Before(deadline) {
+		if agentRegistered(t, hubURL, token, "restart-agent") {
+			registered = true
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !registered {
+		t.Fatal("bare restart never re-registered with the same agent ID")
+	}
+}
+
+func agentRegistered(t *testing.T, hubURL, token, agentID string) bool {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, hubURL+"/api/agents", nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return false
+	}
+	var payload struct {
+		Agents []struct {
+			AgentID string `json:"agentId"`
+		} `json:"agents"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return false
+	}
+	for _, agent := range payload.Agents {
+		if agent.AgentID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+func startHomerWithEnv(t *testing.T, binary string, m machine, global string, extraEnv []string, args ...string) *exec.Cmd {
+	t.Helper()
+	command := exec.Command(binary, args...)
+	command.Env = append(serveEnv(m, global), extraEnv...)
+	var combined strings.Builder
+	command.Stdout = &combined
+	command.Stderr = &combined
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+	})
+	return command
 }

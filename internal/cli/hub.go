@@ -133,7 +133,9 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 // is validated by validateCommandOptions; agentd.Config.Mode re-checks it.
 func runAgent(options CommandOptions, out, errOut io.Writer) int {
 	token := hubTokenFromEnv(options.Token)
+	paths := ResolveHomerPaths(options.Home)
 	config := agentd.Config{
+		Home:         paths.Home,
 		HomerHome:    options.Home,
 		Token:        token,
 		ListenAddr:   options.Listen,
@@ -142,12 +144,21 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 		HubURL:       options.Hub,
 		AgentID:      options.ID,
 	}
-	if _, err := config.Mode(); err != nil {
+	// Fill in gaps from the persisted agent.json: a bare `homer agent`
+	// restarts with the last successfully registered join state; explicit
+	// flags always win (advisor ruling: failed URLs are never persisted,
+	// so the file only ever holds a known-good configuration).
+	resolved, err := agentd.ResolveConfig(config)
+	if err != nil {
 		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
 		return 1
 	}
-	daemon := agentd.New(config, agentd.NewLocalExecutor(options.Home))
-	writeLine(out, fmt.Sprintf("homer agent: %s 模式启动（Ctrl+C 停止）", agentModeLabel(config)))
+	if _, err := resolved.Mode(); err != nil {
+		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
+		return 1
+	}
+	daemon := agentd.New(resolved, agentd.NewLocalExecutor(options.Home))
+	writeLine(out, fmt.Sprintf("homer agent: %s 模式启动（Ctrl+C 停止）", agentModeLabel(resolved)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := daemon.Run(ctx); err != nil && ctx.Err() == nil {
