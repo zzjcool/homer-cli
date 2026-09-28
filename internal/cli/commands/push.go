@@ -72,6 +72,10 @@ type PushDeps struct {
 	UI      selectPrompter
 	Sources any
 	Git     any
+	// HubSink is the no-git data plane's upload destination: it receives
+	// the prepared store snapshots for publication to the hub. When set,
+	// the git commit/push transport is skipped entirely.
+	HubSink func(snapshot []core.AdapterSnapshot) error
 }
 
 // These aliases make the shared command-layer seam discoverable under the
@@ -250,11 +254,26 @@ func sourceValue(value any) (syncx.SyncSources, bool) {
 	return syncx.SyncSources{}, false
 }
 
-func collectSources(value any, paths core.HomerPaths, config core.HomerConfig, fetch bool) syncx.SyncSources {
+func collectSources(value any, paths core.HomerPaths, config core.HomerConfig, fetch bool, hubRemote ...[]core.AdapterSnapshot) syncx.SyncSources {
 	if source, ok := sourceValue(value); ok {
 		return source
 	}
-	return syncx.CollectSyncSources(paths, config, syncx.CollectSyncSourcesOptions{Fetch: fetch})
+	options := []any{syncx.CollectSyncSourcesOptions{Fetch: fetch}}
+	for _, snapshot := range hubRemote {
+		if snapshot != nil {
+			options = append(options, snapshot)
+		}
+	}
+	return syncx.CollectSyncSources(paths, config, options...)
+}
+
+// depsHubSnapshot extracts the no-git data plane's injected remote from
+// pull deps, if any.
+func depsHubSnapshot(deps *PullDeps) []core.AdapterSnapshot {
+	if deps == nil {
+		return nil
+	}
+	return deps.HubSnapshot
 }
 
 func nowState(paths core.HomerPaths, commit, command string) error {
@@ -566,6 +585,30 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 			return report
 		}
 	}
+	if deps != nil && deps.HubSink != nil {
+		// No-git data plane: upload the prepared snapshots for publication
+		// to the hub. The machine store is already the new baseline; the
+		// git commit/push transport is retired for this call.
+		if err := deps.HubSink(prepared); err != nil {
+			report = newPushCommandReport(PushStatusError)
+			report.ChangedFiles = changedFiles
+			report.Warnings = warnings
+			report.Errors = errorLines(err)
+			return report
+		}
+		if stateErr := nowGenerationState(paths, "push"); stateErr != nil {
+			report = newPushCommandReport(PushStatusError)
+			report.ChangedFiles = changedFiles
+			report.Warnings = warnings
+			report.Errors = errorLines(stateErr)
+			return report
+		}
+		report = newPushCommandReport(PushStatusPushed)
+		report.ChangedFiles = changedFiles
+		report.PushedToRemote = true
+		report.Warnings = warnings
+		return report
+	}
 	if err := git.ensureGitRepo(paths.Home); err != nil {
 		report = newPushCommandReport(PushStatusError)
 		report.ChangedFiles = changedFiles
@@ -807,3 +850,14 @@ func writeReportJSON(out io.Writer, text string) error {
 
 // Keep a package-local spelling matching the archived command modules.
 func runPush(options PushOptions, deps *PushDeps) PushReport { return RunPush(options, deps) }
+
+// nowGenerationState records a successful no-git sync: the machine's
+// store now holds the content, so the store itself is the baseline.
+func nowGenerationState(paths core.HomerPaths, command string) error {
+	state := core.LoadState(paths)
+	state.Version = 1
+	state.LastSyncCommit = ""
+	state.LastSyncAt = time.Now().UTC().Format(time.RFC3339Nano)
+	state.LastSyncCommand = command
+	return core.SaveState(paths, state)
+}

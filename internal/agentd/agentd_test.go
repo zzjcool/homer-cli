@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -466,4 +467,84 @@ func localExecutorFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return home
+}
+
+// No-git data plane wiring: an executor built with a hub transport uploads
+// snapshots on push and downloads them on pull — over the same HTTP
+// channel the daemon already uses (endpoint + credential injected).
+func TestLocalExecutorHubTransport(t *testing.T) {
+	home := t.TempDir()
+	paths := core.GetHomerPaths(func(string) string { return home })
+	tool := filepath.Join(home, "tool")
+	if err := os.MkdirAll(tool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{
+		"pi": {Root: tool, Categories: map[string]core.CategoryConfig{
+			"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
+		}},
+	}}
+	if err := core.SaveConfig(paths, config); err != nil {
+		t.Fatal(err)
+	}
+	store := core.AdapterSnapshot{AdapterID: "pi", Categories: []core.CategorySnapshot{
+		{AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
+			"settings.json": core.SnapshotEntry{Kind: "file", Content: "base\n"},
+		}},
+	}}
+	if err := core.WriteSnapshotToStore(paths, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stub hub: /api/snapshot download serves one file, upload records.
+	var uploaded []core.AdapterSnapshot
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/snapshot":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"generation":3,"homerJson":"","store":{"pi":{"settings/settings.json":"from-hub\n"}}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/snapshot":
+			body, _ := io.ReadAll(r.Body)
+			var payload struct {
+				Store map[string]map[string]string `json:"store"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			uploaded = append(uploaded, core.AdapterSnapshot{AdapterID: "pi"})
+			fmt.Fprint(w, `{"ok":true,"generation":4}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer hub.Close()
+
+	executor := NewLocalExecutorWithHub(home, hub.URL, "")
+	ctx := context.Background()
+
+	// Pull: the hub's current generation lands in the tool directory.
+	pullReport, err := executor.Pull(ctx, true)
+	if err != nil || !pullReport.OK || pullReport.Status != commands.PullStatusApplied {
+		t.Fatalf("pull = %#v err=%v", pullReport, err)
+	}
+	applied, _ := os.ReadFile(filepath.Join(tool, "settings.json"))
+	if string(applied) != "from-hub\n" {
+		t.Fatalf("tool = %q (want hub content)", applied)
+	}
+
+	// Push: a local change uploads to the hub.
+	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("next-change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pushReport, err := executor.Push(ctx, true)
+	if err != nil || !pushReport.OK || pushReport.Status != commands.PushStatusPushed {
+		t.Fatalf("push = %#v err=%v", pushReport, err)
+	}
+	if len(uploaded) == 0 {
+		t.Fatal("hub received no upload")
+	}
 }

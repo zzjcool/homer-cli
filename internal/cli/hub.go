@@ -200,7 +200,17 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
 		return 1
 	}
-	daemon := agentd.New(resolved, agentd.NewLocalExecutor(options.Home))
+	// No-git data plane: the executor pushes/pulls through the hub's
+	// /api/snapshot endpoints with the agent's per-machine credential.
+	hubBase := strings.TrimSpace(resolved.ConnectURL)
+	if hubBase == "" {
+		hubBase = strings.TrimSpace(resolved.HubURL)
+	}
+	credential := resolved.AgentSecret
+	if credential == "" {
+		credential = resolved.Token
+	}
+	daemon := agentd.New(resolved, agentd.NewLocalExecutorWithHub(options.Home, hubBase, credential))
 	writeLine(out, fmt.Sprintf("homer agent: %s 模式启动（Ctrl+C 停止）", agentModeLabel(resolved)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

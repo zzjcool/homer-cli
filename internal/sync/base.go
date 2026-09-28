@@ -32,6 +32,15 @@ func CollectSyncSources(paths core.HomerPaths, config core.HomerConfig, options 
 		fetch = true
 	}
 
+	// No-git data plane: a hub snapshot injected as an extra argument IS
+	// the remote — the git upstream/fetch reading path is retired.
+	var hubRemote []core.AdapterSnapshot
+	for _, option := range options {
+		if snapshot, ok := option.([]core.AdapterSnapshot); ok {
+			hubRemote = snapshot
+		}
+	}
+
 	base, mode, baseCommit := collectBase(paths, config, &warnings, &errors)
 	local := collectLocal(config, base, &errors, &warnings)
 
@@ -46,6 +55,10 @@ func CollectSyncSources(paths core.HomerPaths, config core.HomerConfig, options 
 			Warnings:   warnings,
 			Errors:     errors,
 		}
+	}
+
+	if hubRemote != nil {
+		return build(hubRemote, "hub")
 	}
 
 	upstream := gitx.UpstreamRef(paths.Home)
@@ -91,25 +104,36 @@ func collectSyncSources(paths core.HomerPaths, config core.HomerConfig, options 
 }
 
 func parseFetchOptions(options []any) (bool, error) {
-	if len(options) == 0 || options[0] == nil {
-		return true, nil
-	}
-	if len(options) > 1 {
-		return true, fmt.Errorf("collectSyncSources: opts 只能传一个")
-	}
-	switch value := options[0].(type) {
-	case bool:
-		return value, nil
-	case CollectSyncSourcesOptions:
-		return value.Fetch, nil
-	case *CollectSyncSourcesOptions:
-		if value == nil {
-			return true, nil
+	fetch := true
+	sawOption := false
+	for _, option := range options {
+		// The no-git data plane injects []core.AdapterSnapshot as the
+		// remote; it is not a fetch option and is consumed by the caller.
+		if _, isSnapshot := option.([]core.AdapterSnapshot); isSnapshot {
+			continue
 		}
-		return value.Fetch, nil
-	default:
-		return true, fmt.Errorf("collectSyncSources: opts 类型无效")
+		if option == nil {
+			continue
+		}
+		if sawOption {
+			return true, fmt.Errorf("collectSyncSources: fetch 选项只能传一个")
+		}
+		sawOption = true
+		switch value := option.(type) {
+		case bool:
+			fetch = value
+		case CollectSyncSourcesOptions:
+			fetch = value.Fetch
+		case *CollectSyncSourcesOptions:
+			if value == nil {
+				continue
+			}
+			fetch = value.Fetch
+		default:
+			return true, fmt.Errorf("collectSyncSources: opts 类型无效")
+		}
 	}
+	return fetch, nil
 }
 
 func collectBase(paths core.HomerPaths, config core.HomerConfig, warnings, errors *[]string) ([]core.AdapterSnapshot, SyncBaseMode, string) {

@@ -25,12 +25,16 @@ type PullOptions struct {
 // PullDeps contains pull-specific injection points. Shared git behavior stays
 // in GitPort, while manifest command execution belongs to this command's seam.
 type PullDeps struct {
-	UI       any
-	Sources  any
-	NoFetch  bool
-	NoApply  bool
-	Git      any
-	Commands manifest.CommandPort
+	UI      any
+	Sources any
+	NoFetch bool
+	NoApply bool
+	Git     any
+	// HubSnapshot is the no-git data plane's injected remote: the hub's
+	// current generation, already downloaded. When present, the git
+	// upstream/fetch precondition chain is skipped entirely.
+	HubSnapshot []core.AdapterSnapshot
+	Commands    manifest.CommandPort
 }
 
 type PullStatus string
@@ -375,31 +379,37 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		git = gitPortFrom(deps.Git)
 	}
 
-	// Frozen precondition order: isGitRepo → hasUpstream → clean store →
-	// fetch → fast-forwardable. Fetch is the only expected repository write;
-	// it is still completed before source collection and tool writes.
-	if !git.isGitRepo(paths.Home) {
-		report.Errors = []string{syncx.NotAGitRepoMessage(paths.Home), syncx.NOT_A_REPO_HINT}
-		return report
-	}
-	if !git.hasUpstream(paths.Home) {
-		report.Errors = []string{syncx.NO_UPSTREAM_MESSAGE, syncx.NO_UPSTREAM_HINT}
-		return report
-	}
-	if err := git.requireCleanStore(paths); err != nil {
-		report.Errors = errorLines(err)
-		return report
-	}
-	if deps == nil || !deps.NoFetch {
-		fetched := git.fetch(paths.Home)
-		if !fetched.OK {
-			report.Errors = []string{"git fetch 失败: " + firstLine(fetched.Stderr), "请检查网络与 remote 配置后重试。"}
+	// No-git data plane: an injected hub snapshot IS the remote. The git
+	// precondition chain (isGitRepo → hasUpstream → fetch → ff-only) only
+	// guards the legacy git transport and is skipped entirely.
+	injected := deps != nil && deps.HubSnapshot != nil
+	if !injected {
+		// Frozen precondition order: isGitRepo → hasUpstream → clean store →
+		// fetch → fast-forwardable. Fetch is the only expected repository write;
+		// it is still completed before source collection and tool writes.
+		if !git.isGitRepo(paths.Home) {
+			report.Errors = []string{syncx.NotAGitRepoMessage(paths.Home), syncx.NOT_A_REPO_HINT}
 			return report
 		}
-	}
-	if err := git.requireFastForwardable(paths); err != nil {
-		report.Errors = errorLines(err)
-		return report
+		if !git.hasUpstream(paths.Home) {
+			report.Errors = []string{syncx.NO_UPSTREAM_MESSAGE, syncx.NO_UPSTREAM_HINT}
+			return report
+		}
+		if err := git.requireCleanStore(paths); err != nil {
+			report.Errors = errorLines(err)
+			return report
+		}
+		if deps == nil || !deps.NoFetch {
+			fetched := git.fetch(paths.Home)
+			if !fetched.OK {
+				report.Errors = []string{"git fetch 失败: " + firstLine(fetched.Stderr), "请检查网络与 remote 配置后重试。"}
+				return report
+			}
+		}
+		if err := git.requireFastForwardable(paths); err != nil {
+			report.Errors = errorLines(err)
+			return report
+		}
 	}
 
 	var sourceInput any
@@ -410,8 +420,11 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 	// ref. Reading with fetch=false avoids a second network operation. Compare
 	// homer.json before ff so a newly introduced manifest command is visible
 	// before any future scan can use the fast-forwarded config.
-	manifestCommandWarnings := manifestCommandChangeWarnings(paths.Home, *config, git)
-	sources := collectSources(sourceInput, paths, *config, false)
+	var manifestCommandWarnings []string
+	if !injected {
+		manifestCommandWarnings = manifestCommandChangeWarnings(paths.Home, *config, git)
+	}
+	sources := collectSources(sourceInput, paths, *config, false, depsHubSnapshot(deps))
 	warnings := append([]string{}, sources.Warnings...)
 	warnings = append(warnings, manifestCommandWarnings...)
 	sourceErrors := append([]string{}, sources.Errors...)
@@ -480,36 +493,63 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 
 		// Capture the old HEAD before ff. With residual conflicts this is the
 		// base that merge must use on its next invocation (S4).
-		preFfHead := git.headCommit(paths.Home)
-		ff := git.mergeFFUpstream(paths.Home)
-		if !ff.OK {
-			report = newPullCommandReport(PullStatusError)
-			report.Applied = applied
-			report.Conflicts = pullConflicts(remainingPlan)
-			report.Manifest = manifestReport
-			report.Warnings = warnings
-			report.Errors = append(sourceErrors, fmt.Sprintf("git merge --ff-only 失败（工具目录已应用，store 未前移）: %s", firstLine(ff.Stderr)))
-			return report
-		}
-		commit = git.headCommit(paths.Home)
-		conflicts := pullConflicts(remainingPlan)
-		nextBase := commit
-		if len(conflicts) > 0 {
-			nextBase = preFfHead
-		}
-		if nextBase != "" {
-			if stateErr := nowState(paths, nextBase, "pull"); stateErr != nil {
-				report = newPullCommandReport(PullStatusError)
-				report.Applied = applied
-				report.Conflicts = conflicts
-				report.Manifest = manifestReport
-				report.Commit = commit
-				report.Warnings = warnings
-				report.Errors = append(sourceErrors, errorLines(stateErr)...)
-				return report
+		if injected {
+			// No-git data plane: the applied hub snapshot becomes the new
+			// machine baseline (store write). Conflicts keep the old base
+			// (S4 semantics: merge must still see the divergence).
+			conflicts := pullConflicts(remainingPlan)
+			if len(conflicts) == 0 {
+				for _, snapshot := range sources.Remote {
+					if err := core.WriteSnapshotToStore(paths, snapshot); err != nil {
+						report = newPullCommandReport(PullStatusError)
+						report.Applied = applied
+						report.Manifest = manifestReport
+						report.Warnings = warnings
+						report.Errors = append(sourceErrors, errorLines(err)...)
+						return report
+					}
+				}
+				if stateErr := nowGenerationState(paths, "pull"); stateErr != nil {
+					report = newPullCommandReport(PullStatusError)
+					report.Applied = applied
+					report.Manifest = manifestReport
+					report.Warnings = warnings
+					report.Errors = append(sourceErrors, errorLines(stateErr)...)
+					return report
+				}
 			}
 		} else {
-			warnings = append(warnings, "ff 后无法解析 HEAD，state.lastSyncCommit 未更新")
+			preFfHead := git.headCommit(paths.Home)
+			ff := git.mergeFFUpstream(paths.Home)
+			if !ff.OK {
+				report = newPullCommandReport(PullStatusError)
+				report.Applied = applied
+				report.Conflicts = pullConflicts(remainingPlan)
+				report.Manifest = manifestReport
+				report.Warnings = warnings
+				report.Errors = append(sourceErrors, fmt.Sprintf("git merge --ff-only 失败（工具目录已应用，store 未前移）: %s", firstLine(ff.Stderr)))
+				return report
+			}
+			commit = git.headCommit(paths.Home)
+			conflicts := pullConflicts(remainingPlan)
+			nextBase := commit
+			if len(conflicts) > 0 {
+				nextBase = preFfHead
+			}
+			if nextBase != "" {
+				if stateErr := nowState(paths, nextBase, "pull"); stateErr != nil {
+					report = newPullCommandReport(PullStatusError)
+					report.Applied = applied
+					report.Conflicts = conflicts
+					report.Manifest = manifestReport
+					report.Commit = commit
+					report.Warnings = warnings
+					report.Errors = append(sourceErrors, errorLines(stateErr)...)
+					return report
+				}
+			} else {
+				warnings = append(warnings, "ff 后无法解析 HEAD，state.lastSyncCommit 未更新")
+			}
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -234,4 +235,51 @@ func stringValue(t *testing.T, value orderedjson.Value) string {
 		t.Fatalf("value %T is not a string", value)
 	}
 	return text
+}
+
+// No-git data plane: when a hub snapshot is injected as the remote
+// source, CollectSyncSources must use it directly — no git upstream, no
+// fetch. The git remote-reading path is retired.
+func TestCollectSyncSourcesUsesHubSnapshot(t *testing.T) {
+	home := t.TempDir()
+	paths := core.GetHomerPaths(func(string) string { return home })
+	tool := filepath.Join(home, "tool")
+	if err := os.MkdirAll(tool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{
+		"pi": {Root: tool, Categories: map[string]core.CategoryConfig{
+			"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
+		}},
+	}}
+	store := core.AdapterSnapshot{AdapterID: "pi", Categories: []core.CategorySnapshot{
+		{AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
+			"settings.json": core.SnapshotEntry{Kind: "file", Content: "store-base\n"},
+		}},
+	}}
+	if err := core.WriteSnapshotToStore(paths, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("local-new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hubRemote := []core.AdapterSnapshot{{AdapterID: "pi", Categories: []core.CategorySnapshot{
+		{AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
+			"settings.json": core.SnapshotEntry{Kind: "file", Content: "hub-current\n"},
+		}},
+	}}}
+
+	sources := CollectSyncSources(paths, config, CollectSyncSourcesOptions{Fetch: false}, hubRemote)
+	if len(sources.Remote) != 1 || sources.Remote[0].Categories[0].Files["settings.json"].Content != "hub-current\n" {
+		t.Fatalf("remote must be the injected hub snapshot: %#v", sources.Remote)
+	}
+	if sources.Base[0].Categories[0].Files["settings.json"].Content != "store-base\n" {
+		t.Fatalf("base must be the machine store: %#v", sources.Base)
+	}
+	for _, warning := range sources.Warnings {
+		if strings.Contains(warning, "git") {
+			t.Fatalf("git warning leaked: %s", warning)
+		}
+	}
 }
