@@ -441,3 +441,37 @@ func TestInstallEndpoints(t *testing.T) {
 		t.Fatalf("unauthenticated dl = %d", response.Code)
 	}
 }
+
+// Machine removal (console 「移除」): drops the registry entry entirely —
+// vs. revocation which only kills the credential. Requires auth.
+func TestAgentRemoveEndpoint(t *testing.T) {
+	fixture := authFixture(t)
+	source := &sourceStub{list: []AgentInfo{{AgentID: "box", Hostname: "box"}}}
+	server := newWebServer(t, fixture, "hub-token-x", source, nil)
+	handler := server.Handler()
+
+	// Unauthenticated: 401.
+	if response := request(t, handler, http.MethodPost, "/api/agents/remove"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated remove = %d", response.Code)
+	}
+	// Authenticated: removes and the list no longer contains the machine.
+	removeBox := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/remove", strings.NewReader(`{"agentId":"box"}`))
+		req.Header.Set("Authorization", "Bearer hub-token-x")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	response := removeBox()
+	if response.Code != http.StatusOK {
+		t.Fatalf("remove = %d body=%s", response.Code, response.Body)
+	}
+	list := requestWithToken(t, handler, http.MethodGet, "/api/agents", "hub-token-x")
+	if strings.Contains(list.Body.String(), `"box"`) {
+		t.Fatalf("removed agent still listed: %s", list.Body)
+	}
+	// Removing an unknown agent: 404.
+	if response := removeBox(); response.Code != http.StatusNotFound {
+		t.Fatalf("remove unknown = %d", response.Code)
+	}
+}

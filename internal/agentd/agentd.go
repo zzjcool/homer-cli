@@ -324,7 +324,7 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		if strings.TrimSpace(d.cfg.AdvertiseURL) == "" {
 			advertiseURL, err := DeriveAdvertiseURL(d.cfg.ListenAddr)
 			if err != nil {
-			return err
+				return err
 			}
 			d.cfg.AdvertiseURL = advertiseURL
 		}

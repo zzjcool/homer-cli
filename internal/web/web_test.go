@@ -427,6 +427,7 @@ func TestAgentsRouteP1(t *testing.T) {
 
 type sourceStub struct {
 	list       []AgentInfo
+	removed    []string
 	statusRaw  json.RawMessage
 	diffText   string
 	pushRaw    json.RawMessage
@@ -441,6 +442,23 @@ type sourceStub struct {
 }
 
 func (s *sourceStub) ListAgents() []AgentInfo { return append([]AgentInfo(nil), s.list...) }
+
+func (s *sourceStub) RemoveAgent(agentID string) bool {
+	found := false
+	kept := s.list[:0]
+	for _, info := range s.list {
+		if info.AgentID == agentID {
+			found = true
+			continue
+		}
+		kept = append(kept, info)
+	}
+	s.list = kept
+	if found {
+		s.removed = append(s.removed, agentID)
+	}
+	return found
+}
 func (s *sourceStub) AgentStatus(_ context.Context, _ string) (json.RawMessage, error) {
 	return s.statusRaw, s.statusErr
 }

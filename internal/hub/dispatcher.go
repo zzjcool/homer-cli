@@ -332,4 +332,9 @@ func nextDispatcherTaskID() string {
 	return fmt.Sprintf("t-%06d", atomic.AddUint64(&dispatcherTaskSequence, 1))
 }
 
+// RemoveAgent drops a machine from the registry (console "移除" button).
+func (d *Dispatcher) RemoveAgent(agentID string) bool {
+	return d.Registry.Remove(agentID)
+}
+
 var _ web.AgentsSource = (*Dispatcher)(nil)

@@ -73,6 +73,9 @@ type AgentsSource interface {
 	AgentDiff(ctx context.Context, agentID string, params DiffParams) (string, error)
 	AgentPush(ctx context.Context, agentID string, confirm bool) (json.RawMessage, error)
 	AgentPull(ctx context.Context, agentID string, confirm bool) (json.RawMessage, error)
+	// RemoveAgent drops a machine from the list entirely (optional:
+	// embedded sources without removal keep 501 semantics).
+	RemoveAgent(agentID string) bool
 }
 
 type ServeOptions struct {

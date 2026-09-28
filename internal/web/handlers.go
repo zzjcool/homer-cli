@@ -121,6 +121,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAgentRevoke(w, r)
+	case path == "/api/agents/remove":
+		// Machine removal: drops the registry entry entirely (vs revoke
+		// which only kills the credential and keeps the row for audit).
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleAgentRemove(w, r)
 	case path == "/agent/v1/info":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
@@ -547,6 +555,41 @@ func (s *Server) handleAgentRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.opts.Enrollment.Revoke(strings.TrimSpace(payload.AgentID)) {
 		writeError(w, http.StatusConflict, "not-enrolled", "该机器没有有效凭证（可能从未接入或已吊销）", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleAgentRemove drops a machine from the list entirely: credential
+// revocation (when the enrollment service is wired) plus registry removal.
+// The removed machine disappears from the console; if it still runs the
+// agent daemon it re-registers on its next poll recovery — re-appearing
+// only when its credential remains valid, which revocation prevents.
+func (s *Server) handleAgentRemove(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AgentID string `json:"agentId"`
+	}
+	if err := readJSONBody(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	agentID := strings.TrimSpace(payload.AgentID)
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "agentId 不能为空", nil)
+		return
+	}
+	if s.opts.Agents == nil {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机视图未启用", nil)
+		return
+	}
+	// Kill the credential first (no-op for never-enrolled machines), then
+	// drop the row. Order matters: remove-then-revoke would leave a window
+	// where the daemon re-registers before its credential dies.
+	if s.opts.Enrollment != nil {
+		s.opts.Enrollment.Revoke(agentID)
+	}
+	if !s.opts.Agents.RemoveAgent(agentID) {
+		writeError(w, http.StatusNotFound, "not-found", "机器不存在或已移除", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

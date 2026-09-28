@@ -367,3 +367,16 @@ func cloneTaskResult(result TaskResult) TaskResult {
 	}
 	return result
 }
+
+// Remove drops a machine from the registry entirely (revocation only kills
+// the credential). The removed agent 404s on its next poll and re-registers
+// through the standard recovery path if it still holds a valid credential.
+func (r *Registry) Remove(agentID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.agents[agentID]; !ok {
+		return false
+	}
+	delete(r.agents, agentID)
+	return true
+}

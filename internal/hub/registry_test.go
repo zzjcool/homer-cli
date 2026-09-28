@@ -332,3 +332,23 @@ func TestRegistryConcurrent(t *testing.T) {
 		t.Fatalf("List() returned agents out of order: %+v", got)
 	}
 }
+
+// Remove drops a machine from the registry entirely (vs. Revocation which
+// only kills the credential). Removed agents 404 on the next poll and
+// re-register via the standard recovery path if they still hold a valid
+// credential.
+func TestRegistryRemove(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(AgentInfo{AgentID: "gone-agent", Mode: AgentModeConnect}); err != nil {
+		t.Fatal(err)
+	}
+	if ok := r.Remove("gone-agent"); !ok {
+		t.Fatal("remove reported nothing removed")
+	}
+	if _, ok := r.Get("gone-agent"); ok {
+		t.Fatal("removed agent still present")
+	}
+	if ok := r.Remove("gone-agent"); ok {
+		t.Fatal("second remove should report nothing")
+	}
+}

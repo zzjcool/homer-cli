@@ -89,6 +89,9 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		writeLine(out, "首次使用：请在浏览器打开上述地址，设置管理员密码完成初始化。")
 		writeLine(out, "远程初始化码（一次性，公网页面需要）: "+server.SetupCode())
 	}
+	// The hub itself owns no machines: even this physical host joins the
+	// fleet through the standard enrollment flow (uniform CS model).
+	writeLine(out, "把本机加入机器列表: 浏览器登录后「接入新机器」复制命令运行（或 homer agent --connect http://"+displayAddr(boundAddr)+"）")
 	if token != "" {
 		writeLine(out, "已启用 agent token 鉴权（keys/hub-token 持久化，--show-join 查看）。")
 	}
