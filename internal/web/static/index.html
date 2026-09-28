@@ -226,6 +226,7 @@ html { scroll-behavior: smooth; }
   <form method="dialog" style="margin:0">
     <h2 id="confirm-title">确认</h2>
     <p id="confirm-desc"></p>
+    <div id="confirm-choices"></div>
     <p class="muted small">受影响文件会先备份。</p>
     <menu>
       <button value="cancel" id="btn-confirm-cancel">取消</button>
@@ -259,7 +260,7 @@ const $ = id => document.getElementById(id);
  * GET  /api/health        {version}
  * GET  /api/status        {report:{adapters:[{id,push,pull,conflicts,categories:[{name,push,pull,conflicts}]}], errors, warnings, disabled}}
  * GET  /api/diff?adapter&category  {empty, text}
- * POST /api/push?confirm=true | /api/pull?confirm=true
+ * POST /api/sync?direction=to-others|from-center&confirm=true
  * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale}]}
  * 错误: 401 / 409(code=not-initialized|aborted|conflicts) / 422(secrets-rejected)
  * =================================================================== */
@@ -348,15 +349,18 @@ function renderHero() {
     concl.append(el("span", "dot drift"), document.createTextNode("有尚未同步的改动"));
     numbers.textContent = fmtCounts(push, pull, 0) + "，分布在 " +
       r.adapters.filter(a => a.push + a.pull > 0).length + " 个适配器";
-    const btn = el("button", "primary", "查看改动 ↓");
+    const btn = el("button", "primary", "同步");
     btn.type = "button";
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", confirmSync);
+    const view = el("button", "text", "查看改动 ↓");
+    view.type = "button";
+    view.addEventListener("click", () => {
       // 自动展开有漂移的适配器
       r.adapters.forEach(a => { if (a.push + a.pull > 0) app.openDiffs.add("__row__" + a.id); });
       renderAdapters();
       $("sec-adapters").scrollIntoView({ behavior: "smooth", block: "start" });
     });
-    hero.append(concl, numbers, btn);
+    hero.append(concl, numbers, btn, view);
     return;
   }
   concl.append(el("span", "dot ok"), document.createTextNode("都已对齐"));
@@ -403,7 +407,7 @@ function renderAdapters() {
     const cText = disabled ? "已禁用" : (a.push + a.pull + a.conflicts ? fmtCounts(a.push, a.pull, a.conflicts) : "干净");
     line.append(el("span", countCls(a.push, a.pull, a.conflicts), cText));
     const acts = el("span", "row-actions");
-    const driftBtn = el("button", "small-btn", (a.push + a.pull + a.conflicts ? "查看差异" : "明细 ▾"));
+    const driftBtn = el("button", "small-btn", (a.push + a.pull + a.conflicts ? "查看改动" : "明细 ▾"));
     driftBtn.type = "button";
     const rowKey = "__row__" + a.id;
     driftBtn.setAttribute("aria-expanded", app.openDiffs.has(rowKey));
@@ -475,15 +479,10 @@ function buildDiffDrawer(adapter, category) {
     const c = a && a.categories.find(x => x.name === category);
     if (c) {
       const actions = el("div", "diff-actions");
-      if (c.push > 0 && !hasConflicts()) {
-        const pb = el("button", "primary", "把本机改动写入中心");
-        pb.type = "button"; pb.addEventListener("click", () => confirmWrite("push"));
-        actions.append(pb);
-      }
-      if (c.pull > 0 && !hasConflicts()) {
-        const pl = el("button", null, "把中心改动应用到本机");
-        pl.type = "button"; pl.addEventListener("click", () => confirmWrite("pull"));
-        actions.append(pl);
+      if (c.push + c.pull > 0 && !hasConflicts()) {
+        const sb = el("button", "primary", "同步");
+        sb.type = "button"; sb.addEventListener("click", confirmSync);
+        actions.append(sb);
       }
       if (c.conflicts > 0) actions.append(el("span", "small muted", "两边都改过同一处，这次没有写入。"));
       if (actions.childNodes.length) drawer.append(actions);
@@ -582,15 +581,36 @@ async function loadAgents() {
 }
 
 /* ---------- write actions: push / pull ---------- */
-function confirmWrite(action) {
+function defaultDirection(push, pull) {
+  if (push > 0 && pull === 0) return "to-others";
+  if (pull > 0 && push === 0) return "from-center";
+  return "";
+}
+function confirmSync() {
   const r = app.report;
-  const n = (r.adapters || []).reduce((s, a) => s + (action === "push" ? a.push : a.pull), 0);
-  $("confirm-title").textContent = action === "push" ? "确认写入中心" : "确认应用到本机";
-  $("confirm-desc").textContent = action === "push"
-    ? "把 " + n + " 项本机改动写入中心。"
-    : "把 " + n + " 项中心改动应用到本机。写入前会先备份。";
-  $("btn-confirm-ok").textContent = action === "push" ? "确认写入中心" : "确认应用到本机";
-  app.pendingAction = action;
+  const sums = (r.adapters || []).reduce((acc, a) => ({ push: acc.push + (a.push || 0), pull: acc.pull + (a.pull || 0) }), { push: 0, pull: 0 });
+  const pre = defaultDirection(sums.push, sums.pull);
+  $("confirm-title").textContent = "确认同步";
+  $("confirm-desc").textContent = "本机改动 " + sums.push + " 项，中心改动 " + sums.pull + " 项。会处理这台机器的全部改动，不只是眼前这一项。";
+  $("btn-confirm-ok").textContent = "确认同步";
+  const choices = $("confirm-choices"); clear(choices);
+  const mk = (value, label, desc) => {
+    const row = el("label", "choice-row");
+    const radio = document.createElement("input");
+    radio.type = "radio"; radio.name = "sync-direction"; radio.value = value;
+    if (pre === value) radio.checked = true;
+    row.append(radio, el("span", null, label));
+    row.append(el("div", "small muted", desc));
+    choices.append(row);
+  };
+  mk("to-others", "同步到其他机器", "把这台机器的改动写入中心，再让在线的其他机器应用。离线的跳过。");
+  mk("from-center", "从中心同步", "用中心的内容覆盖这台机器上的对应文件，覆盖前先备份。其他机器不动。");
+  const okBtn = $("btn-confirm-ok");
+  okBtn.disabled = pre === "";
+  choices.querySelectorAll("input[name=sync-direction]").forEach(radio => {
+    radio.addEventListener("change", () => { okBtn.disabled = false; });
+  });
+  app.pendingAction = { kind: "sync" };
   $("dlg-confirm").showModal();
 }
 $("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
@@ -603,33 +623,36 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   // 然后关对话框；真实浏览器与 headless 行为一致
   $("dlg-confirm").returnValue = "confirm";
   const action = app.pendingAction;
+  let direction = "";
+  const checked = document.querySelector("input[name=sync-direction]:checked");
+  if (action && action.kind === "sync" && checked) direction = checked.value;
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
-  if (action) executeWrite(action);
+  if (action && action.kind === "sync" && direction) executeSync(direction);
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
   $("dlg-confirm").close("cancel");
 });
-async function executeWrite(action) {
+async function executeSync(direction) {
   const okBtn = $("btn-confirm-ok"); okBtn.disabled = true; okBtn.textContent = "处理中…";
   try {
-    const d = await api("/api/" + action + "?confirm=true", { method: "POST" });
-    const n = (d.changedFiles || []).length || (d.applied?.written || []).length;
-    toast((action === "push" ? "已写入中心，处理 " : "已应用到本机，处理 ") + n + " 个文件");
-    clearAlert();
+    const d = await api("/api/sync?direction=" + direction + "&confirm=true", { method: "POST" });
+    if (d.ok && d.status === "synced") toast("已同步到其他机器");
+    else if (d.ok && (d.status === "applied" || d.status === "no-drift")) toast("已从中心应用到本机");
+    else if (d.status === "partial" || d.ok === false) {
+      const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
+      showAlert("同步没有全部完成", lines.length ? lines : ["同步没有完成。"], null);
+    }
     await refresh();
   } catch (e) {
     if (e.status === 422 || e.code === "secrets-rejected") {
       showAlert("已停止：检测到疑似密钥", e.errors, null);
-    } else if (e.code === "conflicts") {
-      toast("两边都改过同一处，这次没有写入。");
-      await refresh();
     } else {
-      showAlert("同步没有完成", e.errors.length ? e.errors : [e.message], null);
+      showAlert("同步没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
     }
   } finally {
-    okBtn.disabled = false;
+    okBtn.disabled = false; okBtn.textContent = "确认同步";
   }
 }
 

@@ -30,7 +30,7 @@ homer home <配置仓库 URL> --yes
 
 ```sh
 homer serve                     # http://127.0.0.1:7760
-# 浏览器打开即可看状态卡片、diff、推送/拉取（两段式确认）
+# 浏览器打开即可看本机与中心的差异，并在确认后同步
 ```
 
 多机拓扑（中心节点部署在可达处，其余机器两种接入方式）：
@@ -48,7 +48,7 @@ homer agent --listen 0.0.0.0:7761 \
 homer agent --connect http://<hub>:7760 --token <token>
 ```
 
-hub 的 `/api/agents` 即可远程查看/采集每台机器的状态、diff，远程推送/拉取
+hub 的 `/api/agents` 仍可按机器采集状态和差异。控制台的「同步」会先把这台 hub 的改动写入中心，再让在线的其他机器应用
 （`POST /api/agents/<id>/push?confirm=true`），配置经 git 远端在机器间真实
 流转。agent 协议为 HTTP 长轮询（零依赖，NAT 友好）；hub 不自建存储，
 同步语义 100% 复用 engine/sync/gitx。
