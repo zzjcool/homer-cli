@@ -591,7 +591,7 @@ func TestStaticIndexServed(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Fatalf("index = %d content-type=%q", response.Code, response.Header().Get("Content-Type"))
 	}
-	for _, id := range []string{"status-cards", "diff-view", "actions", "agents", "not-initialized"} {
+	for _, id := range []string{"gate-setup", "gate-login", "hero", "adapter-list", "agent-list"} {
 		if !strings.Contains(response.Body.String(), `id="`+id+`"`) {
 			t.Fatalf("index missing %s", id)
 		}

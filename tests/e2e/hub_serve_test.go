@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -81,9 +82,9 @@ func TestServeSmoke(t *testing.T) {
 	}
 
 	index := waitHTTP(t, "http://"+addr+"/", http.StatusOK, 10*time.Second)
-	for _, marker := range []string{"status-cards", "diff-view", "actions", "agents", "not-initialized"} {
+	for _, marker := range []string{"gate-setup", "gate-login", "hero", "adapter-list", "agent-list"} {
 		if !strings.Contains(index, marker) {
-			t.Fatalf("index missing UI block %q", marker)
+			t.Fatalf("index missing UI block %q (len=%d head=%q)", marker, len(index), index[:min(len(index), 120)])
 		}
 	}
 
@@ -299,10 +300,12 @@ func waitHTTP(t *testing.T, url string, want int, timeout time.Duration) string 
 	for time.Now().Before(deadline) {
 		response, err := http.Get(url)
 		if err == nil {
-			body := make([]byte, 8192)
-			n, _ := response.Body.Read(body)
+			body, readErr := io.ReadAll(response.Body)
 			_ = response.Body.Close()
-			last = string(body[:n])
+			last = string(body)
+			if readErr != nil {
+				last = readErr.Error()
+			}
 			if response.StatusCode == want {
 				return last
 			}
@@ -396,10 +399,12 @@ func waitHTTPWithToken(t *testing.T, url, token string, timeout time.Duration) s
 			request.Header.Set("Authorization", "Bearer "+token)
 			response, reqErr := http.DefaultClient.Do(request)
 			if reqErr == nil {
-				body := make([]byte, 8192)
-				n, _ := response.Body.Read(body)
+				body, readErr := io.ReadAll(response.Body)
 				_ = response.Body.Close()
-				last = string(body[:n])
+				last = string(body)
+				if readErr != nil {
+					last = readErr.Error()
+				}
 				if response.StatusCode == http.StatusOK {
 					return last
 				}

@@ -1,318 +1,784 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>homer</title>
-  <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-    body { max-width: 1100px; margin: 0 auto; padding: 1rem; line-height: 1.5; }
-    header { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #8886; padding-bottom: .8rem; }
-    header h1 { margin: 0; }
-    header small { opacity: .75; margin-right: auto; }
-    input, select, button { font: inherit; padding: .35rem .55rem; }
-    button { cursor: pointer; }
-    section { margin: 1rem 0; padding: 1rem; border: 1px solid #8886; border-radius: .5rem; }
-    .cards { display: flex; gap: .7rem; flex-wrap: wrap; }
-    .card { min-width: 8rem; padding: .7rem; border-radius: .4rem; background: #8882; }
-    .ok { color: #16833b; } .bad { color: #c33; }
-    pre { overflow: auto; white-space: pre-wrap; background: #0002; padding: .8rem; min-height: 4rem; }
-    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: .45rem; border-bottom: 1px solid #8885; }
-    dialog { max-width: 38rem; border: 1px solid #8888; border-radius: .5rem; }
-    dialog::backdrop { background: #0008; }
-    .hidden { display: none; }
-    .muted { opacity: .75; }
-    ul { margin-top: .3rem; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>homer · 交互原型</title>
+<style>
+/* ============ design tokens ============ */
+:root {
+  --ink:      #1a1a1a;
+  --ink-dim:  #6b6b6b;
+  --line:     #e2e2e2;
+  --bg:       #ffffff;
+  --bg-sink:  #f6f6f6;
+  --accent:   #0a7d4f;
+  --accent-d: #086840;
+  --danger:   #b3261e;
+  --fs-hero:  1.5rem;
+  --fs-body:  0.9375rem;
+  --fs-small: 0.8125rem;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: var(--fs-body); color: var(--ink); }
+body { margin: 0; background: var(--bg); line-height: 1.5; }
+button { font: inherit; cursor: pointer; min-height: 40px; padding: 0 14px;
+  background: var(--bg); color: var(--ink); border: 1px solid #bbb; border-radius: 4px; }
+button:hover { border-color: var(--ink); }
+button:active { background: var(--bg-sink); }
+button:disabled { background: var(--bg-sink); color: var(--ink-dim); border-color: var(--line); cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent-d); border-color: var(--accent-d); }
+button.primary:active { background: #065536; }
+button.text { border: none; background: none; color: var(--ink-dim); min-height: 32px; padding: 0 4px; }
+button.text:hover { color: var(--ink); text-decoration: underline; }
+button:focus-visible, input:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+input { font: inherit; padding: 8px 10px; border: 1px solid #bbb; border-radius: 4px; min-height: 40px; width: 100%; }
+input:hover { border-color: var(--ink); }
+input[aria-invalid="true"] { border-color: var(--danger); }
+code, pre, .mono { font-family: var(--mono); }
+.muted { color: var(--ink-dim); }
+.small { font-size: var(--fs-small); }
+.hidden { display: none !important; }
+
+/* ============ layout ============ */
+.page { max-width: 720px; margin: 0 auto; padding: 0 16px 96px; }
+header.topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header.topbar h1 { font-size: 1.05rem; margin: 0; }
+header.topbar .spacer { flex: 1; }
+footer.statusline { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg);
+  border-top: 1px solid var(--line); padding: 6px 16px; font-size: var(--fs-small);
+  color: var(--ink-dim); display: flex; gap: 16px; align-items: center; }
+footer.statusline .spacer { flex: 1; }
+
+/* ============ hero banner ============ */
+.hero { padding: 28px 0 20px; border-bottom: 1px solid var(--line); }
+.hero .conclusion { font-size: var(--fs-hero); font-weight: 650; display: flex; align-items: center; gap: 10px; margin: 0 0 4px; }
+.hero .numbers { color: var(--ink-dim); margin: 0 0 14px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.ok { background: var(--accent); }
+.dot.drift { background: var(--accent); }
+.dot.conflict { background: var(--danger); }
+.dot.off { background: #b9b9b9; }
+.hero.warn .conclusion { color: var(--danger); }
+.hero-note { background: var(--bg-sink); border-left: 3px solid var(--danger); padding: 12px 14px; margin-top: 12px; }
+.hero-note.info { border-left-color: var(--ink-dim); }
+
+/* ============ sections ============ */
+section { padding: 18px 0; border-bottom: 1px solid var(--line); }
+section > h2 { font-size: var(--fs-small); text-transform: uppercase; letter-spacing: .06em;
+  color: var(--ink-dim); margin: 0 0 10px; font-weight: 600; }
+
+/* adapter rows */
+.adapter-row { border-top: 1px solid var(--line); padding: 10px 4px; }
+.adapter-row:first-of-type { border-top: none; }
+.adapter-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.adapter-line .name { font-weight: 600; min-width: 5.5em; }
+.adapter-line .counts { font-family: var(--mono); font-size: var(--fs-small); }
+.adapter-line .counts .c-drift { color: var(--ink); }
+.adapter-line .counts .c-conflict { color: var(--danger); font-weight: 700; }
+.adapter-line .counts .c-clean { color: var(--ink-dim); }
+.adapter-line .row-actions { margin-left: auto; display: flex; gap: 8px; }
+.adapter-row.disabled-row { opacity: .55; }
+.cat-line { display: flex; align-items: center; gap: 10px; padding: 6px 0 6px 20px; font-size: var(--fs-small); flex-wrap: wrap; }
+.cat-line .cat-name { font-family: var(--mono); min-width: 8em; color: var(--ink-dim); }
+.cat-line .row-actions { margin-left: auto; }
+button.small-btn { min-height: 32px; padding: 0 10px; font-size: var(--fs-small); }
+
+/* diff drawer */
+.diff-drawer { margin: 8px 0 8px 20px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.diff-drawer pre { margin: 0; padding: 12px; background: var(--bg-sink); font-size: 12.5px;
+  overflow-x: auto; white-space: pre; line-height: 1.45; }
+.diff-drawer .diff-actions { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+pre .ln-add { color: var(--accent); background: #0a7d4f14; display: block; }
+pre .ln-del { color: var(--danger); background: #b3261e14; display: block; }
+pre .ln-hunk { color: #0550ae; display: block; }
+pre .ln-meta { color: var(--ink-dim); display: block; }
+
+/* agents */
+.agent-line { display: flex; align-items: baseline; gap: 10px; padding: 8px 4px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.agent-line:first-of-type { border-top: none; }
+.agent-line .hostname { font-weight: 600; }
+.agent-line .aid { font-family: var(--mono); font-size: var(--fs-small); color: var(--ink-dim); }
+.agent-line .meta { font-size: var(--fs-small); color: var(--ink-dim); }
+.agent-line.stale { opacity: .6; }
+.agent-empty { padding: 14px 4px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+/* auth screens */
+.gate { max-width: 380px; margin: 12vh auto 0; padding: 0 16px; }
+.gate h1 { font-size: 1.3rem; margin: 0 0 4px; }
+.gate form { display: grid; gap: 12px; margin-top: 18px; }
+.gate label { display: grid; gap: 4px; font-size: var(--fs-small); color: var(--ink-dim); }
+.field-error { color: var(--danger); font-size: var(--fs-small); min-height: 1.2em; }
+.inline-banner { border-left: 3px solid var(--danger); background: var(--bg-sink); padding: 10px 12px; margin: 14px 0 0; }
+.inline-banner h3 { margin: 0 0 4px; font-size: var(--fs-body); }
+.inline-banner ul { margin: 6px 0 0; padding-left: 1.2em; font-size: var(--fs-small); }
+.inline-banner .close-x { float: right; }
+
+/* toast */
+#toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: #fff; padding: 10px 18px; border-radius: 4px;
+  font-size: var(--fs-small); opacity: 0; transition: opacity .18s; pointer-events: none; z-index: 30; }
+#toast.show { opacity: 1; }
+
+/* dialogs */
+dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-width: 460px; width: calc(100% - 32px); }
+dialog::backdrop { background: #0007; }
+dialog h2 { margin: 0 0 8px; font-size: 1.1rem; }
+dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 18px 0 0; }
+.join-cmd { display: flex; gap: 8px; margin: 12px 0; }
+.join-cmd input { font-family: var(--mono); font-size: var(--fs-small); }
+
+/* skeleton */
+.skel { color: transparent !important; background: var(--bg-sink); border-radius: 4px;
+  animation: pulse 1s infinite alternate; pointer-events: none; }
+.skel * { visibility: hidden; }
+@keyframes pulse { from { opacity: .7; } to { opacity: .35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+html { scroll-behavior: smooth; }
+</style>
 </head>
 <body>
-  <header>
-    <h1>homer</h1><small id="version">版本：加载中</small>
-    <button id="refresh" type="button">刷新</button>
-    <span id="auth-area"><button id="logout" type="button" class="hidden">退出登录</button></span>
-  </header>
 
-  <main>
-    <section id="auth-setup" class="hidden">
-      <h2>初始化管理员密码</h2>
-      <p class="muted">首次使用：为 homer 控制台设置管理员密码（至少 12 个字符）。此页面仅限本机/局域网访问。</p>
-      <form id="setup-form">
-        <label class="hidden" id="setup-code-row">初始化码 <input id="setup-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 位，见 serve 启动日志" autocomplete="one-time-code"></label>
-        <label>密码 <input id="setup-password" type="password" autocomplete="new-password" required></label>
-        <label>确认 <input id="setup-password2" type="password" autocomplete="new-password" required></label>
-        <button type="submit">保存并进入</button>
-        <div id="setup-error" class="bad"></div>
-      </form>
-    </section>
 
-    <section id="auth-login" class="hidden">
-      <h2>登录</h2>
-      <form id="login-form">
-        <label>管理员密码 <input id="login-password" type="password" autocomplete="current-password" required></label>
-        <button type="submit">登录</button>
-        <div id="login-error" class="bad"></div>
-      </form>
-    </section>
+<!-- ============ header ============ -->
+<header class="topbar">
+  <h1>homer</h1>
+  <span class="muted small" id="ver">v1.3.0</span>
+  <span class="spacer"></span>
+  <button class="text" id="btn-join-top" type="button">接入命令</button>
+  <button class="text" id="btn-refresh" type="button">刷新</button>
+  <button class="text" id="btn-logout" type="button">退出</button>
+</header>
 
-    <section id="not-initialized" class="hidden">
-      <strong>尚未初始化</strong>：请先在终端运行 homer init 完成初始化，再回到本页。
-    </section>
+<div class="page">
 
-    <section id="status-cards">
-      <h2>状态</h2>
-      <div id="summary-cards" class="cards"><div class="card">正在加载…</div></div>
-      <div id="adapter-cards" class="cards"></div>
-    </section>
-
-    <section id="diff-view">
-      <h2>差异</h2>
-      <label>适配器 <select id="adapter-filter"><option value="">全部</option></select></label>
-      <label>分类 <select id="category-filter"><option value="">全部</option></select></label>
-      <pre id="diff-text">正在加载…</pre>
-    </section>
-
-    <section id="actions">
-      <h2>操作</h2>
-      <button id="push" type="button">推送</button>
-      <button id="pull" type="button">拉取</button>
-      <div id="action-result" class="muted"></div>
-    </section>
-
-    <section id="agents">
-      <h2>多机代理</h2>
-      <div id="agent-content" class="muted">正在加载…</div>
-    </section>
-  </main>
-
-  <dialog id="confirm-dialog">
-    <form method="dialog">
-      <h3 id="confirm-title">确认操作</h3>
-      <p id="confirm-summary"></p>
-      <p>受影响文件会先备份。</p>
-      <menu>
-        <button value="cancel">取消</button>
-        <button id="confirm-action" value="confirm">确认</button>
-      </menu>
+  <!-- ============ auth gates (exclusive full-screen states) ============ -->
+  <div id="gate-setup" class="gate hidden">
+    <h1>设置管理员密码</h1>
+    <p class="muted small">首次使用。密码至少 12 位，只存在这台 hub 上。</p>
+    <form id="form-setup" novalidate>
+      <label id="row-setup-code" class="hidden">初始化码（6 位，见 serve 启动日志）
+        <input id="in-setup-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="123456">
+      </label>
+      <label>密码<input id="in-setup-pw" type="password" autocomplete="new-password"></label>
+      <label>确认密码<input id="in-setup-pw2" type="password" autocomplete="new-password"></label>
+      <div class="field-error" id="err-setup" role="alert"></div>
+      <button type="submit" class="primary" id="btn-setup">保存并进入</button>
     </form>
-  </dialog>
+  </div>
 
-  <script>
-  (() => {
-    "use strict";
-    const $ = (id) => document.getElementById(id);
-    const state = { status: null, pending: null, authed: false };
+  <div id="gate-login" class="gate hidden">
+    <h1>登录</h1>
+    <p class="muted small" id="login-note">homer hub 控制台</p>
+    <form id="form-login" novalidate>
+      <label>管理员密码<input id="in-login-pw" type="password" autocomplete="current-password"></label>
+      <div class="field-error" id="err-login" role="alert"></div>
+      <button type="submit" class="primary" id="btn-login">登录</button>
+    </form>
+    <p class="muted small" style="margin-top:24px">忘记密码？删除 hub 上的 <code>~/.homer/hub/password</code> 后重启服务即可重设。</p>
+  </div>
 
-    async function api(path, options = {}) {
-      const headers = Object.assign({ "Accept": "application/json" }, options.headers || {});
-      const response = await fetch(path, Object.assign({}, options, { headers, credentials: "same-origin" }));
-      let data = null;
-      try { data = await response.json(); } catch (_) { data = {}; }
-      if (!response.ok) {
-        const error = data.error || {};
-        const failure = new Error(error.message || ("请求失败（" + response.status + "）"));
-        failure.status = response.status; failure.code = error.code; failure.data = data;
-        throw failure;
-      }
-      return data;
-    }
+  <!-- ============ main workspace ============ -->
+  <main id="workspace" class="hidden">
 
-    function text(value) { return value == null ? "" : String(value); }
-    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
-    function element(tag, content, className) {
-      const node = document.createElement(tag);
-      if (className) node.className = className;
-      if (content != null) node.textContent = content;
-      return node;
-    }
+    <!-- ① HERO: the only thing that matters on first paint -->
+    <div class="hero" id="hero" aria-live="polite"></div>
 
-    function renderStatus(report) {
-      state.status = report;
-      const summary = $("summary-cards"); clear(summary);
-      let push = 0, pull = 0, conflicts = 0;
-      (report.adapters || []).forEach((adapter) => {
-        push += adapter.push || 0; pull += adapter.pull || 0; conflicts += adapter.conflicts || 0;
-      });
-      [["↑ 可推送", push], ["↓ 可拉取", pull], ["⚡ 冲突", conflicts]].forEach(([label, value]) => {
-        const card = element("div", null, "card"); card.append(element("strong", label)); card.append(element("div", text(value))); summary.append(card);
-      });
-      const adapters = $("adapter-cards"); clear(adapters);
-      (report.adapters || []).forEach((adapter) => {
-        const card = element("div", null, "card");
-        card.append(element("strong", adapter.id));
-        card.append(element("div", "↑ " + (adapter.push || 0) + "　↓ " + (adapter.pull || 0) + "　⚡ " + (adapter.conflicts || 0)));
-        (adapter.categories || []).forEach((category) => card.append(element("div", category.name + "：↑" + category.push + " ↓" + category.pull + " ⚡" + category.conflicts)));
-        if ((report.disabled || []).includes(adapter.id)) card.append(element("div", "已禁用", "muted"));
-        ["warnings", "errors"].forEach((key) => {
-          if (!(report[key] || []).length) return;
-          const details = document.createElement("details"); details.append(element("summary", key === "warnings" ? "警告" : "错误"));
-          const list = document.createElement("ul"); report[key].forEach((item) => list.append(element("li", item))); details.append(list); card.append(details);
-        });
-        adapters.append(card);
-      });
-      fillFilters(report.adapters || []);
-    }
+    <!-- page-level alert (secrets rejected / failures) -->
+    <div id="alert-slot"></div>
 
-    function fillFilters(adapters) {
-      const adapterSelect = $("adapter-filter"), categorySelect = $("category-filter");
-      const oldAdapter = adapterSelect.value, oldCategory = categorySelect.value;
-      while (adapterSelect.options.length > 1) adapterSelect.remove(1);
-      adapters.forEach((adapter) => adapterSelect.append(new Option(adapter.id, adapter.id)));
-      adapterSelect.value = oldAdapter;
-      while (categorySelect.options.length > 1) categorySelect.remove(1);
-      const categories = [];
-      adapters.forEach((adapter) => (adapter.categories || []).forEach((category) => { if (!categories.includes(category.name)) categories.push(category.name); }));
-      categories.forEach((category) => categorySelect.append(new Option(category, category)));
-      categorySelect.value = oldCategory;
-    }
+    <!-- ② adapters -->
+    <section id="sec-adapters" aria-label="适配器明细">
+      <h2>适配器明细</h2>
+      <div id="adapter-list"></div>
+    </section>
 
-    async function loadDiff() {
-      const params = new URLSearchParams();
-      if ($("adapter-filter").value) params.set("adapter", $("adapter-filter").value);
-      if ($("category-filter").value) params.set("category", $("category-filter").value);
-      try {
-        const data = await api("/api/diff?" + params.toString());
-        $("diff-text").textContent = data.empty ? "无漂移" : text(data.text);
-      } catch (error) { $("diff-text").textContent = error.message; }
-    }
+    <!-- ③ machines -->
+    <section id="sec-agents" aria-label="机器">
+      <h2>机器</h2>
+      <div id="agent-list"></div>
+    </section>
 
-    function changedFiles(report) {
-      return (report.changedFiles || []).length || ((report.applied || {}).written || []).length || ((report.applied || {}).deleted || []).length;
-    }
-    function reportMessage(report, action) {
-      if (report.ok) return action + "成功，共处理 " + changedFiles(report) + " 个文件。";
-      if (report.status === "secrets-rejected") return "检测到疑似密钥，已拒绝推送。";
-      if (report.status === "conflicts" || report.status === "conflicts-remain") return "存在冲突，请在终端运行 homer merge。";
-      return (report.errors || []).join("；") || action + "未完成。";
-    }
-    async function execute(action) {
-      try {
-        const data = await api("/api/" + action + "?confirm=true", { method: "POST" });
-        $("action-result").textContent = reportMessage(data, action === "push" ? "推送" : "拉取");
-        await refresh();
-      } catch (error) { $("action-result").textContent = error.message; }
-    }
-    async function confirmAction(action) {
-      const dialog = $("confirm-dialog");
-      try {
-        const latestStatus = await api("/api/status");
-        renderStatus(latestStatus.report);
-        await loadDiff();
-      } catch (error) {
-        $("action-result").textContent = error.message;
-        return;
-      }
-      $("confirm-title").textContent = action === "push" ? "确认推送" : "确认拉取";
-      const count = ((state.status && state.status.adapters) || []).reduce((sum, item) => sum + (action === "push" ? (item.push || 0) : (item.pull || 0)), 0);
-      $("confirm-summary").textContent = "当前预计处理 " + count + " 项状态变更。";
-      state.pending = action;
-      if (typeof dialog.showModal === "function") dialog.showModal();
-      else if (window.confirm($("confirm-summary").textContent + "\n受影响文件会先备份。")) execute(action);
-    }
-    $("confirm-dialog").addEventListener("close", () => { if ($("confirm-dialog").returnValue === "confirm" && state.pending) execute(state.pending); state.pending = null; });
-    $("push").addEventListener("click", () => confirmAction("push"));
-    $("pull").addEventListener("click", () => confirmAction("pull"));
-    $("adapter-filter").addEventListener("change", loadDiff); $("category-filter").addEventListener("change", loadDiff);
+  </main>
+</div>
 
-    async function loadAgents() {
-      try {
-        const data = await api("/api/agents"); const content = $("agent-content"); clear(content);
-        if (!(data.agents || []).length) { content.textContent = "未启用多机视图"; return; }
-        const table = document.createElement("table"); const head = document.createElement("tr");
-        ["状态", "代理 ID", "主机名", "模式", "最近心跳", "操作"].forEach((item) => head.append(element("th", item))); table.append(head);
-        data.agents.forEach((agent) => { const row = document.createElement("tr"); const mode = agent.mode === "listen" ? "直连" : agent.mode === "connect" ? "主动连接" : agent.mode; const status = element("td", text(agent.stale ? "离线" : "在线")); status.style.color = agent.stale ? "#c33" : "#3c3"; row.append(status); [agent.agentId, agent.hostname, mode, agent.lastSeen].forEach((item) => row.append(element("td", text(item)))); const actions = element("td"); ["查看状态", "查看差异", "拉取"].forEach((label) => actions.append(element("button", label))); row.append(actions); table.append(row); });
-        content.append(table);
-      } catch (error) { $("agent-content").textContent = error.message; }
-    }
-    function showAuthGate() {
-      // Hide the working sections until the user authenticates.
-      ["status-cards", "diff-view", "actions", "agents"].forEach((id) => $(id).classList.add("hidden"));
-    }
-    function showWorkspace() {
-      ["status-cards", "diff-view", "actions", "agents"].forEach((id) => $(id).classList.remove("hidden"));
-      $("auth-setup").classList.add("hidden"); $("auth-login").classList.add("hidden");
-      $("logout").classList.remove("hidden");
-      state.authed = true;
-    }
-    async function routeAuth() {
-      const gate = await api("/api/auth/status");
-      if (!gate.configured) {
-        showAuthGate(); $("auth-setup").classList.remove("hidden");
-        // Untrusted (public-internet) peers need the one-time code: show
-        // the field on first paint instead of after a rejected submit.
-        if (gate.setupCodeRequired) $("setup-code-row").classList.remove("hidden");
-      }
-    }
-    async function handleAuthError(error) {
-      if (error.status !== 401) return false;
-      const gate = await api("/api/auth/status");
-      showAuthGate();
-      if (gate.configured) { $("auth-login").classList.remove("hidden"); $("login-password").focus(); }
-      else { $("auth-setup").classList.remove("hidden"); }
-      return true;
-    }
+<!-- ============ footer status line ============ -->
+<footer class="statusline">
+  <span id="refreshed-at">—</span>
+  <span class="muted">每 30s 自动刷新</span>
+  <span class="spacer"></span>
+  <span class="muted">hub · 本机</span>
+</footer>
 
-    async function refresh() {
-      try {
-        const health = await api("/api/health"); $("version").textContent = "版本：" + text(health.version);
-        const status = await api("/api/status");
-        showWorkspace();
-        $("not-initialized").classList.add("hidden");
-        renderStatus(status.report); await loadDiff();
-      } catch (error) {
-        if (error.status === 401) {
-          await handleAuthError(error);
-          await loadAgents();
-          return;
+<div id="toast" role="status"></div>
+
+<!-- ============ confirm dialog (push/pull) ============ -->
+<dialog id="dlg-confirm">
+  <form method="dialog" style="margin:0">
+    <h2 id="confirm-title">确认</h2>
+    <p id="confirm-desc"></p>
+    <p class="muted small">受影响文件会先备份。</p>
+    <menu>
+      <button value="cancel" id="btn-confirm-cancel">取消</button>
+      <button value="confirm" class="primary" id="btn-confirm-ok">确认</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- ============ join dialog ============ -->
+<dialog id="dlg-join">
+  <h2>接入新机器</h2>
+  <p class="muted small">在新机器的终端运行这条命令，接入后会出现在机器列表。</p>
+  <div class="join-cmd">
+    <input id="join-cmd" readonly aria-label="接入命令">
+    <button id="btn-copy" type="button">复制</button>
+  </div>
+  <p class="muted small hidden" id="copy-fallback">当前环境不支持自动复制：已全选文本，请按 Ctrl+C。</p>
+  <menu><button value="ok" class="primary">完成</button></menu>
+</dialog>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+/* =====================================================================
+ * homer hub console — API contract (frozen):
+ * GET  /api/auth/status   {configured, setupCodeRequired}
+ * POST /api/auth/setup    {password, setupCode?}
+ * POST /api/auth/login    {password}
+ * POST /api/auth/logout
+ * GET  /api/auth/join     {command}
+ * GET  /api/health        {version}
+ * GET  /api/status        {report:{adapters:[{id,push,pull,conflicts,categories:[{name,push,pull,conflicts}]}], errors, warnings, disabled}}
+ * GET  /api/diff?adapter&category  {empty, text}
+ * POST /api/push?confirm=true | /api/pull?confirm=true
+ * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale}]}
+ * 错误: 401 / 409(code=not-initialized|aborted|conflicts) / 422(secrets-rejected)
+ * =================================================================== */
+const app = {
+  report: null,           // 最近一次 /api/status 的 report
+  pendingAction: null,    // push/pull 待确认
+  openDiffs: new Set(),   // 展开的 diff 抽屉，key = adapter/category（轮询不重置）
+};
+
+async function api(path, opts = {}) {
+  const init = { method: opts.method || "GET", credentials: "same-origin", headers: { "Accept": "application/json" } };
+  if (opts.body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
+  const res = await fetch(path, init);
+  let data = null;
+  try { data = await res.json(); } catch (_) { data = {}; }
+  if (!res.ok) {
+    const err = data.error || {};
+    const e = new Error(err.message || ("请求失败（" + res.status + "）"));
+    e.status = res.status; e.code = err.code; e.errors = err.details || [];
+    // 写操作失败信封（ok:false + status + errors，HTTP 409/422）
+    if (!err.message && data.errors) {
+      e.message = (data.errors || []).join("；") || "操作未完成";
+      e.code = data.status; e.errors = data.errors || []; e.report = data;
+    }
+    throw e;
+  }
+  return data;
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+function fmtCounts(push, pull, conflicts) {
+  const parts = [];
+  if (push) parts.push("↑" + push + " 可推送");
+  if (pull) parts.push("↓" + pull + " 可拉取");
+  if (conflicts) parts.push("⚡" + conflicts + " 冲突");
+  return parts.join(" · ");
+}
+
+/* ---------- gates ---------- */
+function showGate(which, note) {
+  $("workspace").classList.add("hidden");
+  $("gate-setup").classList.toggle("hidden", which !== "setup");
+  $("gate-login").classList.toggle("hidden", which !== "login");
+  $("btn-join-top").classList.add("hidden"); $("btn-refresh").classList.add("hidden"); $("btn-logout").classList.add("hidden");
+  if (which === "login") {
+    $("login-note").textContent = note || "homer hub 控制台";
+    setTimeout(() => $("in-login-pw").focus(), 0);
+  }
+  if (which === "setup") setTimeout(() => $("in-setup-pw").focus(), 0);
+}
+function showWorkspace() {
+  $("gate-setup").classList.add("hidden"); $("gate-login").classList.add("hidden");
+  $("workspace").classList.remove("hidden");
+  $("btn-join-top").classList.remove("hidden"); $("btn-refresh").classList.remove("hidden"); $("btn-logout").classList.remove("hidden");
+}
+
+/* ---------- ① hero ---------- */
+function renderHero() {
+  const hero = $("hero"); clear(hero); hero.classList.remove("warn");
+  const r = app.report;
+  let push = 0, pull = 0, conflicts = 0;
+  (r.adapters || []).forEach(a => { push += a.push || 0; pull += a.pull || 0; conflicts += a.conflicts || 0; });
+
+  const concl = el("p", "conclusion");
+  const numbers = el("p", "numbers");
+
+  if (conflicts > 0) {
+    hero.classList.add("warn");
+    concl.append(el("span", "dot conflict"), document.createTextNode("有冲突，需要终端处理"));
+    numbers.textContent = conflicts + " 个冲突" + (push + pull ? "，另有 " + fmtCounts(push, pull, 0) : "");
+    const note = el("div", "hero-note");
+    note.append(el("div", null, "冲突无法用网页解决。在终端运行："));
+    note.append(el("div", "mono", "$ homer merge"));
+    note.append(el("div", "small muted", "解决后回到这里刷新。下方可查看冲突差异。"));
+    hero.append(concl, numbers, note);
+    return;
+  }
+  if (push + pull > 0) {
+    concl.append(el("span", "dot drift"), document.createTextNode("有漂移"));
+    numbers.textContent = fmtCounts(push, pull, 0) + "，分布在 " +
+      r.adapters.filter(a => a.push + a.pull > 0).length + " 个适配器";
+    const btn = el("button", "primary", "处理漂移 ↓");
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      // 自动展开有漂移的适配器
+      r.adapters.forEach(a => { if (a.push + a.pull > 0) app.openDiffs.add("__row__" + a.id); });
+      renderAdapters();
+      $("sec-adapters").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    hero.append(concl, numbers, btn);
+    return;
+  }
+  concl.append(el("span", "dot ok"), document.createTextNode("一切同步"));
+  const nAdapters = (r.adapters || []).length;
+  numbers.textContent = nAdapters + " 个适配器全部干净 · 刚刚刷新";
+  hero.append(concl, numbers);
+}
+
+function renderHeroSkeleton() {
+  const hero = $("hero"); clear(hero);
+  const concl = el("p", "conclusion skel", "加载中加载中");
+  const numbers = el("p", "numbers skel", "加载中加载中加载中加载中");
+  hero.append(concl, numbers);
+}
+
+/* ---------- ② adapters ---------- */
+function countCls(push, pull, conflicts) {
+  if (conflicts) return "counts c-conflict";
+  if (push + pull) return "counts c-drift";
+  return "counts c-clean";
+}
+function renderAdapters() {
+  const list = $("adapter-list"); clear(list);
+  const r = app.report;
+  const totalDrift = (r.adapters || []).reduce((s, a) => s + a.push + a.pull + a.conflicts, 0);
+
+  if (totalDrift === 0 && !app._adaptersTouched) {
+    // 干净态：整个区块收成一行，可展开但不主动展开
+    const row = el("div", "adapter-line");
+    row.append(el("span", "name muted", (r.adapters || []).map(a => a.id).join(" / ") + "　全部干净"));
+    const btn = el("button", "text", "展开明细 ▾");
+    btn.type = "button";
+    btn.addEventListener("click", () => { app._adaptersTouched = true; renderAdapters(); });
+    row.append(el("span", "row-actions")); row.lastChild.append(btn);
+    const wrap = el("div", "adapter-row"); wrap.append(row); list.append(wrap);
+    return;
+  }
+
+  (r.adapters || []).forEach(a => {
+    const disabled = (r.disabled || []).includes(a.id);
+    const wrap = el("div", "adapter-row" + (disabled ? " disabled-row" : ""));
+    const line = el("div", "adapter-line");
+    line.append(el("span", "name", a.id));
+    const cText = disabled ? "已禁用" : (a.push + a.pull + a.conflicts ? fmtCounts(a.push, a.pull, a.conflicts) : "干净");
+    line.append(el("span", countCls(a.push, a.pull, a.conflicts), cText));
+    const acts = el("span", "row-actions");
+    const driftBtn = el("button", "small-btn", (a.push + a.pull + a.conflicts ? "查看差异" : "明细 ▾"));
+    driftBtn.type = "button";
+    const rowKey = "__row__" + a.id;
+    driftBtn.setAttribute("aria-expanded", app.openDiffs.has(rowKey));
+    driftBtn.addEventListener("click", () => {
+      app.openDiffs.has(rowKey) ? app.openDiffs.delete(rowKey) : app.openDiffs.add(rowKey);
+      renderAdapters();
+    });
+    acts.append(driftBtn);
+    line.append(acts);
+    wrap.append(line);
+
+    if (app.openDiffs.has(rowKey)) {
+      (a.categories || []).forEach(c => {
+        const cl = el("div", "cat-line");
+        cl.append(el("span", "cat-name", c.name));
+        cl.append(el("span", countCls(c.push, c.pull, c.conflicts),
+          c.push + c.pull + c.conflicts ? fmtCounts(c.push, c.pull, c.conflicts) : "干净"));
+        const cActs = el("span", "row-actions");
+        if (c.push + c.pull + c.conflicts > 0) {
+          const db = el("button", "small-btn", "差异");
+          db.type = "button";
+          const key = a.id + "/" + c.name;
+          db.setAttribute("aria-expanded", app.openDiffs.has(key));
+          db.setAttribute("aria-controls", "diff-" + key.replace(/\W/g, "-"));
+          db.addEventListener("click", () => toggleDiff(a.id, c.name));
+          cActs.append(db);
         }
-        // Any non-401 failure means we are authenticated: show the workspace
-        // (with its error state) instead of a blank gate.
-        showWorkspace();
-        const summary = $("summary-cards"); clear(summary);
-        const card = element("div", null, "card");
-        card.append(element("strong", "状态加载失败"));
-        card.append(element("div", text(error.message)));
-        summary.append(card);
-        $("not-initialized").classList.toggle("hidden", error.code !== "not-initialized");
-        $("diff-text").textContent = text(error.message);
-      }
-      await loadAgents();
+        cl.append(cActs);
+        wrap.append(cl);
+        const key = a.id + "/" + c.name;
+        if (app.openDiffs.has(key)) wrap.append(buildDiffDrawer(a.id, c.name));
+      });
+      if (!(a.categories || []).length) wrap.append(el("div", "cat-line muted", "无分类数据"));
     }
-    $("setup-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const first = $("setup-password").value, second = $("setup-password2").value;
-      $("setup-error").textContent = "";
-      if (first !== second) { $("setup-error").textContent = "两次输入不一致"; return; }
-      const body = { password: first };
-      const code = $("setup-code").value.trim();
-      if (code) body.setupCode = code;
-      try {
-        await api("/api/auth/setup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        await refresh();
-      } catch (error) {
-        $("setup-error").textContent = error.message;
-        if (error.code === "setup-code-required") $("setup-code-row").classList.remove("hidden");
-      }
-    });
-    $("login-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      $("login-error").textContent = "";
-      try {
-        await api("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: $("login-password").value }) });
-        $("login-password").value = "";
-        await refresh();
-      } catch (error) { $("login-error").textContent = error.message; }
-    });
-    $("logout").addEventListener("click", async () => {
-      try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
-      state.authed = false; $("logout").classList.add("hidden");
-      showAuthGate(); $("auth-login").classList.remove("hidden");
-    });
+    list.append(wrap);
+  });
+}
 
-    $("refresh").addEventListener("click", refresh);
-    // First paint: the 401 handler inside refresh() routes to the auth gate;
-    // /api/auth/status decides setup vs login without leaking state.
-    routeAuth(); refresh();
-  })();
-  </script>
+function buildDiffDrawer(adapter, category) {
+  const key = adapter + "/" + category;
+  const drawer = el("div", "diff-drawer");
+  drawer.id = "diff-" + key.replace(/\W/g, "-");
+  const pre = el("pre", null, "加载差异…");
+  drawer.append(pre);
+  api("/api/diff?adapter=" + encodeURIComponent(adapter) + "&category=" + encodeURIComponent(category))
+    .then(d => {
+      clear(pre);
+      if (d.empty) { pre.textContent = "无漂移"; return; }
+      // diff 着色：语义编码（+=仓库将新增 / -=将被覆盖），不是装饰
+      d.text.split("\n").forEach(line => {
+        const cls = line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") ? "ln-meta"
+          : line.startsWith("@@") ? "ln-hunk"
+          : line.startsWith("+") ? "ln-add"
+          : line.startsWith("-") ? "ln-del" : "";
+        const span = el("span", cls, line);
+        pre.append(span, document.createTextNode("\n"));
+      });
+    })
+    .catch(e => {
+      clear(pre);
+      pre.append(el("span", null, "差异加载失败：" + e.message + "　"));
+      const retry = el("button", "small-btn", "重试");
+      retry.type = "button";
+      retry.addEventListener("click", () => { renderAdapters(); });
+      pre.append(retry);
+    });
+  if (app.report) {
+    const a = app.report.adapters.find(x => x.id === adapter);
+    const c = a && a.categories.find(x => x.name === category);
+    if (c) {
+      const actions = el("div", "diff-actions");
+      if (c.push > 0 && !hasConflicts()) {
+        const pb = el("button", "primary", "推送本机改动（↑" + c.push + "）");
+        pb.type = "button"; pb.addEventListener("click", () => confirmWrite("push"));
+        actions.append(pb);
+      }
+      if (c.pull > 0 && !hasConflicts()) {
+        const pl = el("button", null, "拉取仓库改动（↓" + c.pull + "）");
+        pl.type = "button"; pl.addEventListener("click", () => confirmWrite("pull"));
+        actions.append(pl);
+      }
+      if (c.conflicts > 0) actions.append(el("span", "small muted", "冲突需终端 homer merge，此处仅查看"));
+      if (actions.childNodes.length) drawer.append(actions);
+    }
+  }
+  return drawer;
+}
+function toggleDiff(adapter, category) {
+  const key = adapter + "/" + category;
+  app.openDiffs.has(key) ? app.openDiffs.delete(key) : app.openDiffs.add(key);
+  renderAdapters();
+}
+function hasConflicts() {
+  return (app.report?.adapters || []).some(a => a.conflicts > 0);
+}
+
+/* ---------- ③ agents ---------- */
+function renderAgents(agents, disabledFeature) {
+  const list = $("agent-list"); clear(list);
+  if (disabledFeature) {
+    list.append(el("div", "muted small", "多机视图未启用（serve 未开 agent 模式）"));
+    return;
+  }
+  if (!agents.length) {
+    const box = el("div", "agent-empty");
+    box.append(el("span", "muted", "还没有机器接入"));
+    const btn = el("button", "primary", "＋ 接入新机器");
+    btn.type = "button"; btn.addEventListener("click", openJoin);
+    box.append(btn);
+    list.append(box);
+    return;
+  }
+  agents.forEach(a => {
+    const line = el("div", "agent-line" + (a.stale ? " stale" : ""));
+    line.append(el("span", "dot " + (a.stale ? "off" : "ok")));
+    line.append(el("span", "hostname", a.hostname));
+    line.append(el("span", "aid", a.agentId));
+    line.append(el("span", "meta",
+      (a.mode === "listen" ? "直连" : "主动连接") + " · " + a.lastSeen + (a.stale ? " · 离线" : "")));
+    if (a.stale) line.append(el("span", "small muted", "离线期间不产生同步"));
+    list.append(line);
+  });
+  const joinBtn = el("button", "small-btn", "＋ 接入新机器");
+  joinBtn.type = "button"; joinBtn.addEventListener("click", openJoin);
+  const foot = el("div"); foot.style.padding = "10px 4px 0"; foot.append(joinBtn);
+  list.append(foot);
+}
+function renderAgentsError(msg) {
+  const list = $("agent-list"); clear(list);
+  const box = el("div", "small");
+  box.append(el("span", null, "机器列表加载失败：" + msg + "　"));
+  const retry = el("button", "small-btn", "重试");
+  retry.type = "button"; retry.addEventListener("click", loadAgents);
+  box.append(retry);
+  list.append(box);
+}
+async function loadAgents() {
+  const btn = $("btn-join-top");
+  try {
+    const d = await api("/api/agents");
+    btn.classList.remove("hidden");      // 功能可用 → 恢复入口（renderAgents 渲染前定下终态）
+    renderAgents(d.agents || [], false);
+  } catch (e) {
+    if (e.code === "agents-disabled") {
+      btn.classList.add("hidden");       // 功能没开 → 隐藏入口（与 renderAgents 分支一致）
+      renderAgents([], true);
+    }
+    else if (e.status === 401) return;   // 401 由 refresh 统一处理
+    else renderAgentsError(e.message);
+  }
+}
+
+/* ---------- write actions: push / pull ---------- */
+function confirmWrite(action) {
+  const r = app.report;
+  const n = (r.adapters || []).reduce((s, a) => s + (action === "push" ? a.push : a.pull), 0);
+  $("confirm-title").textContent = action === "push" ? "确认推送" : "确认拉取";
+  $("confirm-desc").textContent = action === "push"
+    ? "推送 " + n + " 项改动到仓库（以本机为准）。"
+    : "拉取 " + n + " 项改动到本机（覆盖本地文件前先备份）。";
+  $("btn-confirm-ok").textContent = action === "push" ? "确认推送" : "确认拉取";
+  app.pendingAction = action;
+  $("dlg-confirm").showModal();
+}
+$("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
+// 显式接线，不依赖 dialog 表单的隐式提交行为（兼容性兜底）
+$("btn-confirm-ok").addEventListener("click", ev => {
+  ev.preventDefault();
+  const okBtn = $("btn-confirm-ok");
+  okBtn.disabled = true; okBtn.textContent = "处理中…";
+  // 直接执行（close→事件→fetch 的链路在 headless 环境会丢事件），
+  // 然后关对话框；真实浏览器与 headless 行为一致
+  $("dlg-confirm").returnValue = "confirm";
+  const action = app.pendingAction;
+  $("dlg-confirm").close("confirm");
+  app.pendingAction = null;
+  if (action) executeWrite(action);
+});
+$("btn-confirm-cancel").addEventListener("click", ev => {
+  ev.preventDefault();
+  $("dlg-confirm").close("cancel");
+});
+async function executeWrite(action) {
+  const okBtn = $("btn-confirm-ok"); okBtn.disabled = true; okBtn.textContent = "处理中…";
+  try {
+    const d = await api("/api/" + action + "?confirm=true", { method: "POST" });
+    const n = (d.changedFiles || []).length || (d.applied?.written || []).length;
+    toast((action === "push" ? "推送成功" : "拉取成功") + "，处理 " + n + " 个文件");
+    clearAlert();
+    await refresh();
+  } catch (e) {
+    if (e.status === 422 || e.code === "secrets-rejected") {
+      showAlert("推送被拒绝：检测到疑似密钥", e.errors, "确认不是密钥后请在终端用 homer push --allow-secrets 处理。");
+    } else if (e.code === "conflicts") {
+      toast("存在冲突，请终端 homer merge");
+      await refresh();
+    } else {
+      showAlert((action === "push" ? "推送" : "拉取") + "未完成", e.errors.length ? e.errors : [e.message], null);
+    }
+  } finally {
+    okBtn.disabled = false;
+  }
+}
+
+/* ---------- page-level alert ---------- */
+function showAlert(title, lines, hint) {
+  clearAlert();
+  const box = el("div", "inline-banner");
+  box.setAttribute("role", "alert");
+  const x = el("button", "text close-x", "关闭");
+  x.type = "button"; x.addEventListener("click", clearAlert);
+  box.append(x, el("h3", null, title));
+  if (lines && lines.length) {
+    const ul = el("ul");
+    lines.forEach(l => ul.append(el("li", null, l)));
+    box.append(ul);
+  }
+  if (hint) box.append(el("p", "small muted", hint));
+  $("alert-slot").append(box);
+}
+function clearAlert() { clear($("alert-slot")); }
+
+/* ---------- join dialog ---------- */
+async function openJoin() {
+  const dlg = $("dlg-join");
+  $("copy-fallback").classList.add("hidden");
+  $("btn-copy").textContent = "复制";
+  $("join-cmd").value = "获取中…";
+  dlg.showModal();
+  try {
+    const d = await api("/api/auth/join");
+    $("join-cmd").value = d.command;
+  } catch (e) {
+    $("join-cmd").value = "";
+    toast("获取接入命令失败：" + e.message);
+    dlg.close();
+  }
+}
+$("btn-copy").addEventListener("click", async () => {
+  const input = $("join-cmd");
+  try {
+    await navigator.clipboard.writeText(input.value);
+    $("btn-copy").textContent = "已复制 ✓";
+    setTimeout(() => $("btn-copy").textContent = "复制", 2000);
+  } catch (_) {
+    // http 内网 clipboard 不可用 → 降级为全选手动复制
+    input.focus(); input.select();
+    $("copy-fallback").classList.remove("hidden");
+  }
+});
+$("btn-join-top").addEventListener("click", openJoin);
+
+/* ---------- refresh orchestration ---------- */
+function stampRefresh(failed) {
+  const t = new Date();
+  const hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0"), ss = String(t.getSeconds()).padStart(2, "0");
+  $("refreshed-at").textContent = failed
+    ? hh + ":" + mm + " 刷新失败，下次自动重试"
+    : hh + ":" + mm + ":" + ss + " 已刷新";
+  $("refreshed-at").style.color = failed ? "var(--ink-dim)" : "";
+}
+
+async function refresh() {
+  try {
+    const status = await api("/api/status");
+    showWorkspace();
+    app.report = status.report;
+    $("sec-adapters").classList.remove("hidden");
+    renderHero();
+    renderAdapters();
+    stampRefresh(false);
+  } catch (e) {
+    if (e.status === 401) {
+      showGate("login", "会话已过期，请重新登录");
+      return;
+    }
+    showWorkspace();
+    if (e.code === "not-initialized") {
+      app.report = null;
+      const hero = $("hero"); clear(hero); hero.classList.remove("warn");
+      const concl = el("p", "conclusion"); concl.append(el("span", "dot off"), document.createTextNode("尚未初始化"));
+      hero.append(concl, el("p", "numbers", "homer 还没在这台机器上初始化"));
+      const note = el("div", "hero-note info");
+      note.append(el("div", null, "在终端运行："));
+      note.append(el("div", "mono", "$ homer init"));
+      note.append(el("div", "small muted", "完成后回到这里点右上角「刷新」。"));
+      hero.append(note);
+      clear($("adapter-list")); $("sec-adapters").classList.add("hidden");
+    } else {
+      // 其他失败：保留旧数据（若有），页级提示 + footer 变灰
+      if (!app.report) renderHeroError(e.message);
+      else { renderHero(); renderAdapters(); }
+    }
+    stampRefresh(true);
+  }
+  await loadAgents();
+}
+function renderHeroError(msg) {
+  const hero = $("hero"); clear(hero); hero.classList.remove("warn"); hero.classList.add("warn");
+  const concl = el("p", "conclusion");
+  concl.append(el("span", "dot conflict"), document.createTextNode("状态加载失败"));
+  hero.append(concl, el("p", "numbers", msg));
+  const retry = el("button", null, "重试");
+  retry.type = "button"; retry.addEventListener("click", refresh);
+  hero.append(retry);
+}
+
+/* ---------- auth forms ---------- */
+$("form-setup").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const pw = $("in-setup-pw").value, pw2 = $("in-setup-pw2").value;
+  const err = $("err-setup"); err.textContent = "";
+  $("in-setup-pw").removeAttribute("aria-invalid"); $("in-setup-pw2").removeAttribute("aria-invalid");
+  if (pw !== pw2) {
+    err.textContent = "两次输入不一致";
+    $("in-setup-pw2").setAttribute("aria-invalid", "true"); $("in-setup-pw2").focus();
+    return;
+  }
+  const btn = $("btn-setup"); btn.disabled = true; btn.textContent = "保存中…";
+  try {
+    const body = { password: pw };
+    const code = $("in-setup-code").value.trim();
+    if (code) body.setupCode = code;
+    await api("/api/auth/setup", { method: "POST", body });
+    toast("密码已设置");
+    await refresh();
+  } catch (e) {
+    err.textContent = e.message;
+    if (e.code === "setup-code-required") $("row-setup-code").classList.remove("hidden");
+  } finally { btn.disabled = false; btn.textContent = "保存并进入"; }
+});
+$("form-login").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const err = $("err-login"); err.textContent = "";
+  const btn = $("btn-login"); btn.disabled = true; btn.textContent = "登录中…";
+  try {
+    await api("/api/auth/login", { method: "POST", body: { password: $("in-login-pw").value } });
+    $("in-login-pw").value = "";
+    toast("已登录");
+    await refresh();
+  } catch (e) {
+    err.textContent = e.message;
+    $("in-login-pw").setAttribute("aria-invalid", "true");
+    $("in-login-pw").focus();
+  } finally { btn.disabled = false; btn.textContent = "登录"; }
+});
+$("btn-logout").addEventListener("click", async () => {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
+  app.report = null; app.openDiffs.clear(); app._adaptersTouched = false;
+  showGate("login");
+});
+$("btn-refresh").addEventListener("click", refresh);
+
+/* ---------- boot ---------- */
+async function boot() {
+  try {
+    const gate = await api("/api/auth/status");
+    if (!gate.configured) {
+      showGate("setup");
+      $("row-setup-code").classList.toggle("hidden", !gate.setupCodeRequired);
+      return;
+    }
+  } catch (e) {
+    showGate("login", "无法连接服务：" + e.message);
+    return;
+  }
+  // configured: probe with a status call — 401 routes to login, success
+  // renders the workspace directly (no separate "authed" flag on the server).
+  await refresh();
+}
+boot();
+
+/* ---------- auto refresh (30s, pauses when hidden) ---------- */
+setInterval(() => { if (!document.hidden) refresh(); }, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
 </body>
 </html>
