@@ -762,9 +762,9 @@ async function openMachineView(a) {
   body.append(el("div", "muted small", "正在向这台机器实时查询…"));
   dlg.showModal();
   try {
-    const d = await api("/api/agents/" + encodeURIComponent(a.agentId) + "/status");
+    const d = await api("/api/agents/" + encodeURIComponent(a.agentId) + "/status", { method: "POST" });
     clear(body);
-    const adapters = d.adapters || [];
+    const adapters = (d && d.report && d.report.adapters) || d.adapters || [];
     if (!adapters.length) {
       body.append(el("div", "muted", "这台机器还没有可报告的配置（新机器等下发后会有内容）"));
       return;
