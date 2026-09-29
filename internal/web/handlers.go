@@ -201,6 +201,11 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveIndex(w http.ResponseWriter) {
+	// The console is a single embedded HTML file deployed with the
+	// binary. Without an explicit no-store browsers (and any proxy in
+	// front, e.g. Cloudflare) heuristic-cache it — the user sees the
+	// PREVIOUS console after a deploy and files a ghost bug.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(staticIndex)
