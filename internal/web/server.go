@@ -99,6 +99,10 @@ type ServeOptions struct {
 	Identity      *AgentIdentity
 	Agents        AgentsSource
 	AgentEndpoint http.Handler
+	// AgentEndpointAuthorized mirrors the agent API's machine-credential
+	// check (per-agent secrets) for the web layer's /agent/v1/* gate.
+	// When nil the endpoint's own authorized() still applies inside.
+	AgentEndpointAuthorized func(r *http.Request) bool
 	// Enrollment is the shared Tailscale-style enrollment manager: the
 	// console mints one-time codes and revokes per-agent secrets through
 	// it. Declared as an interface to keep the web package free of the

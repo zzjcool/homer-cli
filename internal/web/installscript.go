@@ -72,10 +72,23 @@ else
   echo "   （需要 Go 1.22+；token 已写入 $HOMER_HOME/keys/hub-token）"
 fi
 
-# 4. 零参数接入（token 从文件、hub 地址从脚本尾部参数）
-exec "$BIN_DIR/homer" agent --connect "$HUB" 2>/dev/null || \
-  exec homer agent --connect "$HUB" 2>/dev/null || \
-  echo ">> homer agent 未在 PATH，token 已保存；装好后运行: homer agent --connect $HUB"
+# 4. 零参数接入（token 从文件、hub 地址从脚本尾部参数）。
+#    agent 是常驻 daemon——放后台跑（nohup），终端立刻归还给用户。
+#    前台 exec 会占住 ssh 会话：用户以为卡住、Ctrl+C、agent 死、
+#    机器列表停在"等待首次心跳"。
+AGENT_BIN=""
+if [ -x "$BIN_DIR/homer" ]; then AGENT_BIN="$BIN_DIR/homer"; fi
+if [ -z "$AGENT_BIN" ] && command -v homer >/dev/null 2>&1; then AGENT_BIN="$(command -v homer)"; fi
+if [ -n "$AGENT_BIN" ]; then
+  LOG="$HOMER_HOME/agent.log"
+  nohup "$AGENT_BIN" agent --connect "$HUB" >>"$LOG" 2>&1 &
+  echo ">> agent 已在后台启动（日志: $LOG，PID: $!）"
+  echo ">> 几秒后刷新控制台，这台机器会出现在机器列表。"
+  echo ">> 停止: pkill -f 'homer agent'；重启: nohup $AGENT_BIN agent --connect $HUB >>$LOG 2>&1 &"
+else
+  echo ">> homer agent 未在 PATH，token 已保存；装好后运行:"
+  echo ">>   nohup homer agent --connect $HUB >>$HOMER_HOME/agent.log 2>&1 &"
+fi
 `
 
 // RenderInstallScript produces the bootstrap shell script for a hub at

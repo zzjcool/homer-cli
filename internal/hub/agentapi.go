@@ -77,6 +77,12 @@ func (a *AgentAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Authorized is the exported machine-credential check the web layer
+// consults for its /agent/v1/* gate: per-agent enrollment secrets (the
+// normal path) or the management hub token (migration window for
+// agents that predate per-agent credentials).
+func (a *AgentAPI) Authorized(r *http.Request) bool { return a.authorized(r) }
+
 // authorized accepts either a per-agent enrollment secret (the normal
 // path) or the management hub token (migration window for agents that
 // predate per-agent credentials).

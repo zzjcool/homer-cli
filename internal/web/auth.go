@@ -53,8 +53,9 @@ func (s *Server) authorized(r *http.Request) bool {
 		return true
 	}
 	// A live one-time enrollment code authorizes the binary download
-	// (a fresh machine has nothing else — the code is checked, never
-	// burned here; redemption stays one-shot at /agent/v1/enroll).
+	// (a fresh machine has nothing else). The code is only CHECKED
+	// here, never burned — redemption stays strictly one-shot at
+	// /agent/v1/enroll.
 	if s.opts.Enrollment != nil && s.opts.Enrollment.ValidCode(provided) {
 		return true
 	}

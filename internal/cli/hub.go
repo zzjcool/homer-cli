@@ -67,13 +67,15 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	registry := hub.NewRegistry()
 	dispatcher := hub.NewDispatcher(registry, token)
 	enrollment := hub.NewEnrollmentManager()
+	agentAPI := hub.NewAgentAPI(registry, token).SetEnrollment(enrollment)
 	server, err := web.NewServer(web.ServeOptions{
-		Addr:          boundAddr,
-		HomerHome:     options.Home,
-		Token:         token,
-		Agents:        dispatcher,
-		AgentEndpoint: hub.NewAgentAPI(registry, token).SetEnrollment(enrollment),
-		Enrollment:    enrollment,
+		Addr:                    boundAddr,
+		HomerHome:               options.Home,
+		Token:                   token,
+		Agents:                  dispatcher,
+		AgentEndpoint:           agentAPI,
+		Enrollment:              enrollment,
+		AgentEndpointAuthorized: agentAPI.Authorized,
 	})
 	if err != nil {
 		_ = listener.Close()

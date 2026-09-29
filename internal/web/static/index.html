@@ -421,8 +421,12 @@ function renderAgents(agents, disabledFeature) {
     // 该机器相对存储的漂移（它自己每次心跳上报）
     if (a.drift) {
       const d = a.drift;
-      if (d.error) line.append(el("span", "small muted", "状态上报失败"));
-      else if (d.push + d.pull + d.conflicts > 0) {
+      if (d.error && d.error.indexOf("homer") >= 0 && d.error.indexOf("init") >= 0) {
+        // 全新机器还没有自己的配置——不是故障，是等待第一次下发
+        line.append(el("span", "counts c-clean", "新机器 · 等待下发"));
+      } else if (d.error) {
+        line.append(el("span", "small muted", "状态上报失败"));
+      } else if (d.push + d.pull + d.conflicts > 0) {
         line.append(el("span", "counts " + (d.conflicts ? "c-conflict" : "c-drift"), fmtDrift(d)));
       } else {
         line.append(el("span", "counts c-clean", "已对齐"));
@@ -705,6 +709,9 @@ $("btn-copy").addEventListener("click", async () => {
   }
 });
 $("btn-join-top").addEventListener("click", openJoin);
+// 「完成」：关闭对话框并立即刷新——新机器此刻应该已经出现在列表里
+// （若 agent 还在安装/启动，几秒后 30s 轮询也会补上）。
+$("dlg-join").addEventListener("close", () => { refresh(); });
 
 /* ---------- refresh orchestration ---------- */
 function stampRefresh(failed) {

@@ -69,10 +69,20 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveSelfBinary(w, r)
 		return
 	}
-	if strings.HasPrefix(path, "/api/") || path == "/api" || (strings.HasPrefix(path, "/agent/") && path != "/agent/v1/enroll") {
-		// /agent/v1/enroll carries its own one-time-code credential —
-		// the whole point is that the machine has nothing else yet.
+	if strings.HasPrefix(path, "/api/") || path == "/api" {
 		if !s.requireAuth(w, r) {
+			return
+		}
+	}
+	if strings.HasPrefix(path, "/agent/") {
+		// /agent/v1/* carries machine credentials, not human ones: the
+		// per-agent enrollment secret (or the one-time enroll code for
+		// /agent/v1/enroll). The web layer's requireAuth only knows
+		// cookies, the hub token, and enrollment codes — it must NOT gate
+		// the machine endpoints; the agent API's own authorized() is the
+		// authority there (it validates per-agent secrets).
+		if path != "/agent/v1/enroll" && s.opts.AgentEndpoint != nil && !s.agentEndpointAuthorized(r) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "未授权：请提供有效的 Bearer token", nil)
 			return
 		}
 	}
@@ -326,6 +336,16 @@ func (s *Server) handleAgentEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.opts.AgentEndpoint.ServeHTTP(w, r)
+}
+
+// agentEndpointAuthorized consults the machine-credential authority for
+// /agent/v1/* requests at the web gate (per-agent secrets live in the
+// agent API, not in the web auth store).
+func (s *Server) agentEndpointAuthorized(r *http.Request) bool {
+	if s.opts.AgentEndpointAuthorized == nil {
+		return true // no separate authority: the endpoint's own check applies
+	}
+	return s.opts.AgentEndpointAuthorized(r)
 }
 
 func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
