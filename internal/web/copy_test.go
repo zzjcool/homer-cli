@@ -30,6 +30,9 @@ func TestConsoleUserCopy(t *testing.T) {
 		"收取", "下发", "确认收取", "确认下发", "/api/sync?",
 		"以这台机器为准", "以中心为准", "/api/resolve?",
 		"/api/console",
+		// 配置查看（存储视角 / 机器视角）
+		"查看存储内容", "服务器存储 · 当前内容", "/api/storage",
+		"正在向这台机器实时查询", "未收取", "待下发",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)

@@ -458,3 +458,98 @@ func (t testEnrollmentService) Revoke(agentID string) bool { return false }
 func (t testEnrollmentService) ValidCode(code string) bool {
 	return code == "hr_test-code"
 }
+
+// Storage view: the console must show what the server HOLDS, not just
+// generation numbers — adapters/categories/files with sizes.
+func TestStorageListing(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	// publish a generation through the upload endpoint
+	store := map[string]map[string]string{
+		"pi": {"settings/settings.json": "{\"theme\":\"dark\"}"},
+	}
+	body, _ := json.Marshal(snapshotPayload{Store: store, HomerJSON: "{}"})
+	request := httptest.NewRequest(http.MethodPost, "/api/snapshot", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload = %d", recorder.Code)
+	}
+
+	// listing
+	request = httptest.NewRequest(http.MethodGet, "/api/storage", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("storage listing = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var listing struct {
+		Generation int `json:"generation"`
+		Adapters   []struct {
+			ID         string `json:"id"`
+			Categories []struct {
+				Name  string `json:"name"`
+				Files []struct {
+					Path string `json:"path"`
+					Size int    `json:"size"`
+				} `json:"files"`
+			} `json:"categories"`
+		} `json:"adapters"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing.Generation != 1 {
+		t.Fatalf("generation = %d want 1", listing.Generation)
+	}
+	if len(listing.Adapters) != 1 || listing.Adapters[0].ID != "pi" {
+		t.Fatalf("adapters = %+v", listing.Adapters)
+	}
+	if len(listing.Adapters[0].Categories) != 1 || len(listing.Adapters[0].Categories[0].Files) != 1 {
+		t.Fatalf("categories/files = %+v", listing.Adapters[0].Categories)
+	}
+	if listing.Adapters[0].Categories[0].Files[0].Path != "settings/settings.json" {
+		t.Fatalf("file path = %q", listing.Adapters[0].Categories[0].Files[0].Path)
+	}
+}
+
+// Storage file content: click a file in the drawer → see what the
+// server actually holds.
+func TestStorageFileContent(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	store := map[string]map[string]string{
+		"pi": {"settings/settings.json": "{\"theme\":\"dark\"}"},
+	}
+	body, _ := json.Marshal(snapshotPayload{Store: store, HomerJSON: "{}"})
+	request := httptest.NewRequest(http.MethodPost, "/api/snapshot", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload = %d", recorder.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/storage/file?adapter=pi&path=settings/settings.json", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("file content = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Content != "{\"theme\":\"dark\"}" {
+		t.Fatalf("content = %q", payload.Content)
+	}
+}

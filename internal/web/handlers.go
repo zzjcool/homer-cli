@@ -163,6 +163,20 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAgentRevoke(w, r)
+	case path == "/api/storage":
+		// Storage view: what the server currently HOLDS (generation
+		// content listing for the console's storage drawer).
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleStorageListing(w, r)
+	case path == "/api/storage/file":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleStorageFile(w, r)
 	case path == "/api/agents/remove":
 		// Machine removal: drops the registry entry entirely (vs revoke
 		// which only kills the credential and keeps the row for audit).

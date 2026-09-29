@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -561,4 +562,114 @@ func (s *Server) handleConsole(w http.ResponseWriter, _ *http.Request) {
 		Generation int           `json:"generation"`
 		Machines   []machineView `json:"machines"`
 	}{true, published, generation, machines})
+}
+
+// handleStorageListing answers "what does the server hold right now":
+// the current generation's adapters/categories/files with sizes, for
+// the console's storage drawer.
+func (s *Server) handleStorageListing(w http.ResponseWriter, r *http.Request) {
+	head, ok := gens.New(s.opts.HomerHome).Read()
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"generation": 0, "adapters": []any{}})
+		return
+	}
+	type fileEntry struct {
+		Path string `json:"path"`
+		Size int    `json:"size"`
+	}
+	type categoryEntry struct {
+		Name  string      `json:"name"`
+		Files []fileEntry `json:"files"`
+	}
+	type adapterEntry struct {
+		ID         string          `json:"id"`
+		Categories []categoryEntry `json:"categories"`
+	}
+	adapters := map[string]*adapterEntry{}
+	categories := map[string]map[string]*categoryEntry{}
+	// store layout: <adapter>/<category>/<relpath>
+	root := head.StoreDir
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		parts := strings.SplitN(filepath.ToSlash(rel), "/", 3)
+		if len(parts) != 3 {
+			return nil
+		}
+		adapterID, category, fileRel := parts[0], parts[1], parts[2]
+		if adapters[adapterID] == nil {
+			adapters[adapterID] = &adapterEntry{ID: adapterID}
+			categories[adapterID] = map[string]*categoryEntry{}
+		}
+		if categories[adapterID][category] == nil {
+			categories[adapterID][category] = &categoryEntry{Name: category, Files: []fileEntry{}}
+		}
+		info, statErr := entry.Info()
+		size := 0
+		if statErr == nil {
+			size = int(info.Size())
+		}
+		categories[adapterID][category].Files = append(categories[adapterID][category].Files, fileEntry{Path: category + "/" + fileRel, Size: size})
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "storage-read", "读取存储内容失败: "+err.Error(), nil)
+		return
+	}
+	// deterministic order
+	ids := make([]string, 0, len(adapters))
+	for id := range adapters {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]adapterEntry, 0, len(ids))
+	for _, id := range ids {
+		adapter := adapters[id]
+		catNames := make([]string, 0, len(categories[id]))
+		for name := range categories[id] {
+			catNames = append(catNames, name)
+		}
+		sort.Strings(catNames)
+		adapter.Categories = make([]categoryEntry, 0, len(catNames))
+		for _, name := range catNames {
+			adapter.Categories = append(adapter.Categories, *categories[id][name])
+		}
+		out = append(out, *adapter)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"generation": head.Generation, "adapters": out})
+}
+
+// handleStorageFile streams one stored file's content for the drawer's
+// file preview.
+func (s *Server) handleStorageFile(w http.ResponseWriter, r *http.Request) {
+	adapterID := strings.TrimSpace(r.URL.Query().Get("adapter"))
+	filePath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if adapterID == "" || filePath == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "adapter 与 path 不能为空", nil)
+		return
+	}
+	head, ok := gens.New(s.opts.HomerHome).Read()
+	if !ok {
+		writeError(w, http.StatusNotFound, "not-found", "服务器还没有存储内容", nil)
+		return
+	}
+	// path arrives as "<category>/<relpath>"; the store layout nests the
+	// adapter at the top. Refuse traversal before joining.
+	cleaned := filepath.Clean("/" + filePath)
+	if strings.Contains(cleaned, "..") {
+		writeError(w, http.StatusBadRequest, "bad-request", "非法路径", nil)
+		return
+	}
+	full := filepath.Join(head.StoreDir, adapterID, cleaned)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not-found", "文件不存在: "+filePath, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": string(data)})
 }

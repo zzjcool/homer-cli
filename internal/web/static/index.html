@@ -90,6 +90,15 @@ button.small-btn { min-height: 32px; padding: 0 10px; font-size: var(--fs-small)
 button.danger-btn { color: var(--danger); border-color: var(--danger); }
 button.danger-btn:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 
+.view-body { max-width: 720px; max-height: 65vh; overflow: auto; }
+.view-adapter { margin: 10px 0 4px; font-weight: 650; }
+.view-cat { margin: 4px 0 2px 10px; color: var(--ink-dim); display: flex; gap: 8px; align-items: baseline; }
+.view-file { margin: 0 0 0 24px; padding: 2px 0; display: flex; gap: 8px; align-items: baseline; }
+.view-file button { background: none; border: none; color: var(--ink); text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
+.view-file .size { color: var(--ink-dim); font-size: var(--fs-small); }
+.view-counts { font-size: var(--fs-small); }
+.view-content { margin: 8px 0 8px 24px; padding: 10px; background: var(--bg-sink); border-radius: 4px;
+  white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .82rem; max-height: 300px; overflow: auto; }
 /* diff drawer */
 .diff-drawer { margin: 8px 0 8px 20px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .diff-drawer pre { margin: 0; padding: 12px; background: var(--bg-sink); font-size: 12.5px;
@@ -230,6 +239,11 @@ html { scroll-behavior: smooth; }
 </dialog>
 
 <!-- ============ join dialog ============ -->
+<dialog id="dlg-view">
+  <h2 id="view-title">查看</h2>
+  <div id="view-body" class="view-body"></div>
+  <menu><button value="ok" class="primary">关闭</button></menu>
+</dialog>
 <dialog id="dlg-join">
   <h2>接入新机器</h2>
   <p class="muted small">在新机器的终端运行这条命令，接入后会出现在机器列表。</p>
@@ -382,12 +396,18 @@ function renderHero() {
     const btn = el("button", "primary", "处理改动");
     btn.type = "button";
     btn.addEventListener("click", confirmStorageSync);
-    hero.append(concl, numbers, btn);
+    const viewBtn = el("button", "small-btn", "查看存储内容");
+    viewBtn.type = "button";
+    viewBtn.addEventListener("click", openStorageView);
+    hero.append(concl, numbers, btn, viewBtn);
     return;
   }
   concl.append(el("span", "dot ok"), document.createTextNode("全部对齐"));
   numbers.textContent = "存储 第 " + c.generation + " 代 · " + all + " 台机器全部干净 · 在线 " + online + "/" + all;
-  hero.append(concl, numbers);
+  const viewBtn = el("button", "small-btn", "查看存储内容");
+  viewBtn.type = "button";
+  viewBtn.addEventListener("click", openStorageView);
+  hero.append(concl, numbers, viewBtn);
 }
 
 function renderHeroSkeleton() {
@@ -436,6 +456,14 @@ function renderAgents(agents, disabledFeature) {
     }
     line.append(el("span", "meta",
       (a.mode === "listen" ? "直连" : "主动连接") + " · " + a.lastSeen + (a.stale ? " · 离线" : "")));
+
+    // 查看：这台机器当前的配置实况（适配器/分类/漂移计数）
+    const viewBtn = el("button", "small-btn", "查看");
+    viewBtn.type = "button";
+    viewBtn.title = "查看这台机器当前的配置情况";
+    viewBtn.disabled = a.stale;
+    viewBtn.addEventListener("click", () => openMachineView(a));
+    line.append(viewBtn);
 
     // 收取：让这台机器把它的配置上传到中心存储
     const collectBtn = el("button", "small-btn", "收取");
@@ -681,6 +709,93 @@ function showAlert(title, lines, hint) {
 function clearAlert() { clear($("alert-slot")); }
 
 /* ---------- join dialog ---------- */
+/* ---------- 配置查看（存储视角 / 机器视角共用抽屉） ---------- */
+async function openStorageView() {
+  const dlg = $("dlg-view"); const body = $("view-body"); clear(body);
+  $("view-title").textContent = "服务器存储 · 当前内容";
+  body.append(el("div", "muted small", "读取中…"));
+  dlg.showModal();
+  try {
+    const d = await api("/api/storage");
+    clear(body);
+    if (!d.adapters || !d.adapters.length) {
+      body.append(el("div", "muted", "存储是空的（还没有收取过任何机器）"));
+      return;
+    }
+    const head = el("div", "muted small", "存储 第 " + d.generation + " 代 · " +
+      d.adapters.reduce((n, a) => n + a.categories.reduce((m, c) => m + c.files.length, 0), 0) + " 个文件");
+    body.append(head);
+    d.adapters.forEach(adapter => {
+      body.append(el("div", "view-adapter", adapter.id));
+      adapter.categories.forEach(cat => {
+        const line = el("div", "view-cat");
+        line.append(el("span", null, cat.name), el("span", "muted small", cat.files.length + " 个文件"));
+        body.append(line);
+        cat.files.forEach(file => {
+          const row = el("div", "view-file");
+          const nameBtn = el("button", null, file.path);
+          nameBtn.type = "button";
+          const size = el("span", "size", file.size + " B");
+          nameBtn.addEventListener("click", async () => {
+            const existing = row.nextElementSibling;
+            if (existing && existing.classList.contains("view-content")) { existing.remove(); return; }
+            try {
+              const f = await api("/api/storage/file?adapter=" + encodeURIComponent(adapter.id) + "&path=" + encodeURIComponent(file.path));
+              const box = el("div", "view-content", f.content || "(空文件)");
+              row.after(box);
+            } catch (e) { toast("读取失败：" + e.message); }
+          });
+          row.append(nameBtn, size);
+          body.append(row);
+        });
+      });
+    });
+  } catch (e) {
+    clear(body);
+    body.append(el("div", "muted", "读取存储失败：" + e.message));
+  }
+}
+
+async function openMachineView(a) {
+  const dlg = $("dlg-view"); const body = $("view-body"); clear(body);
+  $("view-title").textContent = "机器 " + (a.hostname || a.agentId) + " · 当前情况";
+  body.append(el("div", "muted small", "正在向这台机器实时查询…"));
+  dlg.showModal();
+  try {
+    const d = await api("/api/agents/" + encodeURIComponent(a.agentId) + "/status");
+    clear(body);
+    const adapters = d.adapters || [];
+    if (!adapters.length) {
+      body.append(el("div", "muted", "这台机器还没有可报告的配置（新机器等下发后会有内容）"));
+      return;
+    }
+    adapters.forEach(adapter => {
+      const line = el("div", "view-adapter");
+      line.append(document.createTextNode(adapter.id));
+      body.append(line);
+      (adapter.categories || []).forEach(cat => {
+        const row = el("div", "view-cat");
+        row.append(el("span", null, cat.name));
+        const counts = [];
+        if (cat.push) counts.push("↑" + cat.push + " 未收取");
+        if (cat.pull) counts.push("↓" + cat.pull + " 待下发");
+        if (cat.conflicts) counts.push("✗" + cat.conflicts + " 冲突");
+        const tag = counts.length
+          ? el("span", "view-counts " + (cat.conflicts ? "c-conflict" : "c-drift"), counts.join(" · "))
+          : el("span", "view-counts c-clean", "已对齐");
+        row.append(tag);
+        body.append(row);
+      });
+    });
+    const note = el("div", "muted small", "计数是这台机器相对服务器存储的漂移：↑机器有新内容未收取 · ↓存储有新内容待下发");
+    note.style.marginTop = "10px";
+    body.append(note);
+  } catch (e) {
+    clear(body);
+    body.append(el("div", "muted", "查询失败（机器可能刚离线）：" + e.message));
+  }
+}
+
 async function openJoin() {
   const dlg = $("dlg-join");
   $("copy-fallback").classList.add("hidden");
