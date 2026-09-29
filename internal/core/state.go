@@ -1,9 +1,11 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
@@ -106,8 +108,12 @@ func LoadState(paths HomerPaths) HomerState {
 	if commit, ok := object.M["lastSyncCommit"].(string); ok && strings.TrimSpace(commit) != "" {
 		state.LastSyncCommit = commit
 	}
-	if generation, ok := object.M["lastSyncGeneration"].(float64); ok && generation >= 1 {
-		state.LastSyncGeneration = int(generation)
+	// orderedjson parses numbers as json.Number (not float64) — the
+	// assertion must go through the string form.
+	if generation, ok := object.M["lastSyncGeneration"].(json.Number); ok {
+		if parsed, err := strconv.ParseFloat(generation.String(), 64); err == nil && parsed >= 1 {
+			state.LastSyncGeneration = int(parsed)
+		}
 	}
 	if at, ok := object.M["lastSyncAt"].(string); ok && strings.TrimSpace(at) != "" {
 		state.LastSyncAt = at
@@ -168,6 +174,10 @@ func stateValue(state HomerState) orderedjson.Value {
 	if state.LastSyncCommand != "" {
 		keys = append(keys, "lastSyncCommand")
 		values["lastSyncCommand"] = state.LastSyncCommand
+	}
+	if state.LastSyncGeneration > 0 {
+		keys = append(keys, "lastSyncGeneration")
+		values["lastSyncGeneration"] = orderedStateNumber(state.LastSyncGeneration)
 	}
 	if len(state.Paired) > 0 {
 		keys = append(keys, "paired")

@@ -547,13 +547,13 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 	needsBaseline := !git.isGitRepo(paths.Home) || git.headCommit(paths.Home) == "" || !git.isPushClean(paths.Home)
 	if deps != nil && deps.HubSink != nil {
 		// No-git data plane: the hub storage replaces the git history as
-		// the sync baseline. A machine that has never uploaded (state
+		// the sync baseline, so the git-state part of needsBaseline is
+		// meaningless here. A machine that has never uploaded (state
 		// carries no lastSyncGeneration) must publish even with zero
-		// local drift — that first upload IS the storage's bootstrap.
+		// local drift — that first upload IS the storage's bootstrap; a
+		// machine that has published rides on drift alone.
 		state := core.LoadState(paths)
-		if state.LastSyncGeneration == 0 {
-			needsBaseline = true
-		}
+		needsBaseline = state.LastSyncGeneration == 0
 	}
 	if len(changedFiles) == 0 && !needsBaseline {
 		if localAhead && !options.NoPush {

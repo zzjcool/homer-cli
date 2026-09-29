@@ -150,10 +150,20 @@ func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, 
 	published := ok && head.Generation > before
 	status := "synced"
 	errorsOut := []string{}
-	if !result.OK || !published {
+	if !result.OK {
 		status = "partial"
 		if !published {
 			errorsOut = append(errorsOut, name+"的内容没有存入中心（generation 未前进）。")
+		}
+	} else if !published {
+		// A machine reporting no-drift needs no new generation — the
+		// storage already IS its content. "synced" (not partial): the
+		// machine is in sync with the storage by definition.
+		if payload.Status == "no-drift" {
+			result.Status = "no-drift"
+		} else {
+			status = "partial"
+			errorsOut = append(errorsOut, name+"报告已推送，但中心 generation 未前进。")
 		}
 	}
 	writeJSON(w, reportHTTPStatus(result.OK && published, status, errorsOut), syncReport{
