@@ -64,8 +64,8 @@ var DefaultPIAdapter = core.AdapterConfig{
 		"tmp/",
 		"bin/",
 		// macOS AppleDouble metadata noise (._foo next to foo) — never
-		// configuration, never wanted in a synced tree.
-		"._*",
+		// configuration, never wanted in a synced tree. "**/" = any depth.
+		"**/._*",
 		"*.bak",
 		"*.bak-*",
 		"*.bak*",

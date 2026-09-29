@@ -58,11 +58,30 @@ func GlobMatch(candidate, pattern string) bool {
 	return globMatchExact(path, pat)
 }
 
-// MatchesIgnore reports whether any pattern matches relPath.
+// MatchesIgnore reports whether any pattern matches relPath. A pattern
+// prefixed with "**/" matches its basename at ANY depth: "**/._*" must
+// catch agents/._advisor.md — macOS AppleDouble noise rides along with
+// every copied file, at any depth. Patterns without the prefix keep the
+// frozen top-level-only glob semantics (*.log does NOT match
+// nested/pi-tui-crash.log — a deliberately frozen behavior).
 func MatchesIgnore(relPath string, patterns []string) bool {
 	for _, pattern := range patterns {
 		if GlobMatch(relPath, pattern) {
 			return true
+		}
+	}
+	for _, pattern := range patterns {
+		if !strings.HasPrefix(pattern, "**/") {
+			continue
+		}
+		base := strings.TrimPrefix(pattern, "**/")
+		if base == "" {
+			continue
+		}
+		for _, segment := range strings.Split(relPath, "/") {
+			if GlobMatch(segment, base) {
+				return true
+			}
 		}
 	}
 	return false

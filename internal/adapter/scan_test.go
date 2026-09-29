@@ -96,7 +96,7 @@ func TestFrozenDefaultAdapters(t *testing.T) {
 			"prompts":    {Paths: []string{"prompts/"}, Mode: core.SyncMode("mirror")},
 			"themes":     {Paths: []string{"themes/"}, Mode: core.SyncMode("mirror")},
 		},
-		Ignore: []string{"auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "._*", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
+		Ignore: []string{"auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "**/._*", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
 	}
 	if !reflect.DeepEqual(pi.DefaultPIAdapter, wantPI) {
 		t.Fatalf("pi defaults changed:\n got %#v\nwant %#v", pi.DefaultPIAdapter, wantPI)

@@ -65,7 +65,7 @@ func TestMatchesIgnoreAndBareGlobGuard(t *testing.T) {
 	}
 	for path, want := range cases {
 		if got := adapter.MatchesIgnore(path, patterns); got != want {
-			t.Errorf("MatchesIgnore(%q) = %v, want %v", path, got, want)
+			t.Errorf("adapter.MatchesIgnore(%q) = %v, want %v", path, got, want)
 		}
 	}
 	if adapter.MatchesIgnore("anything", nil) {
@@ -81,5 +81,31 @@ func TestMatchesIgnoreAndBareGlobGuard(t *testing.T) {
 		if adapter.IsBareGlob(pattern) {
 			t.Errorf("IsBareGlob(%q) = true, want false", pattern)
 		}
+	}
+}
+
+// "**/._*" must catch AppleDouble noise at ANY depth (the "**/" prefix
+// is the explicit any-depth opt-in; bare patterns stay top-level only).
+func TestMatchesIgnoreBasenameDepth(t *testing.T) {
+	patterns := []string{"**/._*"}
+	if !adapter.MatchesIgnore("._top", patterns) {
+		t.Fatal("top-level ._ must match")
+	}
+	if !adapter.MatchesIgnore("agents/._advisor.md", patterns) {
+		t.Fatal("nested AppleDouble must match (basename semantics)")
+	}
+	if !adapter.MatchesIgnore("a/b/c/._deep", patterns) {
+		t.Fatal("deeply nested AppleDouble must match")
+	}
+	if adapter.MatchesIgnore("agents/advisor.md", patterns) {
+		t.Fatal("regular files must not match")
+	}
+	// Slash patterns keep directory-prefix semantics only.
+	dirPatterns := []string{"sessions/"}
+	if !adapter.MatchesIgnore("sessions/x", dirPatterns) {
+		t.Fatal("directory prefix still matches")
+	}
+	if adapter.MatchesIgnore("a/sessions/x", dirPatterns) {
+		t.Fatal("slash patterns do NOT gain basename semantics")
 	}
 }
