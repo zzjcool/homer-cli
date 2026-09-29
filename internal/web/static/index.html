@@ -97,6 +97,7 @@ button.danger-btn:hover { background: var(--danger); color: #fff; border-color: 
 .view-file button { background: none; border: none; color: var(--ink); text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
 .view-file .size { color: var(--ink-dim); font-size: var(--fs-small); }
 .view-counts { font-size: var(--fs-small); }
+.view-filelist { margin: 2px 0 6px 20px; border-left: 2px solid var(--line); padding-left: 8px; }
 .view-content { margin: 8px 0 8px 24px; padding: 10px; background: var(--bg-sink); border-radius: 4px;
   white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .82rem; max-height: 300px; overflow: auto; }
 /* diff drawer */
@@ -240,19 +241,23 @@ html { scroll-behavior: smooth; }
 
 <!-- ============ join dialog ============ -->
 <dialog id="dlg-view">
-  <h2 id="view-title">查看</h2>
-  <div id="view-body" class="view-body"></div>
-  <menu><button value="ok" class="primary">关闭</button></menu>
+  <form method="dialog" style="margin:0">
+    <h2 id="view-title">查看</h2>
+    <div id="view-body" class="view-body"></div>
+    <menu><button value="ok" class="primary">关闭</button></menu>
+  </form>
 </dialog>
 <dialog id="dlg-join">
-  <h2>接入新机器</h2>
-  <p class="muted small">在新机器的终端运行这条命令，接入后会出现在机器列表。</p>
-  <div class="join-cmd">
-    <input id="join-cmd" readonly aria-label="接入命令">
-    <button id="btn-copy" type="button">复制</button>
-  </div>
-  <p class="muted small hidden" id="copy-fallback">当前环境不支持自动复制：已全选文本，请按 Ctrl+C。</p>
-  <menu><button value="ok" class="primary">完成</button></menu>
+  <form method="dialog" style="margin:0">
+    <h2>接入新机器</h2>
+    <p class="muted small">在新机器的终端运行这条命令，接入后会出现在机器列表。</p>
+    <div class="join-cmd">
+      <input id="join-cmd" readonly aria-label="接入命令">
+      <button id="btn-copy" type="button">复制</button>
+    </div>
+    <p class="muted small hidden" id="copy-fallback">当前环境不支持自动复制：已全选文本，请按 Ctrl+C。</p>
+    <menu><button value="ok" class="primary">完成</button></menu>
+  </form>
 </dialog>
 
 <script>
@@ -775,7 +780,6 @@ async function openMachineView(a) {
       body.append(line);
       (adapter.categories || []).forEach(cat => {
         const row = el("div", "view-cat");
-        row.append(el("span", null, cat.name));
         const counts = [];
         if (cat.push) counts.push("↑" + cat.push + " 未收取");
         if (cat.pull) counts.push("↓" + cat.pull + " 待下发");
@@ -783,7 +787,28 @@ async function openMachineView(a) {
         const tag = counts.length
           ? el("span", "view-counts " + (cat.conflicts ? "c-conflict" : "c-drift"), counts.join(" · "))
           : el("span", "view-counts c-clean", "已对齐");
-        row.append(tag);
+        // 分类行可点击：展开这台机器上该分类的具体文件清单
+        const files = cat.files || [];
+        const label = el("span", null, (files.length ? "▸ " : "") + cat.name);
+        label.style.cursor = files.length ? "pointer" : "default";
+        row.append(label, tag, el("span", "muted small", files.length ? files.length + " 个文件" : ""));
+        if (files.length) {
+          label.addEventListener("click", () => {
+            const existing = row.nextElementSibling;
+            if (existing && existing.classList.contains("view-filelist")) { existing.remove(); label.textContent = "▸ " + cat.name; return; }
+            label.textContent = "▾ " + cat.name;
+            const box = el("div", "view-filelist");
+            const statusText = s => s === "conflict" ? "冲突" : s === "push" ? "↑未收取" : s === "pull" ? "↓待下发" : s === "delete" ? "已删除" : "无变化";
+            files.forEach(f => {
+              const line2 = el("div", "view-file");
+              line2.append(el("span", null, f.path));
+              const st = el("span", "view-counts " + (f.status === "conflict" ? "c-conflict" : (f.status === "push" || f.status === "pull") ? "c-drift" : "muted"), statusText(f.status));
+              line2.append(st);
+              box.append(line2);
+            });
+            row.after(box);
+          });
+        }
         body.append(row);
       });
     });

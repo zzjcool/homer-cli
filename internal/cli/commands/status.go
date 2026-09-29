@@ -30,6 +30,16 @@ type StatusCategoryReport struct {
 	Push      int    `json:"push"`
 	Pull      int    `json:"pull"`
 	Conflicts int    `json:"conflicts"`
+	// Files carries the per-file view (path + status) so the console's
+	// machine drawer can list WHICH extensions/skills/settings differ —
+	// counts alone answer "how many", not "which".
+	Files []StatusFileReport `json:"files"`
+}
+
+// StatusFileReport is one file's drift state inside a category.
+type StatusFileReport struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
 }
 
 // StatusAdapterReport is the JSON/text shape for one adapter.  Its fields
@@ -289,6 +299,16 @@ func BuildStatusReport(drifts []engine.CategoryDrift, extra ...[]string) StatusR
 
 	adapterIndex := make(map[string]int)
 	for _, drift := range drifts {
+		files := make([]StatusFileReport, 0)
+		if drift.Mode == core.SyncModeMirror {
+			for _, op := range drift.Ops {
+				files = append(files, StatusFileReport{Path: op.Path, Status: op.Type})
+			}
+		} else {
+			for _, key := range drift.ChangedKeys {
+				files = append(files, StatusFileReport{Path: key, Status: "changed"})
+			}
+		}
 		index, ok := adapterIndex[drift.AdapterID]
 		if !ok {
 			index = len(report.Adapters)
@@ -307,6 +327,7 @@ func BuildStatusReport(drifts []engine.CategoryDrift, extra ...[]string) StatusR
 			Push:      drift.Push,
 			Pull:      drift.Pull,
 			Conflicts: drift.Conflicts,
+			Files:     files,
 		})
 	}
 	if len(warnings) > 0 {
