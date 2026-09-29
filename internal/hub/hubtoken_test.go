@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTokenFile(t *testing.T, dir, token string) {
@@ -103,5 +104,29 @@ func TestLanIPv4(t *testing.T) {
 	// IPv4 or error".
 	if _, err := LanIPv4(); err != nil && !strings.Contains(err.Error(), "全局 IPv4") {
 		t.Fatalf("lanIPv4 error = %v", err)
+	}
+}
+
+// An enrollment code must be able to download the binary BEFORE it is
+// redeemed — a fresh machine has nothing else. The code is checked but
+// NOT burned (download retries are legitimate; redemption stays one-shot).
+func TestEnrollCodeAuthorizesDownload(t *testing.T) {
+	manager := NewEnrollmentManager()
+	code, err := manager.Mint(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manager.ValidCode(code) {
+		t.Fatal("minted code must validate before redemption")
+	}
+	if manager.ValidCode("hr_nonexistent") {
+		t.Fatal("unknown code must not validate")
+	}
+	// Redemption still burns it exactly once.
+	if _, err := manager.Redeem(code); err != nil {
+		t.Fatal(err)
+	}
+	if manager.ValidCode(code) {
+		t.Fatal("redeemed code must no longer validate")
 	}
 }

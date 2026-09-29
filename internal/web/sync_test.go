@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/gitx"
@@ -413,4 +414,47 @@ func TestSnapshotUploadAcceptsLargePayload(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("large snapshot upload = %d body=%s", recorder.Code, recorder.Body)
 	}
+}
+
+// A one-time enrollment code must download the binary BEFORE redemption —
+// that is its whole purpose on a fresh machine. (The 401 the user hit.)
+func TestEnrollCodeDownloadsBinary(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server, err := NewServer(ServeOptions{
+		Addr:       "127.0.0.1:0",
+		HomerHome:  fixture.home,
+		Token:      "hub-token-value",
+		Enrollment: testEnrollmentService{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := server.opts.Enrollment.Mint(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// serveSelfBinary streams the test process's own executable — any
+	// readable binary satisfies the authorization assertion.
+	request := httptest.NewRequest(http.MethodGet, "/dl/homer", nil)
+	request.Header.Set("Authorization", "Bearer "+code)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enroll-code download = %d body=%s", recorder.Code, recorder.Body)
+	}
+}
+
+// testEnrollmentService is a minimal EnrollmentService for web tests
+// (web must not import hub).
+type testEnrollmentService struct {
+	code string
+}
+
+func (t testEnrollmentService) Mint(ttl time.Duration) (string, error) {
+	return "hr_test-code", nil
+}
+func (t testEnrollmentService) Revoke(agentID string) bool { return false }
+func (t testEnrollmentService) ValidCode(code string) bool {
+	return code == "hr_test-code"
 }

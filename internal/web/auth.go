@@ -39,18 +39,28 @@ func (s *Server) authorized(r *http.Request) bool {
 	if s.auth != nil && s.auth.validSession(s.opts.HomerHome, r) {
 		return true
 	}
-	if s.opts.Token == "" {
-		// Rule 6: no more implicit loopback trust. Without any credential
-		// configured the API stays locked (setup/login endpoints aside).
-		return false
-	}
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	const prefix = "Bearer "
 	if !strings.HasPrefix(value, prefix) {
 		return false
 	}
 	provided := strings.TrimSpace(strings.TrimPrefix(value, prefix))
-	return provided != "" && provided == s.opts.Token
+	if provided == "" {
+		return false
+	}
+	// The shared hub token authorizes everything.
+	if s.opts.Token != "" && provided == s.opts.Token {
+		return true
+	}
+	// A live one-time enrollment code authorizes the binary download
+	// (a fresh machine has nothing else — the code is checked, never
+	// burned here; redemption stays one-shot at /agent/v1/enroll).
+	if s.opts.Enrollment != nil && s.opts.Enrollment.ValidCode(provided) {
+		return true
+	}
+	// Rule 6: no more implicit loopback trust. Without any credential
+	// configured the API stays locked (setup/login endpoints aside).
+	return false
 }
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {

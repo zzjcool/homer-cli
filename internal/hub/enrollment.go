@@ -48,6 +48,20 @@ func (m *EnrollmentManager) Mint(ttl time.Duration) (string, error) {
 	return code, nil
 }
 
+// ValidCode reports whether a one-time enrollment code is still
+// redeemable WITHOUT burning it — the binary download on a fresh machine
+// happens before enrollment and must be retryable. Redemption
+// (Redeem) remains strictly one-shot.
+func (m *EnrollmentManager) ValidCode(code string) bool {
+	if code == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.codes[code]
+	return ok && time.Now().Before(entry.expiresAt)
+}
+
 // Redeem consumes a one-time enrollment code and returns a fresh
 // per-agent secret. The code is burned regardless of what the caller does
 // with the secret; the caller binds the secret to an agentID via

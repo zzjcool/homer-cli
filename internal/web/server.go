@@ -125,6 +125,9 @@ type SyncDepsSource interface {
 type EnrollmentService interface {
 	Mint(ttl time.Duration) (string, error)
 	Revoke(agentID string) bool
+	// ValidCode reports whether a one-time enrollment code is still
+	// redeemable without burning it (binary download on fresh machines).
+	ValidCode(code string) bool
 }
 
 // Server is the P1 HTTP server. Its handler is built once so Handler can be
