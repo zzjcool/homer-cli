@@ -89,6 +89,9 @@ type Daemon struct {
 	driftMu     sync.Mutex
 	lastDrift   *hub.AgentDrift
 	lastDriftAt time.Time
+	// retries logs one line per failing key per minute — the silent-401
+	// lesson: a doomed retry loop must be visible in the log, never spam.
+	retries *retryLogger
 }
 
 func New(cfg Config, exec Executor) *Daemon {
@@ -111,7 +114,7 @@ func New(cfg Config, exec Executor) *Daemon {
 	if exec == nil {
 		exec = NewLocalExecutor(cfg.HomerHome)
 	}
-	return &Daemon{cfg: cfg, exec: exec}
+	return &Daemon{cfg: cfg, exec: exec, retries: newRetryLogger(time.Minute)}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -266,7 +269,10 @@ func (d *Daemon) runConnect(ctx context.Context) error {
 				continue
 			}
 			// A transient hub/network error should not terminate a long-running
-			// daemon. Keep the retry bounded by PollInterval.
+			// daemon. Keep the retry bounded by PollInterval — but never
+			// silently: the silent-401 lesson says a doomed loop must be
+			// visible in the log (one line per minute).
+			d.retries.log("poll-failed", "poll 失败（重试中）: "+err.Error())
 			if !sleepContext(ctx, d.cfg.PollInterval) {
 				return nil
 			}
@@ -350,6 +356,8 @@ func (d *Daemon) registerWithRetry(ctx context.Context, mode hub.AgentMode, host
 		}
 		if err := d.register(ctx, mode, hostname); err == nil {
 			return nil
+		} else {
+			d.retries.log("register-failed", "注册失败（重试中）: "+err.Error())
 		}
 		if !sleepContext(ctx, backoff) {
 			return ctx.Err()
@@ -700,4 +708,32 @@ func localHostname() string {
 		return "localhost"
 	}
 	return hostname
+}
+
+// retryLogger throttles repeated failure logs: one line per key per
+// window. The lesson from the silent 401 death loop — an agent retrying
+// a doomed poll forever must SAY so in its log, but never spam it.
+type retryLogger struct {
+	mu     sync.Mutex
+	window time.Duration
+	at     map[string]time.Time
+}
+
+func newRetryLogger(window time.Duration) *retryLogger {
+	return &retryLogger{window: window, at: map[string]time.Time{}}
+}
+
+// log reports whether the line was emitted (true) or suppressed by the
+// window (false).
+func (l *retryLogger) log(key, line string) bool {
+	now := time.Now()
+	l.mu.Lock()
+	if last, ok := l.at[key]; ok && now.Sub(last) < l.window {
+		l.mu.Unlock()
+		return false
+	}
+	l.at[key] = now
+	l.mu.Unlock()
+	fmt.Fprintf(os.Stderr, "homer agent: %s\n", line)
+	return true
 }
