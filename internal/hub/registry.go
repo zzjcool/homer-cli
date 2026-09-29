@@ -16,6 +16,19 @@ type AgentInfo struct {
 	LastSeen time.Time `json:"lastSeen"`
 	Version  string    `json:"version,omitempty"`
 	Stale    bool      `json:"stale"`
+	// Drift is the machine's last self-reported status summary relative
+	// to the storage it last synced with (uploaded with each poll).
+	Drift *AgentDrift `json:"drift,omitempty"`
+}
+
+// AgentDrift is the per-machine status summary the console renders in the
+// machine list: counts of local-only changes, center-only changes, and
+// three-way conflicts.
+type AgentDrift struct {
+	Push      int    `json:"push"`
+	Pull      int    `json:"pull"`
+	Conflicts int    `json:"conflicts"`
+	Error     string `json:"error,omitempty"`
 }
 
 type Registry struct {
@@ -78,6 +91,17 @@ func (r *Registry) Register(info AgentInfo) error {
 		notify: make(chan struct{}),
 	}
 	return nil
+}
+
+// UpdateDrift caches a machine's self-reported status summary.
+func (r *Registry) UpdateDrift(agentID string, drift AgentDrift) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, ok := r.agents[agentID]
+	if !ok {
+		return
+	}
+	agent.info.Drift = &drift
 }
 
 func (r *Registry) Touch(agentID string) {

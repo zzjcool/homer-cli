@@ -36,6 +36,17 @@ type AgentInfo struct {
 	// Stale is true when the hub has not heard from the agent for longer
 	// than hub.AgentStaleAfter; the UI renders it as an offline status dot.
 	Stale bool `json:"stale"`
+	// Drift is the machine's last self-reported status summary (uploaded
+	// with each poll): counts relative to the storage it last synced with.
+	Drift *AgentDrift `json:"drift,omitempty"`
+}
+
+// AgentDrift is the per-machine status summary the console renders.
+type AgentDrift struct {
+	Push      int    `json:"push"`
+	Pull      int    `json:"pull"`
+	Conflicts int    `json:"conflicts"`
+	Error     string `json:"error,omitempty"`
 }
 
 type DiffParams struct {

@@ -541,6 +541,16 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 	// non-git ~/.homer. An unborn repository and an existing repository with an
 	// uncommitted configuration-center path use the same baseline path.
 	needsBaseline := !git.isGitRepo(paths.Home) || git.headCommit(paths.Home) == "" || !git.isPushClean(paths.Home)
+	if deps != nil && deps.HubSink != nil {
+		// No-git data plane: the hub storage replaces the git history as
+		// the sync baseline. A machine that has never uploaded (state
+		// carries no lastSyncGeneration) must publish even with zero
+		// local drift — that first upload IS the storage's bootstrap.
+		state := core.LoadState(paths)
+		if state.LastSyncGeneration == 0 {
+			needsBaseline = true
+		}
+	}
 	if len(changedFiles) == 0 && !needsBaseline {
 		if localAhead && !options.NoPush {
 			if retry, ok := retryPush(paths.Home, git, warnings); ok {

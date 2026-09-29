@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -39,6 +40,12 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			OK: false, Status: "aborted", Choice: choice,
 			Agents: []agentApplyResult{}, Errors: []string{msgNotConfirmed},
 		})
+		return
+	}
+	// Pure-server semantics: with ?agent= given the choice executes on
+	// THAT machine — the server relays, never merges locally.
+	if agentID := r.URL.Query().Get("agent"); agentID != "" {
+		s.resolveOnMachine(w, r, resolveChoice(choice), agentID)
 		return
 	}
 	writeMutex.Lock()
@@ -127,4 +134,69 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			Agents: results, Errors: []string{},
 		})
 	}
+}
+
+// resolveOnMachine relays a conflict resolution to the machine that owns
+// the conflict. "local" asks the machine to run its resolution (the
+// machine's executor pushes the resolved content into the storage, then
+// the server fans the new generation out to the other online machines);
+// "center" asks it to apply the storage's current generation.
+func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice resolveChoice, agentID string) {
+	if s.opts.Agents == nil {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
+		return
+	}
+	name := agentID
+	for _, info := range s.opts.Agents.ListAgents() {
+		if info.AgentID == agentID && info.Hostname != "" {
+			name = info.Hostname
+		}
+	}
+	// "local" lets the machine resolve and publish (its executor's push
+	// path applies the local-wins merge and uploads the result);
+	// "center" has it apply the storage's current generation.
+	var raw json.RawMessage
+	var err error
+	if choice == resolveLocal {
+		raw, err = s.opts.Agents.AgentPush(r.Context(), agentID, true)
+	} else {
+		raw, err = s.opts.Agents.AgentPull(r.Context(), agentID, true)
+	}
+	if err != nil {
+		writeErrorValue(w, err)
+		return
+	}
+	result := agentApplyResult{AgentID: agentID, Hostname: name, OK: true}
+	var payload struct {
+		OK     bool   `json:"ok"`
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || !payload.OK {
+		result.OK = false
+		result.Status = payload.Status
+		result.Error = name + "没有应用这次裁决。"
+	}
+	agents := []agentApplyResult{result}
+	if result.OK && choice == resolveLocal {
+		// The machine published a new generation — deliver it to everyone
+		// else who is online.
+		for _, applied := range fanoutPullOnlineAgents(r.Context(), s.opts.Agents) {
+			if applied.AgentID != agentID {
+				agents = append(agents, applied)
+			}
+		}
+	}
+	status := "resolved"
+	errorsOut := []string{}
+	if !result.OK {
+		status = "partial"
+		errorsOut = append(errorsOut, result.Error)
+	}
+	writeJSON(w, reportHTTPStatus(result.OK, status, errorsOut), resolveReport{
+		OK:     result.OK,
+		Status: status,
+		Choice: string(choice),
+		Agents: agents,
+		Errors: errorsOut,
+	})
 }

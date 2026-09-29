@@ -207,7 +207,19 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 			}
 		}
 	}
-	body, err := json.Marshal(hubSnapshotPayload{Store: store})
+	// homer.json rides along: an empty machine bootstraps its config from
+	// the generation's meta on first pull.
+	meta := []byte("{}")
+	paths := core.GetHomerPaths(func(key string) string {
+		if key == "HOMER_HOME" {
+			return e.homerHome
+		}
+		return os.Getenv(key)
+	})
+	if data, err := os.ReadFile(paths.ConfigFile); err == nil {
+		meta = data
+	}
+	body, err := json.Marshal(hubSnapshotPayload{Store: store, HomerJSON: string(meta)})
 	if err != nil {
 		return err
 	}

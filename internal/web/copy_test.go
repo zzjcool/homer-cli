@@ -15,19 +15,21 @@ func TestConsoleUserCopy(t *testing.T) {
 		"可推送", "可拉取", "确认推送", "确认拉取",
 		"allow-secrets", "commit", "bare", "仓库",
 		"/api/push", "/api/pull", "查看状态", "查看差异", "处理漂移", "推送", "拉取",
+		"同步到其他机器", "从中心同步", "以本机为准", "这台机器的改动",
 	} {
 		if strings.Contains(html, banned) {
 			t.Fatalf("console copy contains git word %q — the console must speak in sync vocabulary", banned)
 		}
 	}
 	for _, required := range []string{
-		"项本机改动", "项中心改动", "项冲突",
-		"还没选择要同步的目录",
+		"项未收取", "项待下发", "项冲突",
+		"中心还没有任何内容",
 		"有冲突，需要选择保留哪一边",
 		"有尚未同步的改动",
-		"都已对齐",
-		"同步到其他机器", "从中心同步", "确认同步", "/api/sync?",
-		"以本机为准", "以中心为准", "/api/resolve?",
+		"全部对齐",
+		"收取", "下发", "确认收取", "确认下发", "/api/sync?",
+		"以这台机器为准", "以中心为准", "/api/resolve?",
+		"/api/console",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)

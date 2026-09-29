@@ -26,6 +26,8 @@ type syncDirection string
 const (
 	syncToOthers   syncDirection = "to-others"
 	syncFromCenter syncDirection = "from-center"
+	syncCollect    syncDirection = "collect"
+	syncDispatch   syncDirection = "dispatch"
 )
 
 // agentApplyResult is one machine's fan-out outcome. Error carries only
@@ -62,11 +64,28 @@ const (
 	msgAgentTimeout     = "响应超时，这次没能更新它。"
 )
 
-// handleSync backs POST /api/sync?direction=to-others|from-center&confirm=true.
+// handleSync backs POST /api/sync. The pure-server directions:
+//
+//	collect  — one machine uploads its content into the storage
+//	           (query: agent=<agentId>; the hub runs no local push)
+//	dispatch — every online machine applies the storage's current
+//	           generation (offline machines are skipped)
+//
+// The legacy to-others/from-center pair (the hub acting as a machine)
+// remains accepted during the transition.
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	direction := r.URL.Query().Get("direction")
-	if direction != string(syncToOthers) && direction != string(syncFromCenter) {
-		writeError(w, http.StatusBadRequest, "bad-request", "direction 必须是 to-others 或 from-center", nil)
+	switch syncDirection(direction) {
+	case syncCollect:
+		s.syncCollectFromMachine(w, r, confirmValue(r))
+		return
+	case syncDispatch:
+		s.syncDispatchToMachines(w, r, confirmValue(r))
+		return
+	case syncToOthers, syncFromCenter:
+		// legacy machine-coupled semantics
+	default:
+		writeError(w, http.StatusBadRequest, "bad-request", "direction 必须是 collect、dispatch、to-others 或 from-center", nil)
 		return
 	}
 	confirmed := confirmValue(r)
@@ -77,6 +96,109 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.syncToOthers(w, r, confirmed)
+}
+
+// syncCollectFromMachine asks one machine to push into the storage. The
+// machine's own executor uploads the snapshot (its HubSink); the hub
+// side only verifies a generation actually landed.
+func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, confirmed bool) {
+	agentID := r.URL.Query().Get("agent")
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "缺少 agent 参数（要收取哪台机器）", nil)
+		return
+	}
+	if !confirmed {
+		writeJSON(w, http.StatusConflict, syncReport{
+			OK: false, Status: "aborted", Direction: string(syncCollect),
+			Agents: []agentApplyResult{}, Errors: []string{msgNotConfirmed},
+		})
+		return
+	}
+	if s.opts.Agents == nil {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
+		return
+	}
+	before := 0
+	if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
+		before = head.Generation
+	}
+	raw, err := s.opts.Agents.AgentPush(r.Context(), agentID, true)
+	if err != nil {
+		writeErrorValue(w, err)
+		return
+	}
+	name := agentID
+	for _, info := range s.opts.Agents.ListAgents() {
+		if info.AgentID == agentID {
+			if info.Hostname != "" {
+				name = info.Hostname
+			}
+		}
+	}
+	result := agentApplyResult{AgentID: agentID, Hostname: name, OK: true}
+	var payload struct {
+		OK     bool   `json:"ok"`
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || !payload.OK {
+		result.OK = false
+		result.Status = payload.Status
+		result.Error = name + msgAgentNotApplied
+	}
+	head, ok := gens.New(s.opts.HomerHome).Read()
+	published := ok && head.Generation > before
+	status := "synced"
+	errorsOut := []string{}
+	if !result.OK || !published {
+		status = "partial"
+		if !published {
+			errorsOut = append(errorsOut, name+"的内容没有存入中心（generation 未前进）。")
+		}
+	}
+	writeJSON(w, reportHTTPStatus(result.OK && published, status, errorsOut), syncReport{
+		OK:        result.OK && published,
+		Status:    status,
+		Direction: string(syncCollect),
+		Agents:    []agentApplyResult{result},
+		Errors:    errorsOut,
+	})
+}
+
+// syncDispatchToMachines asks every online machine to pull the storage's
+// current generation. Offline machines are skipped; one failure never
+// stops the rest.
+func (s *Server) syncDispatchToMachines(w http.ResponseWriter, r *http.Request, confirmed bool) {
+	if !confirmed {
+		writeJSON(w, http.StatusConflict, syncReport{
+			OK: false, Status: "aborted", Direction: string(syncDispatch),
+			Agents: []agentApplyResult{}, Errors: []string{msgNotConfirmed},
+		})
+		return
+	}
+	if _, ok := gens.New(s.opts.HomerHome).Read(); !ok {
+		writeJSON(w, http.StatusConflict, syncReport{
+			OK: false, Status: "no-snapshot", Direction: string(syncDispatch),
+			Agents: []agentApplyResult{}, Errors: []string{"中心还没有任何快照（先从一台机器收取）"},
+		})
+		return
+	}
+	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents)
+	allOK := true
+	for _, result := range results {
+		if !result.OK && !result.Skipped {
+			allOK = false
+		}
+	}
+	status := "synced"
+	if !allOK {
+		status = "partial"
+	}
+	writeJSON(w, reportHTTPStatus(allOK, status, nil), syncReport{
+		OK:        allOK,
+		Status:    status,
+		Direction: string(syncDispatch),
+		Agents:    results,
+	})
 }
 
 // syncFromCenter applies the center's content onto this machine. Other
@@ -379,4 +501,48 @@ func readSnapshotFromGeneration(head gens.Head) ([]core.AdapterSnapshot, error) 
 		snapshots = append(snapshots, snapshot)
 	}
 	return snapshots, nil
+}
+
+// handleConsole backs GET /api/console — the pure-server view the hero
+// renders. The server is NOT a machine: the view speaks about the
+// storage's current generation and every connected machine's drift
+// relative to the storage it last synced with.
+func (s *Server) handleConsole(w http.ResponseWriter, _ *http.Request) {
+	type machineView struct {
+		AgentID  string      `json:"agentId"`
+		Hostname string      `json:"hostname"`
+		Stale    bool        `json:"stale"`
+		Drift    *AgentDrift `json:"drift,omitempty"`
+	}
+	layout := gens.New(s.opts.HomerHome)
+	head, published := layout.Read()
+	machines := []machineView{}
+	if s.opts.Agents != nil {
+		for _, info := range s.opts.Agents.ListAgents() {
+			view := machineView{
+				AgentID:  info.AgentID,
+				Hostname: info.Hostname,
+				Stale:    info.Stale,
+			}
+			if info.Drift != nil {
+				view.Drift = &AgentDrift{
+					Push:      info.Drift.Push,
+					Pull:      info.Drift.Pull,
+					Conflicts: info.Drift.Conflicts,
+					Error:     info.Drift.Error,
+				}
+			}
+			machines = append(machines, view)
+		}
+	}
+	generation := 0
+	if published {
+		generation = head.Generation
+	}
+	writeJSON(w, http.StatusOK, struct {
+		OK         bool          `json:"ok"`
+		Published  bool          `json:"published"`
+		Generation int           `json:"generation"`
+		Machines   []machineView `json:"machines"`
+	}{true, published, generation, machines})
 }

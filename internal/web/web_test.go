@@ -451,7 +451,10 @@ type sourceStub struct {
 	pushValues  []bool
 	pullValues  []bool
 	pulledAgent []string
-	mu          sync.Mutex
+	// onPush runs inside AgentPush — tests simulate a machine whose own
+	// executor uploads into the hub storage here.
+	onPush func()
+	mu     sync.Mutex
 }
 
 func (s *sourceStub) ListAgents() []AgentInfo { return append([]AgentInfo(nil), s.list...) }
@@ -481,7 +484,11 @@ func (s *sourceStub) AgentDiff(_ context.Context, _ string, _ DiffParams) (strin
 func (s *sourceStub) AgentPush(_ context.Context, _ string, confirm bool) (json.RawMessage, error) {
 	s.mu.Lock()
 	s.pushValues = append(s.pushValues, confirm)
+	hook := s.onPush
 	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return s.pushRaw, s.pushErr
 }
 func (s *sourceStub) AgentPull(_ context.Context, agentID string, confirm bool) (json.RawMessage, error) {
@@ -630,7 +637,7 @@ func TestStaticIndexServed(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Fatalf("index = %d content-type=%q", response.Code, response.Header().Get("Content-Type"))
 	}
-	for _, id := range []string{"gate-setup", "gate-login", "hero", "adapter-list", "agent-list"} {
+	for _, id := range []string{"gate-setup", "gate-login", "hero", "agent-list"} {
 		if !strings.Contains(response.Body.String(), `id="`+id+`"`) {
 			t.Fatalf("index missing %s", id)
 		}

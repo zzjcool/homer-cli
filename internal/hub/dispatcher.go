@@ -52,7 +52,7 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 	registered := d.Registry.List()
 	agents := make([]web.AgentInfo, 0, len(registered))
 	for _, info := range registered {
-		agents = append(agents, web.AgentInfo{
+		agent := web.AgentInfo{
 			AgentID:  info.AgentID,
 			Hostname: info.Hostname,
 			Mode:     string(info.Mode),
@@ -60,7 +60,16 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 			LastSeen: info.LastSeen,
 			Version:  info.Version,
 			Stale:    info.Stale,
-		})
+		}
+		if info.Drift != nil {
+			agent.Drift = &web.AgentDrift{
+				Push:      info.Drift.Push,
+				Pull:      info.Drift.Pull,
+				Conflicts: info.Drift.Conflicts,
+				Error:     info.Drift.Error,
+			}
+		}
+		agents = append(agents, agent)
 	}
 	return agents
 }

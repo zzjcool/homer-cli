@@ -78,6 +78,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case path == "/api/console":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleConsole(w, r)
 	case path == "/api/status":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)

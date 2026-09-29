@@ -759,3 +759,100 @@ func TestOfflineConflictKeepsLocal(t *testing.T) {
 		t.Fatalf("B's local edit must survive the conflicted pull: %q err=%v", content, err)
 	}
 }
+
+// TestPureServerFourStepStory pins the user's architecture: the server is
+// ONLY a server — it holds the storage and no machine of its own.
+//  1. connect machine A (enrollment)
+//  2. collect A's config into the server's storage
+//  3. connect machine B (enrollment)
+//  4. dispatch the storage to B
+func TestPureServerFourStepStory(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")
+
+	binary := binaryOf(t)
+	machineA := makeMachine(t, root, "A", global, true)
+	machineB := makeMachine(t, root, "B", global, false)
+	// Machine A is an already-configured machine (it ran homer init when
+	// it first adopted homer — that is what "connect an existing machine"
+	// means).
+	if result := runHomer(t, binary, machineA, "init", "--json"); result.code != 0 {
+		t.Fatalf("init A failed: %s%s", result.stdout, result.stderr)
+	}
+
+	// The server's home is a bare directory: no init, no adapters, no
+	// store — pure storage + control plane.
+	serverHome := filepath.Join(root, "server-home")
+	if err := os.MkdirAll(serverHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	token := "pure-server-token"
+	hubPort := freePort(t)
+	hubProc := startHomer(t, binary, machineA, global,
+		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", serverHome)
+	defer stopProc(t, hubProc)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+	auth := map[string]string{"Authorization": "Bearer " + token}
+
+	// Step 1: connect machine A.
+	agentA := startHomer(t, binary, machineA, global,
+		"agent", "--connect", hubURL, "--token", token, "--id", "machine-a", "--home", machineA.homerHome)
+	defer stopProc(t, agentA)
+	waitRegistered(t, hubURL, auth, hubProc, "machine-a")
+
+	// Step 2: collect A's config into the server's storage.
+	// The storage must be empty before, and hold generation 1 after.
+	if head, err := os.ReadFile(filepath.Join(serverHome, "HEAD")); err == nil && strings.TrimSpace(string(head)) != "" {
+		t.Fatalf("storage should be empty before collect, HEAD=%q", head)
+	}
+	collect := apiPost(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth)
+	if jsonPath(t, collect, "ok") != true || jsonPath(t, collect, "status") != "synced" {
+		t.Fatalf("collect = %s", collect)
+	}
+	if head, err := os.ReadFile(filepath.Join(serverHome, "HEAD")); err != nil || strings.TrimSpace(string(head)) != "1" {
+		t.Fatalf("storage HEAD after collect = %q err=%v (want 1)", head, err)
+	}
+
+	// Step 3: connect machine B (empty machine, bootstrap via dispatch).
+	agentB := startHomer(t, binary, machineB, global,
+		"agent", "--connect", hubURL, "--token", token, "--id", "machine-b", "--home", machineB.homerHome)
+	defer stopProc(t, agentB)
+	waitRegistered(t, hubURL, auth, hubProc, "machine-b")
+
+	// Step 4: dispatch the storage to B.
+	dispatch := apiPost(t, hubURL+"/api/sync?direction=dispatch&confirm=true", auth)
+	if jsonPath(t, dispatch, "ok") != true || jsonPath(t, dispatch, "status") != "synced" {
+		t.Fatalf("dispatch = %s", dispatch)
+	}
+	// B's file now carries A's fixture content — bootstrap + dispatch
+	// completed the four-step story with zero git anywhere.
+	bSettings := filepath.Join(piRoot(machineB), "settings.json")
+	content, err := os.ReadFile(bSettings)
+	if err != nil {
+		t.Fatalf("machine B settings read: %v", err)
+	}
+	// A's fixture settings.json carries "theme": "light" — that content
+	// reaching B's previously-empty tree is the four-step story complete.
+	if !strings.Contains(string(content), "theme") {
+		t.Fatalf("machine B settings = %q — bootstrap dispatch did not deliver content", content)
+	}
+}
+
+// waitRegistered blocks until agentID appears in the hub's registry.
+func waitRegistered(t *testing.T, hubURL string, auth map[string]string, hubProc *exec.Cmd, agentID string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		body := apiGet(t, hubURL+"/api/agents", auth, hubProc)
+		if items, ok := jsonPath(t, body, "agents").([]any); ok {
+			for _, item := range items {
+				if item.(map[string]any)["agentId"] == agentID {
+					return
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("%s did not register; hub output: %s", agentID, procOutput[hubProc])
+}

@@ -184,8 +184,9 @@ func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 type pollRequest struct {
-	AgentID     string `json:"agentId"`
-	WaitSeconds *int   `json:"waitSeconds"`
+	AgentID     string      `json:"agentId"`
+	WaitSeconds *int        `json:"waitSeconds"`
+	Drift       *AgentDrift `json:"drift,omitempty"`
 }
 
 type pollResponse struct {
@@ -215,6 +216,9 @@ func (a *AgentAPI) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if request.Drift != nil {
+		a.Registry.UpdateDrift(request.AgentID, *request.Drift)
+	}
 	task, ok := a.Registry.Poll(request.AgentID, time.Duration(waitSeconds)*time.Second, r.Context())
 	if r.Context().Err() != nil {
 		// The client disconnected or the server is shutting down. There is no

@@ -82,7 +82,7 @@ func TestServeSmoke(t *testing.T) {
 	}
 
 	index := waitHTTP(t, "http://"+addr+"/", http.StatusOK, 10*time.Second)
-	for _, marker := range []string{"gate-setup", "gate-login", "hero", "adapter-list", "agent-list"} {
+	for _, marker := range []string{"gate-setup", "gate-login", "hero", "agent-list"} {
 		if !strings.Contains(index, marker) {
 			t.Fatalf("index missing UI block %q (len=%d head=%q)", marker, len(index), index[:min(len(index), 120)])
 		}

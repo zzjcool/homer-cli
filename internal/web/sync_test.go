@@ -136,7 +136,7 @@ func TestSyncRejectsBadDirection(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("query %q = %d body=%s", query, response.Code, response.Body)
 		}
-		if !strings.Contains(response.Body.String(), "direction 必须是 to-others 或 from-center") {
+		if !strings.Contains(response.Body.String(), "direction 必须是 collect、dispatch、to-others 或 from-center") {
 			t.Fatalf("query %q body = %s", query, response.Body)
 		}
 	}
@@ -216,5 +216,173 @@ func TestSyncToOthersBootstrapsEmptyHome(t *testing.T) {
 	head, ok := gens.New(fixture.home).Read()
 	if !ok || head.Generation < 1 {
 		t.Fatalf("bootstrap generation = %#v ok=%v", head, ok)
+	}
+}
+
+// ---------- pure-server console (server ≠ any machine) ----------
+
+// The console's hero must speak about the SERVER's storage, not about a
+// machine's workspace: it reports the current generation and the fleet's
+// drift relative to that storage.
+func TestConsoleStorageView(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	if _, err := gens.New(home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "remote\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("console = %d body=%s", recorder.Code, recorder.Body)
+	}
+	var payload struct {
+		OK         bool `json:"ok"`
+		Generation int  `json:"generation"`
+		Published  bool `json:"published"`
+		Machines   []struct {
+			AgentID  string `json:"agentId"`
+			Hostname string `json:"hostname"`
+			Stale    bool   `json:"stale"`
+			Drift    struct {
+				Push      int `json:"push"`
+				Pull      int `json:"pull"`
+				Conflicts int `json:"conflicts"`
+			} `json:"drift"`
+		} `json:"machines"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.OK || !payload.Published || payload.Generation != 1 {
+		t.Fatalf("storage view = ok:%v published:%v generation:%d", payload.OK, payload.Published, payload.Generation)
+	}
+}
+
+// An empty server (no generation ever published) must answer with
+// published:false and an empty machine list — the UI's first-run state.
+func TestConsoleStorageViewEmpty(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("console = %d body=%s", recorder.Code, recorder.Body)
+	}
+	var payload struct {
+		OK         bool `json:"ok"`
+		Generation int  `json:"generation"`
+		Published  bool `json:"published"`
+		Machines   []struct {
+			AgentID string `json:"agentId"`
+		} `json:"machines"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.OK || payload.Published || payload.Generation != 0 || len(payload.Machines) != 0 {
+		t.Fatalf("empty storage view = %#v", payload)
+	}
+}
+
+// ---------- collect / dispatch (pure-server sync semantics) ----------
+
+// collectFromMachine: the hub asks one machine to push its content into
+// the storage. The hub itself runs NO local push.
+func TestSyncCollectFromMachine(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	source := &sourceStub{
+		list:    []AgentInfo{{AgentID: "box-a", Hostname: "box-a", Mode: "listen"}},
+		pushRaw: json.RawMessage(`{"ok":true,"status":"synced"}`),
+	}
+	// The machine's own executor uploads into the hub storage (the real
+	// agent posts /api/snapshot; the stub publishes directly).
+	source.onPush = func() {
+		if _, err := gens.New(home).Publish(map[string]map[string]string{
+			"pi": {"settings/settings.json": "machine content\n"},
+		}, []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := syncPost(t, server.Handler(), "direction=collect&agent=box-a&confirm=true")
+	if response.Code != http.StatusOK {
+		t.Fatalf("collect = %d body=%s", response.Code, response.Body)
+	}
+	if len(source.pushValues) != 1 {
+		t.Fatal("collect must delegate the push to the machine (hub runs no local push)")
+	}
+	// The storage must now hold a generation the machine uploaded.
+	if head, ok := gens.New(home).Read(); !ok || head.Generation < 1 {
+		t.Fatalf("collect published no generation: %#v", head)
+	}
+}
+
+// dispatchToMachines: the hub asks every ONLINE machine to pull from the
+// storage. Offline machines are skipped, not failed.
+func TestSyncDispatchSkipsOffline(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	if _, err := gens.New(home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "remote\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	source := &sourceStub{
+		list: []AgentInfo{
+			{AgentID: "on-1", Hostname: "on-1", Mode: "listen"},
+			{AgentID: "off-1", Hostname: "off-1", Mode: "listen", Stale: true},
+		},
+		pullRaw: []byte(`{"ok":true,"status":"applied"}`),
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := syncPost(t, server.Handler(), "direction=dispatch&confirm=true")
+	if response.Code != http.StatusOK {
+		t.Fatalf("dispatch = %d body=%s", response.Code, response.Body)
+	}
+	if len(source.pullValues) != 1 {
+		t.Fatalf("dispatch must pull online machines only, pulled %d", len(source.pullValues))
+	}
+}
+
+// ---------- resolve on the machine (pure-server semantics) ----------
+
+// Resolve must execute on the MACHINE that has the conflict — the server
+// only relays the choice. With ?agent= given, the hub must NOT run a
+// local merge.
+func TestResolveDelegatesToMachine(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	// Center content exists; the machine reports its own conflict state.
+	if _, err := gens.New(home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "center\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	mergedOnAgent := false
+	source := &sourceStub{
+		list:    []AgentInfo{{AgentID: "box-c", Hostname: "box-c", Mode: "listen", Drift: &AgentDrift{Conflicts: 1}}},
+		pushRaw: json.RawMessage(`{"ok":true,"status":"resolved"}`),
+		pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`),
+	}
+	source.onPush = func() { mergedOnAgent = true }
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/resolve?choice=local&agent=box-c&confirm=true", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("resolve = %d body=%s", recorder.Code, recorder.Body)
+	}
+	if !mergedOnAgent {
+		t.Fatal("resolve must delegate the merge to the machine (hub runs no local merge)")
 	}
 }

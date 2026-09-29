@@ -85,6 +85,10 @@ func DefaultAgentID() string {
 type Daemon struct {
 	cfg  Config
 	exec Executor
+	// drift caching (throttled status summaries uploaded with polls)
+	driftMu     sync.Mutex
+	lastDrift   *hub.AgentDrift
+	lastDriftAt time.Time
 }
 
 func New(cfg Config, exec Executor) *Daemon {
@@ -287,6 +291,57 @@ func (d *Daemon) runConnect(ctx context.Context) error {
 	}
 }
 
+// DriftInterval throttles the drift-summary computation: one full local
+// status per interval is plenty for a console that refreshes every 30s.
+const DriftInterval = 30 * time.Second
+
+// DriftTimeout bounds a single drift computation so a hung executor can
+// never stall the poll loop.
+const DriftTimeout = 20 * time.Second
+
+// driftSummary computes this machine's status summary for the hub's
+// machine list. It is throttled (one full status per DriftInterval) and
+// bounded (a hung executor never blocks the poll loop for longer than
+// DriftTimeout); a failure reuses the previous summary or reports the
+// error, and the poll itself never waits on it.
+func (d *Daemon) driftSummary(ctx context.Context) *hub.AgentDrift {
+	now := time.Now()
+	d.driftMu.Lock()
+	if d.lastDrift != nil && now.Sub(d.lastDriftAt) < DriftInterval {
+		cached := d.lastDrift
+		d.driftMu.Unlock()
+		return cached
+	}
+	d.driftMu.Unlock()
+
+	summaryCtx, cancel := context.WithTimeout(ctx, DriftTimeout)
+	defer cancel()
+	report, err := d.exec.Status(summaryCtx)
+	drift := &hub.AgentDrift{}
+	if err != nil {
+		// Keep the last known summary when it exists; otherwise surface
+		// the error in place of numbers.
+		d.driftMu.Lock()
+		if d.lastDrift != nil {
+			cached := d.lastDrift
+			d.driftMu.Unlock()
+			return cached
+		}
+		d.driftMu.Unlock()
+		return &hub.AgentDrift{Error: err.Error()}
+	}
+	for _, adapter := range report.Adapters {
+		drift.Push += adapter.Push
+		drift.Pull += adapter.Pull
+		drift.Conflicts += adapter.Conflicts
+	}
+	d.driftMu.Lock()
+	d.lastDrift = drift
+	d.lastDriftAt = now
+	d.driftMu.Unlock()
+	return drift
+}
+
 func (d *Daemon) registerWithRetry(ctx context.Context, mode hub.AgentMode, hostname string) error {
 	backoff := time.Second
 	for {
@@ -382,9 +437,10 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool, error) {
 	waitSeconds := durationSeconds(d.cfg.PollWait)
 	payload := struct {
-		AgentID     string `json:"agentId"`
-		WaitSeconds int    `json:"waitSeconds"`
-	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds}
+		AgentID     string          `json:"agentId"`
+		WaitSeconds int             `json:"waitSeconds"`
+		Drift       *hub.AgentDrift `json:"drift,omitempty"`
+	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Drift: d.driftSummary(ctx)}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return hub.Task{}, false, err

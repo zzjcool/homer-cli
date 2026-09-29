@@ -198,18 +198,27 @@ func TestAgentdDispatchPerKind(t *testing.T) {
 		t.Fatal("dispatch daemon did not stop")
 	}
 	calls := exec.snapshot()
-	if len(calls) != len(tasks) {
-		t.Fatalf("calls = %+v", calls)
+	// The drift summary (uploaded with each poll, throttled to one full
+	// status per DriftInterval) may add leading status calls — filter
+	// them out, then require the task sequence to be intact and in order.
+	taskCalls := make([]call, 0, len(tasks))
+	for _, c := range calls {
+		if c.kind == hub.TaskKindStatus {
+			continue
+		}
+		taskCalls = append(taskCalls, c)
 	}
 	want := []call{
-		{kind: hub.TaskKindStatus},
 		{kind: hub.TaskKindDiff, adapter: "pi", category: "settings"},
 		{kind: hub.TaskKindPush, confirm: true},
 		{kind: hub.TaskKindPull, confirm: true},
 	}
+	if len(taskCalls) != len(want) {
+		t.Fatalf("task calls = %+v (all: %+v)", taskCalls, calls)
+	}
 	for i := range want {
-		if calls[i] != want[i] {
-			t.Fatalf("call[%d] = %+v, want %+v", i, calls[i], want[i])
+		if taskCalls[i] != want[i] {
+			t.Fatalf("call[%d] = %+v, want %+v", i, taskCalls[i], want[i])
 		}
 	}
 }

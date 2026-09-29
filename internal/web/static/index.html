@@ -196,12 +196,6 @@ html { scroll-behavior: smooth; }
     <!-- page-level alert (secrets rejected / failures) -->
     <div id="alert-slot"></div>
 
-    <!-- ② adapters -->
-    <section id="sec-adapters" aria-label="适配器明细">
-      <h2>适配器明细</h2>
-      <div id="adapter-list"></div>
-    </section>
-
     <!-- ③ machines -->
     <section id="sec-agents" aria-label="机器">
       <h2>机器</h2>
@@ -258,15 +252,18 @@ const $ = id => document.getElementById(id);
  * POST /api/auth/logout
  * GET  /api/auth/join     {command}
  * GET  /api/health        {version}
- * GET  /api/status        {report:{adapters:[{id,push,pull,conflicts,categories:[{name,push,pull,conflicts}]}], errors, warnings, disabled}}
+ * GET  /api/console       {published, generation, machines:[{agentId,hostname,stale,drift:{push,pull,conflicts}}]}
+ * GET  /api/status        {report:{...}} (机器视角的兼容端点)
  * GET  /api/diff?adapter&category  {empty, text}
- * POST /api/sync?direction=to-others|from-center&confirm=true
- * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale}]}
+ * POST /api/sync?direction=collect&agent=<id>&confirm=true   收取一台机器
+ * POST /api/sync?direction=dispatch&confirm=true             下发给所有在线机器
+ * POST /api/resolve?choice=local|center&agent=<id>&confirm=true  在某台机器上裁决
+ * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,drift}]}
  * 错误: 401 / 409(code=not-initialized|aborted|conflicts) / 422(secrets-rejected)
  * =================================================================== */
 const app = {
-  report: null,           // 最近一次 /api/status 的 report
-  pendingAction: null,    // push/pull 待确认
+  console: null,          // 最近一次 /api/console 的存储视角
+  pendingAction: null,    // 收取/下发/裁决 待确认
   openDiffs: new Set(),   // 展开的 diff 抽屉，key = adapter/category（轮询不重置）
 };
 
@@ -326,12 +323,43 @@ function showWorkspace() {
   $("btn-join-top").classList.remove("hidden"); $("btn-refresh").classList.remove("hidden"); $("btn-logout").classList.remove("hidden");
 }
 
-/* ---------- ① hero ---------- */
+/* ---------- ① hero: the server's storage view ---------- */
+function fmtDrift(d) {
+  const parts = [];
+  if (d.push) parts.push("↑" + d.push + " 项未收取");
+  if (d.pull) parts.push("↓" + d.pull + " 项待下发");
+  if (d.conflicts) parts.push(d.conflicts + " 项冲突");
+  return parts.join(" · ");
+}
 function renderHero() {
   const hero = $("hero"); clear(hero); hero.classList.remove("warn");
-  const r = app.report;
-  let push = 0, pull = 0, conflicts = 0;
-  (r.adapters || []).forEach(a => { push += a.push || 0; pull += a.pull || 0; conflicts += a.conflicts || 0; });
+  const c = app.console;
+  if (!c) return;
+
+  // First run: nothing in the storage yet — the story starts by
+  // collecting the first machine's content.
+  if (!c.published) {
+    const machines = c.machines || [];
+    const concl = el("p", "conclusion");
+    concl.append(el("span", "dot off"), document.createTextNode("中心还没有任何内容"));
+    const numbers = el("p", "numbers", machines.length
+      ? "已接入 " + machines.length + " 台机器 · 从一台机器收取它的配置，存入中心"
+      : "还没有机器接入 · 先接入一台机器，再从它收取配置");
+    hero.append(concl, numbers);
+    return;
+  }
+
+  // Aggregate the fleet's drift relative to the storage.
+  let push = 0, pull = 0, conflicts = 0, online = 0;
+  (c.machines || []).forEach(m => {
+    if (m.stale) return;
+    online++;
+    if (!m.drift) return;
+    push += m.drift.push || 0;
+    pull += m.drift.pull || 0;
+    conflicts += m.drift.conflicts || 0;
+  });
+  const all = (c.machines || []).length;
 
   const concl = el("p", "conclusion");
   const numbers = el("p", "numbers");
@@ -339,39 +367,26 @@ function renderHero() {
   if (conflicts > 0) {
     hero.classList.add("warn");
     concl.append(el("span", "dot conflict"), document.createTextNode("有冲突，需要选择保留哪一边"));
-    numbers.textContent = conflicts + " 项冲突" + (push + pull ? "，另有 " + fmtCounts(push, pull, 0) : "");
+    numbers.textContent = conflicts + " 项冲突 · 存储 第 " + c.generation + " 代";
     const note = el("div", "hero-note");
-    note.append(el("div", null, "两边都改过同一处。选择保留哪一边（全部 " + conflicts + " 项冲突一起处理）。"));
-    const localBtn = el("button", "primary", "以本机为准");
-    localBtn.type = "button"; localBtn.addEventListener("click", () => confirmResolve("local"));
-    const centerBtn = el("button", null, "以中心为准");
-    centerBtn.type = "button"; centerBtn.addEventListener("click", () => confirmResolve("center"));
-    const row = el("div", "hero-actions");
-    row.append(localBtn, centerBtn);
-    hero.append(concl, numbers, note, row);
+    note.append(el("div", null, "某台机器和中心改了同一处。到那台机器所在行选择保留哪一边。"));
+    hero.append(concl, numbers, note);
     return;
   }
   if (push + pull > 0) {
     concl.append(el("span", "dot drift"), document.createTextNode("有尚未同步的改动"));
-    numbers.textContent = fmtCounts(push, pull, 0) + "，分布在 " +
-      r.adapters.filter(a => a.push + a.pull > 0).length + " 个适配器";
-    const btn = el("button", "primary", "同步");
+    const parts = [];
+    if (push) parts.push("↑" + push + " 项未收取");
+    if (pull) parts.push("↓" + pull + " 项待下发");
+    numbers.textContent = parts.join(" · ") + " · 存储 第 " + c.generation + " 代 · 在线 " + online + "/" + all;
+    const btn = el("button", "primary", "处理改动");
     btn.type = "button";
-    btn.addEventListener("click", confirmSync);
-    const view = el("button", "text", "查看改动 ↓");
-    view.type = "button";
-    view.addEventListener("click", () => {
-      // 自动展开有漂移的适配器
-      r.adapters.forEach(a => { if (a.push + a.pull > 0) app.openDiffs.add("__row__" + a.id); });
-      renderAdapters();
-      $("sec-adapters").scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-    hero.append(concl, numbers, btn, view);
+    btn.addEventListener("click", confirmStorageSync);
+    hero.append(concl, numbers, btn);
     return;
   }
-  concl.append(el("span", "dot ok"), document.createTextNode("都已对齐"));
-  const nAdapters = (r.adapters || []).length;
-  numbers.textContent = nAdapters + " 个适配器全部干净 · 刚刚刷新";
+  concl.append(el("span", "dot ok"), document.createTextNode("全部对齐"));
+  numbers.textContent = "存储 第 " + c.generation + " 代 · " + all + " 台机器全部干净 · 在线 " + online + "/" + all;
   hero.append(concl, numbers);
 }
 
@@ -380,136 +395,6 @@ function renderHeroSkeleton() {
   const concl = el("p", "conclusion skel", "加载中加载中");
   const numbers = el("p", "numbers skel", "加载中加载中加载中加载中");
   hero.append(concl, numbers);
-}
-
-/* ---------- ② adapters ---------- */
-function countCls(push, pull, conflicts) {
-  if (conflicts) return "counts c-conflict";
-  if (push + pull) return "counts c-drift";
-  return "counts c-clean";
-}
-function renderAdapters() {
-  const list = $("adapter-list"); clear(list);
-  const r = app.report;
-  const totalDrift = (r.adapters || []).reduce((s, a) => s + a.push + a.pull + a.conflicts, 0);
-
-  if (totalDrift === 0 && !app._adaptersTouched) {
-    // 干净态：整个区块收成一行，可展开但不主动展开
-    const row = el("div", "adapter-line");
-    row.append(el("span", "name muted", (r.adapters || []).map(a => a.id).join(" / ") + "　全部干净"));
-    const btn = el("button", "text", "展开明细 ▾");
-    btn.type = "button";
-    btn.addEventListener("click", () => { app._adaptersTouched = true; renderAdapters(); });
-    row.append(el("span", "row-actions")); row.lastChild.append(btn);
-    const wrap = el("div", "adapter-row"); wrap.append(row); list.append(wrap);
-    return;
-  }
-
-  (r.adapters || []).forEach(a => {
-    const disabled = (r.disabled || []).includes(a.id);
-    const wrap = el("div", "adapter-row" + (disabled ? " disabled-row" : ""));
-    const line = el("div", "adapter-line");
-    line.append(el("span", "name", a.id));
-    const cText = disabled ? "已禁用" : (a.push + a.pull + a.conflicts ? fmtCounts(a.push, a.pull, a.conflicts) : "干净");
-    line.append(el("span", countCls(a.push, a.pull, a.conflicts), cText));
-    const acts = el("span", "row-actions");
-    const driftBtn = el("button", "small-btn", (a.push + a.pull + a.conflicts ? "查看改动" : "明细 ▾"));
-    driftBtn.type = "button";
-    const rowKey = "__row__" + a.id;
-    driftBtn.setAttribute("aria-expanded", app.openDiffs.has(rowKey));
-    driftBtn.addEventListener("click", () => {
-      app.openDiffs.has(rowKey) ? app.openDiffs.delete(rowKey) : app.openDiffs.add(rowKey);
-      renderAdapters();
-    });
-    acts.append(driftBtn);
-    line.append(acts);
-    wrap.append(line);
-
-    if (app.openDiffs.has(rowKey)) {
-      (a.categories || []).forEach(c => {
-        const cl = el("div", "cat-line");
-        cl.append(el("span", "cat-name", c.name));
-        cl.append(el("span", countCls(c.push, c.pull, c.conflicts),
-          c.push + c.pull + c.conflicts ? fmtCounts(c.push, c.pull, c.conflicts) : "干净"));
-        const cActs = el("span", "row-actions");
-        if (c.push + c.pull + c.conflicts > 0) {
-          const db = el("button", "small-btn", "差异");
-          db.type = "button";
-          const key = a.id + "/" + c.name;
-          db.setAttribute("aria-expanded", app.openDiffs.has(key));
-          db.setAttribute("aria-controls", "diff-" + key.replace(/\W/g, "-"));
-          db.addEventListener("click", () => toggleDiff(a.id, c.name));
-          cActs.append(db);
-        }
-        cl.append(cActs);
-        wrap.append(cl);
-        const key = a.id + "/" + c.name;
-        if (app.openDiffs.has(key)) wrap.append(buildDiffDrawer(a.id, c.name));
-      });
-      if (!(a.categories || []).length) wrap.append(el("div", "cat-line muted", "无分类数据"));
-    }
-    list.append(wrap);
-  });
-}
-
-function buildDiffDrawer(adapter, category) {
-  const key = adapter + "/" + category;
-  const drawer = el("div", "diff-drawer");
-  drawer.id = "diff-" + key.replace(/\W/g, "-");
-  const pre = el("pre", null, "加载差异…");
-  drawer.append(pre);
-  api("/api/diff?adapter=" + encodeURIComponent(adapter) + "&category=" + encodeURIComponent(category))
-    .then(d => {
-      clear(pre);
-      if (d.empty) { pre.textContent = "无漂移"; return; }
-      // diff 着色：语义编码（+=中心将新增 / -=将被覆盖），不是装饰
-      d.text.split("\n").forEach(line => {
-        const cls = line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") ? "ln-meta"
-          : line.startsWith("@@") ? "ln-hunk"
-          : line.startsWith("+") ? "ln-add"
-          : line.startsWith("-") ? "ln-del" : "";
-        const span = el("span", cls, line);
-        pre.append(span, document.createTextNode("\n"));
-      });
-    })
-    .catch(e => {
-      clear(pre);
-      pre.append(el("span", null, "差异加载失败：" + e.message + "　"));
-      const retry = el("button", "small-btn", "重试");
-      retry.type = "button";
-      retry.addEventListener("click", () => { renderAdapters(); });
-      pre.append(retry);
-    });
-  if (app.report) {
-    const a = app.report.adapters.find(x => x.id === adapter);
-    const c = a && a.categories.find(x => x.name === category);
-    if (c) {
-      const actions = el("div", "diff-actions");
-      if (c.push + c.pull > 0 && !hasConflicts()) {
-        const sb = el("button", "primary", "同步");
-        sb.type = "button"; sb.addEventListener("click", confirmSync);
-        actions.append(sb);
-      }
-      if (c.conflicts > 0) {
-        actions.append(el("span", "small muted", "两边都改过同一处。"));
-        const rb1 = el("button", "small-btn danger-btn", "以本机为准");
-        rb1.type = "button"; rb1.addEventListener("click", () => confirmResolve("local"));
-        const rb2 = el("button", "small-btn", "以中心为准");
-        rb2.type = "button"; rb2.addEventListener("click", () => confirmResolve("center"));
-        actions.append(rb1, rb2);
-      }
-      if (actions.childNodes.length) drawer.append(actions);
-    }
-  }
-  return drawer;
-}
-function toggleDiff(adapter, category) {
-  const key = adapter + "/" + category;
-  app.openDiffs.has(key) ? app.openDiffs.delete(key) : app.openDiffs.add(key);
-  renderAdapters();
-}
-function hasConflicts() {
-  return (app.report?.adapters || []).some(a => a.conflicts > 0);
 }
 
 /* ---------- ③ agents ---------- */
@@ -533,19 +418,58 @@ function renderAgents(agents, disabledFeature) {
     line.append(el("span", "dot " + (a.stale ? "off" : "ok")));
     line.append(el("span", "hostname", a.hostname));
     line.append(el("span", "aid", a.agentId));
+    // 该机器相对存储的漂移（它自己每次心跳上报）
+    if (a.drift) {
+      const d = a.drift;
+      if (d.error) line.append(el("span", "small muted", "状态上报失败"));
+      else if (d.push + d.pull + d.conflicts > 0) {
+        line.append(el("span", "counts " + (d.conflicts ? "c-conflict" : "c-drift"), fmtDrift(d)));
+      } else {
+        line.append(el("span", "counts c-clean", "已对齐"));
+      }
+    } else {
+      line.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
+    }
     line.append(el("span", "meta",
       (a.mode === "listen" ? "直连" : "主动连接") + " · " + a.lastSeen + (a.stale ? " · 离线" : "")));
-    if (a.stale) line.append(el("span", "small muted", "离线期间不产生同步"));
+
+    // 收取：让这台机器把它的配置上传到中心存储
+    const collectBtn = el("button", "small-btn", "收取");
+    collectBtn.type = "button";
+    collectBtn.title = "把这台机器的配置存入中心";
+    collectBtn.disabled = a.stale;
+    collectBtn.addEventListener("click", () => confirmCollect(a));
+    line.append(collectBtn);
+
+    // 下发：让这台机器应用中心存储的当前内容
+    const dispatchBtn = el("button", "small-btn", "下发");
+    dispatchBtn.type = "button";
+    dispatchBtn.title = "把中心的内容下发到这台机器";
+    dispatchBtn.disabled = a.stale;
+    dispatchBtn.addEventListener("click", () => confirmDispatch(a));
+    line.append(dispatchBtn);
+
+    // 冲突裁决：这台机器有冲突时给出二选一
+    if (a.drift && a.drift.conflicts > 0 && !a.stale) {
+      const localBtn = el("button", "small-btn danger-btn", "以这台机器为准");
+      localBtn.type = "button";
+      localBtn.addEventListener("click", () => confirmResolveOn("local", a));
+      const centerBtn = el("button", "small-btn", "以中心为准");
+      centerBtn.type = "button";
+      centerBtn.addEventListener("click", () => confirmResolveOn("center", a));
+      line.append(localBtn, centerBtn);
+    }
+
     // 吊销：Tailscale 式单机踢除（凭证失效，行保留观察）。
     const revoke = el("button", "small-btn danger-btn", "吊销");
     revoke.type = "button";
     revoke.title = "吊销该机器的接入凭证（其下次心跳立即失效；不影响其他机器）";
     revoke.addEventListener("click", async () => {
-      if (!confirm("吊销 " + (a.hostname || a.agentId) + "？\n该机器将立即失去接入权限（重新接入需生成新接入码）。")) return;
+      if (!confirm("吊销 " + (a.hostname || a.agentId) + "?\n该机器将立即失去接入权限（重新接入需生成新接入码）。")) return;
       try {
         await api("/api/agents/revoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.agentId }) });
         toast("已吊销 " + (a.hostname || a.agentId));
-        await loadAgents();
+        await refresh();
       } catch (e) { toast("吊销失败：" + e.message); }
     });
     // 移除：吊销凭证 + 从列表彻底删除（离线机器清理路径）。
@@ -553,11 +477,11 @@ function renderAgents(agents, disabledFeature) {
     removeBtn.type = "button";
     removeBtn.title = "从列表移除该机器（吊销其凭证并删除记录）";
     removeBtn.addEventListener("click", async () => {
-      if (!confirm("移除 " + (a.hostname || a.agentId) + "？\n吊销其接入凭证并从列表删除。")) return;
+      if (!confirm("移除 " + (a.hostname || a.agentId) + "?\n吊销其接入凭证并从列表删除。")) return;
       try {
         await api("/api/agents/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.agentId }) });
         toast("已移除 " + (a.hostname || a.agentId));
-        await loadAgents();
+        await refresh();
       } catch (e) { toast("移除失败：" + e.message); }
     });
     line.append(revoke, removeBtn);
@@ -568,6 +492,7 @@ function renderAgents(agents, disabledFeature) {
   const foot = el("div"); foot.style.padding = "10px 4px 0"; foot.append(joinBtn);
   list.append(foot);
 }
+
 function renderAgentsError(msg) {
   const list = $("agent-list"); clear(list);
   const box = el("div", "small");
@@ -581,11 +506,11 @@ async function loadAgents() {
   const btn = $("btn-join-top");
   try {
     const d = await api("/api/agents");
-    btn.classList.remove("hidden");      // 功能可用 → 恢复入口（renderAgents 渲染前定下终态）
+    btn.classList.remove("hidden");
     renderAgents(d.agents || [], false);
   } catch (e) {
     if (e.code === "agents-disabled") {
-      btn.classList.add("hidden");       // 功能没开 → 隐藏入口（与 renderAgents 分支一致）
+      btn.classList.add("hidden");
       renderAgents([], true);
     }
     else if (e.status === 401) return;   // 401 由 refresh 统一处理
@@ -593,52 +518,51 @@ async function loadAgents() {
   }
 }
 
-/* ---------- write actions: push / pull ---------- */
-function defaultDirection(push, pull) {
-  if (push > 0 && pull === 0) return "to-others";
-  if (pull > 0 && push === 0) return "from-center";
-  return "";
-}
-function confirmSync() {
-  const r = app.report;
-  const sums = (r.adapters || []).reduce((acc, a) => ({ push: acc.push + (a.push || 0), pull: acc.pull + (a.pull || 0) }), { push: 0, pull: 0 });
-  const pre = defaultDirection(sums.push, sums.pull);
-  $("confirm-title").textContent = "确认同步";
-  $("confirm-desc").textContent = "本机改动 " + sums.push + " 项，中心改动 " + sums.pull + " 项。会处理这台机器的全部改动，不只是眼前这一项。";
-  $("btn-confirm-ok").textContent = "确认同步";
-  const choices = $("confirm-choices"); clear(choices);
-  const mk = (value, label, desc) => {
-    const row = el("label", "choice-row");
-    const radio = document.createElement("input");
-    radio.type = "radio"; radio.name = "sync-direction"; radio.value = value;
-    if (pre === value) radio.checked = true;
-    row.append(radio, el("span", null, label));
-    row.append(el("div", "small muted", desc));
-    choices.append(row);
-  };
-  mk("to-others", "同步到其他机器", "把这台机器的改动写入中心，再让在线的其他机器应用。离线的跳过。");
-  mk("from-center", "从中心同步", "用中心的内容覆盖这台机器上的对应文件，覆盖前先备份。其他机器不动。");
-  const okBtn = $("btn-confirm-ok");
-  okBtn.disabled = pre === "";
-  choices.querySelectorAll("input[name=sync-direction]").forEach(radio => {
-    radio.addEventListener("change", () => { okBtn.disabled = false; });
-  });
-  app.pendingAction = { kind: "sync" };
-  $("dlg-confirm").showModal();
-}
-function confirmResolve(choice) {
-  const r = app.report;
-  const n = (r.adapters || []).reduce((s, a) => s + (a.conflicts || 0), 0);
-  const local = choice === "local";
-  $("confirm-title").textContent = local ? "以本机为准" : "以中心为准";
-  $("confirm-desc").textContent = local
-    ? "全部 " + n + " 项冲突都保留这台机器上的内容，并写入中心。在线的其他机器会接着应用这份内容。离线机器这次不动。"
-    : "全部 " + n + " 项冲突都改成中心已有的内容。这台机器上的对应文件会被覆盖，覆盖前先备份。其他机器不动。";
+/* ---------- write actions: collect / dispatch / resolve ---------- */
+function confirmCollect(agent) {
+  $("confirm-title").textContent = "收取 " + (agent.hostname || agent.agentId);
+  $("confirm-desc").textContent = "把 " + (agent.hostname || agent.agentId) + " 的配置存入中心存储。其他机器这次不动。";
   $("confirm-choices").replaceChildren();
-  $("btn-confirm-ok").textContent = local ? "确认以本机为准" : "确认以中心为准";
-  app.pendingAction = { kind: "resolve", choice };
+  $("btn-confirm-ok").textContent = "确认收取";
+  app.pendingAction = { kind: "collect", agentId: agent.agentId, name: agent.hostname || agent.agentId };
   $("dlg-confirm").showModal();
 }
+function confirmDispatch(agent) {
+  $("confirm-title").textContent = "下发到 " + (agent.hostname || agent.agentId);
+  $("confirm-desc").textContent = "用中心存储的当前内容更新 " + (agent.hostname || agent.agentId) + " 上的对应文件，覆盖前先备份。其他机器这次不动。";
+  $("confirm-choices").replaceChildren();
+  $("btn-confirm-ok").textContent = "确认下发";
+  app.pendingAction = { kind: "dispatch-one", agentId: agent.agentId, name: agent.hostname || agent.agentId };
+  $("dlg-confirm").showModal();
+}
+function confirmStorageSync() {
+  const c = app.console;
+  let push = 0, pull = 0;
+  (c.machines || []).forEach(m => {
+    if (m.stale || !m.drift) return;
+    push += m.drift.push || 0;
+    pull += m.drift.pull || 0;
+  });
+  $("confirm-title").textContent = "处理改动";
+  $("confirm-desc").textContent = "存储当前为第 " + c.generation + " 代。未收取 " + push + " 项，待下发 " + pull + " 项。";
+  $("confirm-choices").replaceChildren();
+  $("btn-confirm-ok").textContent = "确认处理";
+  app.pendingAction = { kind: "sync-storage" };
+  $("dlg-confirm").showModal();
+}
+function confirmResolveOn(choice, agent) {
+  const local = choice === "local";
+  const n = agent.drift ? agent.drift.conflicts : 0;
+  $("confirm-title").textContent = local ? "以这台机器为准" : "以中心为准";
+  $("confirm-desc").textContent = local
+    ? "把 " + (agent.hostname || agent.agentId) + " 上的内容保留并写入中心存储，然后下发给其他在线机器。"
+    : "用中心存储的内容覆盖 " + (agent.hostname || agent.agentId) + " 上的对应文件，覆盖前先备份。其他机器不动。";
+  $("confirm-choices").replaceChildren();
+  $("btn-confirm-ok").textContent = local ? "确认以这台机器为准" : "确认以中心为准";
+  app.pendingAction = { kind: "resolve-on", choice, agentId: agent.agentId };
+  $("dlg-confirm").showModal();
+}
+
 $("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
 // 显式接线，不依赖 dialog 表单的隐式提交行为（兼容性兜底）
 $("btn-confirm-ok").addEventListener("click", ev => {
@@ -649,56 +573,89 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   // 然后关对话框；真实浏览器与 headless 行为一致
   $("dlg-confirm").returnValue = "confirm";
   const action = app.pendingAction;
-  let direction = "";
-  const checked = document.querySelector("input[name=sync-direction]:checked");
-  if (action && action.kind === "sync" && checked) direction = checked.value;
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
-  if (action && action.kind === "sync" && direction) executeSync(direction);
-  if (action && action.kind === "resolve") executeResolve(action.choice);
+  if (action && action.kind === "collect") executeCollect(action.agentId, action.name);
+  if (action && action.kind === "dispatch-one") executeDispatchOne(action.agentId, action.name);
+  if (action && action.kind === "sync-storage") executeStorageSync();
+  if (action && action.kind === "resolve-on") executeResolveOn(action.choice, action.agentId);
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
   $("dlg-confirm").close("cancel");
 });
-async function executeResolve(choice) {
-  const okBtn = $("btn-confirm-ok"); okBtn.disabled = true; okBtn.textContent = "处理中…";
+async function executeCollect(agentId, name) {
+  const okBtn = $("btn-confirm-ok");
   try {
-    const d = await api("/api/resolve?choice=" + choice + "&confirm=true", { method: "POST" });
-    if (d.ok && d.status === "resolved" && choice === "local") toast("已按本机内容写回中心");
-    else if (d.ok && d.status === "resolved") toast("已按中心内容覆盖本机");
-    else if (d.status === "no-conflicts") toast("没有需要选择的冲突");
+    const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST" });
+    if (d.ok) toast("已从 " + name + " 收取，存入中心");
     else {
       const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
-      showAlert("同步没有全部完成", lines.length ? lines : ["同步没有完成。"], null);
+      showAlert("收取没有完成", lines.length ? lines : ["收取没有完成。"], null);
     }
     await refresh();
   } catch (e) {
-    showAlert("同步没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
-  } finally {
-    okBtn.disabled = false; okBtn.textContent = "确认";
-  }
-}
-async function executeSync(direction) {
-  const okBtn = $("btn-confirm-ok"); okBtn.disabled = true; okBtn.textContent = "处理中…";
-  try {
-    const d = await api("/api/sync?direction=" + direction + "&confirm=true", { method: "POST" });
-    if (d.ok && d.status === "synced") toast("已同步到其他机器");
-    else if (d.ok && (d.status === "applied" || d.status === "no-drift")) toast("已从中心应用到本机");
-    else if (d.status === "partial" || d.ok === false) {
-      const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
-      showAlert("同步没有全部完成", lines.length ? lines : ["同步没有完成。"], null);
-    }
-    await refresh();
-  } catch (e) {
-    if (e.status === 422 || e.code === "secrets-rejected") {
+    if (e.code === "secrets-rejected") {
       showAlert("已停止：检测到疑似密钥", e.errors, null);
     } else {
-      showAlert("同步没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+      showAlert("收取没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
     }
-  } finally {
-    okBtn.disabled = false; okBtn.textContent = "确认同步";
-  }
+  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
+}
+async function executeDispatchOne(agentId, name) {
+  const okBtn = $("btn-confirm-ok");
+  try {
+    const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST" });
+    if (d.ok) toast("已下发到 " + name);
+    else {
+      const lines = (d.errors || []);
+      showAlert("下发没有完成", lines.length ? lines : [name + "没有应用这次下发。"], null);
+    }
+    await refresh();
+  } catch (e) {
+    showAlert("下发没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
+}
+async function executeStorageSync() {
+  const okBtn = $("btn-confirm-ok");
+  try {
+    const c = app.console;
+    // 先收取有未收改动的在线机器（一台一台来，每台都更新存储），
+    // 最后统一下发。
+    const toCollect = (c.machines || []).filter(m => !m.stale && m.drift && m.drift.push > 0);
+    const failures = [];
+    for (const m of toCollect) {
+      try {
+        const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(m.agentId) + "&confirm=true", { method: "POST" });
+        if (!d.ok) failures.push((m.hostname || m.agentId) + " 收取失败");
+      } catch (e) { failures.push((m.hostname || m.agentId) + " 收取失败：" + e.message); }
+    }
+    let dispatchMsg = null;
+    try {
+      const d = await api("/api/sync?direction=dispatch&confirm=true", { method: "POST" });
+      if (!d.ok) {
+        const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
+        failures.push(...(lines.length ? lines : ["下发没有全部完成。"]));
+      } else dispatchMsg = "已下发到所有在线机器";
+    } catch (e) { failures.push(e.message); }
+    if (failures.length) showAlert("同步没有全部完成", failures, null);
+    else toast(dispatchMsg || "已处理全部改动");
+    await refresh();
+  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
+}
+async function executeResolveOn(choice, agentId) {
+  const okBtn = $("btn-confirm-ok");
+  try {
+    const d = await api("/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST" });
+    if (d.ok) toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
+    else {
+      const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
+      showAlert("裁决没有完成", lines.length ? lines : ["裁决没有完成。"], null);
+    }
+    await refresh();
+  } catch (e) {
+    showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
 
 /* ---------- page-level alert ---------- */
@@ -761,12 +718,14 @@ function stampRefresh(failed) {
 
 async function refresh() {
   try {
-    const status = await api("/api/status");
+    const [consoleView, agents] = await Promise.all([
+      api("/api/console"),
+      api("/api/agents"),
+    ]);
     showWorkspace();
-    app.report = status.report;
-    $("sec-adapters").classList.remove("hidden");
+    app.console = consoleView;
     renderHero();
-    renderAdapters();
+    loadAgentsRender(agents.agents || [], false);
     stampRefresh(false);
   } catch (e) {
     if (e.status === 401) {
@@ -774,23 +733,12 @@ async function refresh() {
       return;
     }
     showWorkspace();
-    if (e.code === "not-initialized") {
-      app.report = null;
-      const hero = $("hero"); clear(hero); hero.classList.remove("warn");
-      const concl = el("p", "conclusion"); concl.append(el("span", "dot off"), document.createTextNode("还没选择要同步的目录"));
-      hero.append(concl, el("p", "numbers", "这台机器还没有完成首次设置"));
-      const note = el("div", "hero-note info");
-      note.append(el("div", null, "请在这台机器上完成首次设置。向导会让你选择要同步的目录。完成后点右上角「刷新」。"));
-      hero.append(note);
-      clear($("adapter-list")); $("sec-adapters").classList.add("hidden");
-    } else {
-      // 其他失败：保留旧数据（若有），页级提示 + footer 变灰
-      if (!app.report) renderHeroError(e.message);
-      else { renderHero(); renderAdapters(); }
-    }
+    renderHeroError(e.message);
     stampRefresh(true);
   }
-  await loadAgents();
+}
+function loadAgentsRender(agents, disabledFeature) {
+  renderAgents(agents, disabledFeature);
 }
 function renderHeroError(msg) {
   const hero = $("hero"); clear(hero); hero.classList.remove("warn"); hero.classList.add("warn");
@@ -843,7 +791,7 @@ $("form-login").addEventListener("submit", async ev => {
 });
 $("btn-logout").addEventListener("click", async () => {
   try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
-  app.report = null; app.openDiffs.clear(); app._adaptersTouched = false;
+  app.console = null;
   showGate("login");
 });
 $("btn-refresh").addEventListener("click", refresh);
