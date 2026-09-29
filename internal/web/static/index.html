@@ -787,8 +787,23 @@ async function openMachineView(a) {
         const tag = counts.length
           ? el("span", "view-counts " + (cat.conflicts ? "c-conflict" : "c-drift"), counts.join(" · "))
           : el("span", "view-counts c-clean", "已对齐");
-        // 分类行可点击：展开这台机器上该分类的具体文件清单
         const files = cat.files || [];
+        // manifest 类别（如 pi/packages）：文件列表就是插件清单——
+        // 直接平铺展示插件名，不折叠、无目录嵌套
+        if (cat.kind === "manifest") {
+          row.append(el("span", null, cat.name), tag, el("span", "muted small", files.length ? files.length + " 个插件" : ""));
+          body.append(row);
+          const box = el("div", "view-filelist");
+          files.forEach(f => {
+            const line2 = el("div", "view-file");
+            line2.append(el("span", null, f.path));
+            line2.append(el("span", "view-counts muted", f.status === "installed" ? "已安装" : f.status));
+            box.append(line2);
+          });
+          if (files.length) body.append(box);
+          return;
+        }
+        // 普通类别：分类行可点击展开文件清单
         const label = el("span", null, (files.length ? "▸ " : "") + cat.name);
         label.style.cursor = files.length ? "pointer" : "default";
         row.append(label, tag, el("span", "muted small", files.length ? files.length + " 个文件" : ""));

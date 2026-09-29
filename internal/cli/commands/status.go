@@ -27,12 +27,15 @@ type StatusOptions struct {
 // StatusCategoryReport is the JSON/text shape for one category.
 type StatusCategoryReport struct {
 	Name      string `json:"name"`
+	Kind      string `json:"kind,omitempty"`
 	Push      int    `json:"push"`
 	Pull      int    `json:"pull"`
 	Conflicts int    `json:"conflicts"`
 	// Files carries the per-file view (path + status) so the console's
 	// machine drawer can list WHICH extensions/skills/settings differ —
-	// counts alone answer "how many", not "which".
+	// counts alone answer "how many", not "which". Manifest categories
+	// list one entry per PACKAGE (the virtual manifest file is an
+	// implementation detail the console must never show).
 	Files []StatusFileReport `json:"files"`
 }
 
@@ -336,6 +339,39 @@ func BuildStatusReport(drifts []engine.CategoryDrift, extra ...[]string) StatusR
 	return report
 }
 
+// applyManifestView rewrites manifest categories' file lists from the
+// virtual manifest file (one opaque blob) into one entry per package
+// name: "which extensions are installed" reads as a package list, not
+// "packages.manifest.txt". kinds maps adapter→category→kind; locals
+// maps adapter→category→virtual file content.
+func applyManifestView(report *StatusReport, kinds map[string]map[string]string, locals map[string]map[string]string) {
+	for i := range report.Adapters {
+		adapter := &report.Adapters[i]
+		for j := range adapter.Categories {
+			category := &adapter.Categories[j]
+			isManifest := kinds[adapter.ID] != nil && kinds[adapter.ID][category.Name] == "manifest"
+			if !isManifest {
+				continue
+			}
+			content := ""
+			if locals[adapter.ID] != nil {
+				content = locals[adapter.ID][category.Name]
+			}
+			packages := make([]StatusFileReport, 0)
+			for _, line := range strings.Split(content, "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				packages = append(packages, StatusFileReport{Path: line, Status: "installed"})
+			}
+			if len(packages) > 0 {
+				category.Files = packages
+			}
+		}
+	}
+}
+
 // RunStatus computes a status report.  Supplying one DriftSources value is a
 // test seam; with no injected value the real store/scan/git collector is used.
 func RunStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, error) {
@@ -372,7 +408,46 @@ func RunStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, erro
 	errorMessages = append(errorMessages, sourceErrorMessages(sources.ScanErrors)...)
 	report := BuildStatusReport(engine.ComputeDrift(sources.Base, sources.Local, sources.Remote), errorMessages, sources.Warnings)
 	report.Disabled = DisabledSummaries(*config)
+	// Manifest categories surface package names, never the virtual file.
+	kinds := map[string]map[string]string{}
+	locals := map[string]map[string]string{}
+	for adapterID, adapter := range config.Adapters {
+		for name, category := range adapter.Categories {
+			if !category.IsManifest() {
+				continue
+			}
+			if kinds[adapterID] == nil {
+				kinds[adapterID] = map[string]string{}
+				locals[adapterID] = map[string]string{}
+			}
+			kinds[adapterID][name] = "manifest"
+			if entry, ok := findLocalEntry(sources.Local, adapterID, name); ok {
+				locals[adapterID][name] = entry
+			}
+		}
+	}
+	applyManifestView(&report, kinds, locals)
 	return report, nil
+}
+
+// findLocalEntry pulls one local snapshot entry's content by adapter and
+// category (first file wins — manifest categories hold a single virtual
+// file).
+func findLocalEntry(snapshots []core.AdapterSnapshot, adapterID, category string) (string, bool) {
+	for _, adapter := range snapshots {
+		if adapter.AdapterID != adapterID {
+			continue
+		}
+		for _, cat := range adapter.Categories {
+			if cat.Category != category {
+				continue
+			}
+			for _, entry := range cat.Files {
+				return entry.Content, true
+			}
+		}
+	}
+	return "", false
 }
 
 // runStatus is kept as an internal compatibility spelling for package-local
