@@ -78,7 +78,7 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool) (commands.PushRe
 	}
 	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
 	if e.hubURL != "" {
-		deps.HubSink = func(snapshot []core.AdapterSnapshot) error {
+		deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
 			return e.uploadHubSnapshot(ctx, snapshot)
 		}
 	}
@@ -195,7 +195,7 @@ func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta [
 }
 
 // uploadHubSnapshot pushes prepared snapshots to the hub.
-func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.AdapterSnapshot) error {
+func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.AdapterSnapshot) (int, error) {
 	store := map[string]map[string]string{}
 	for _, adapter := range snapshot {
 		for _, category := range adapter.Categories {
@@ -221,11 +221,11 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 	}
 	body, err := json.Marshal(hubSnapshotPayload{Store: store, HomerJSON: string(meta)})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.hubURL, "/")+"/api/snapshot", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if e.credential != "" {
 		request.Header.Set("Authorization", "Bearer "+e.credential)
@@ -233,14 +233,24 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 	request.Header.Set("Content-Type", "application/json")
 	response, err := e.hubClient().Do(request)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("hub upload: %s %s", response.Status, strings.TrimSpace(string(responseBody)))
+		return 0, fmt.Errorf("hub upload: %s %s", response.Status, strings.TrimSpace(string(responseBody)))
 	}
-	return nil
+	var uploaded struct {
+		OK         bool `json:"ok"`
+		Generation int  `json:"generation"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&uploaded); err != nil {
+		return 0, fmt.Errorf("hub upload: %w", err)
+	}
+	if !uploaded.OK {
+		return 0, fmt.Errorf("hub upload: hub 未确认（generation 缺失）")
+	}
+	return uploaded.Generation, nil
 }
 
 // snapshotsFromWire converts the flat wire store into adapter snapshots
@@ -306,7 +316,7 @@ func (d agentSyncDeps) PullDeps() *commands.PullDeps {
 func (d agentSyncDeps) PushDeps() *commands.PushDeps {
 	deps := &commands.PushDeps{}
 	if d.executor.hubURL != "" {
-		deps.HubSink = func(snapshot []core.AdapterSnapshot) error {
+		deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
 			return d.executor.uploadHubSnapshot(context.Background(), snapshot)
 		}
 	}

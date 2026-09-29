@@ -581,6 +581,7 @@ func TestAuthTokenRequired(t *testing.T) {
 }
 
 func TestNonLoopbackRequiresToken(t *testing.T) {
+	t.Setenv("HOMER_HOME", t.TempDir())
 	if _, err := NewServer(ServeOptions{Addr: "0.0.0.0:7760"}); err == nil {
 		t.Fatal("non-loopback server without token was accepted")
 	}

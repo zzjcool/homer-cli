@@ -36,7 +36,7 @@ type MergeDeps struct {
 	// snapshot and/or upload sink replace the git transport. When either
 	// is present the git precondition chain is skipped.
 	HubSnapshot []core.AdapterSnapshot
-	HubSink     func(snapshot []core.AdapterSnapshot) error
+	HubSink     func(snapshot []core.AdapterSnapshot) (int, error)
 }
 
 type MergeStatus string
@@ -327,10 +327,11 @@ func RunMerge(options MergeOptions, deps *MergeDeps) (report MergeReport) {
 	if deps != nil && deps.HubSink != nil {
 		// No-git data plane: the resolution publishes to the hub and the
 		// machine store (already written above) is the new baseline.
-		if err := deps.HubSink(prepared); err != nil {
+		generation, err := deps.HubSink(prepared)
+		if err != nil {
 			return tryError(err)
 		}
-		if stateErr := nowGenerationState(paths, "merge"); stateErr != nil {
+		if stateErr := nowGenerationState(paths, "merge", generation); stateErr != nil {
 			return tryError(stateErr)
 		}
 		result := newMergeCommandReport(MergeStatusResolved)

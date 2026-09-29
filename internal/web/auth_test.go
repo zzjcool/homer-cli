@@ -42,6 +42,7 @@ func sessionCookie(response *httptest.ResponseRecorder) *http.Cookie {
 
 // Rule 4: without a password file, non-loopback binds refuse to start.
 func TestNonLoopbackWithoutPasswordRefusesToStart(t *testing.T) {
+	t.Setenv("HOMER_HOME", t.TempDir())
 	if _, err := NewServer(ServeOptions{Addr: "0.0.0.0:7760"}); err == nil {
 		t.Fatal("non-loopback server without password/token accepted")
 	}

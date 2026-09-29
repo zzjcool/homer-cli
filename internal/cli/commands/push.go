@@ -75,7 +75,11 @@ type PushDeps struct {
 	// HubSink is the no-git data plane's upload destination: it receives
 	// the prepared store snapshots for publication to the hub. When set,
 	// the git commit/push transport is skipped entirely.
-	HubSink func(snapshot []core.AdapterSnapshot) error
+	// HubSink uploads the prepared snapshots for publication to the hub
+	// and returns the generation number the hub assigned. The machine
+	// records it so a later zero-drift push knows it has already
+	// published (no needless generation churn).
+	HubSink func(snapshot []core.AdapterSnapshot) (int, error)
 }
 
 // These aliases make the shared command-layer seam discoverable under the
@@ -599,14 +603,15 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		// No-git data plane: upload the prepared snapshots for publication
 		// to the hub. The machine store is already the new baseline; the
 		// git commit/push transport is retired for this call.
-		if err := deps.HubSink(prepared); err != nil {
+		generation, err := deps.HubSink(prepared)
+		if err != nil {
 			report = newPushCommandReport(PushStatusError)
 			report.ChangedFiles = changedFiles
 			report.Warnings = warnings
 			report.Errors = errorLines(err)
 			return report
 		}
-		if stateErr := nowGenerationState(paths, "push"); stateErr != nil {
+		if stateErr := nowGenerationState(paths, "push", generation); stateErr != nil {
 			report = newPushCommandReport(PushStatusError)
 			report.ChangedFiles = changedFiles
 			report.Warnings = warnings
@@ -863,11 +868,17 @@ func runPush(options PushOptions, deps *PushDeps) PushReport { return RunPush(op
 
 // nowGenerationState records a successful no-git sync: the machine's
 // store now holds the content, so the store itself is the baseline.
-func nowGenerationState(paths core.HomerPaths, command string) error {
+func nowGenerationState(paths core.HomerPaths, command string, generation ...int) error {
 	state := core.LoadState(paths)
 	state.Version = 1
 	state.LastSyncCommit = ""
 	state.LastSyncAt = time.Now().UTC().Format(time.RFC3339Nano)
 	state.LastSyncCommand = command
+	// The generation the hub assigned (when the sink reported one) marks
+	// this machine as published: a later zero-drift push must NOT
+	// republish — that would churn identical generations forever.
+	if len(generation) > 0 && generation[0] > 0 {
+		state.LastSyncGeneration = generation[0]
+	}
 	return core.SaveState(paths, state)
 }

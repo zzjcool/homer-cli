@@ -434,7 +434,7 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) 
 // publishGeneration is the hub-side push sink: it publishes the prepared
 // snapshots as the hub's new current generation. Local call — the hub
 // never HTTP-loops itself.
-func (s *Server) publishGeneration(snapshot []core.AdapterSnapshot) error {
+func (s *Server) publishGeneration(snapshot []core.AdapterSnapshot) (int, error) {
 	store := map[string]map[string]string{}
 	meta := []byte("{}")
 	if data, err := os.ReadFile(filepath.Join(s.opts.HomerHome, "homer.json")); err == nil {
@@ -450,8 +450,7 @@ func (s *Server) publishGeneration(snapshot []core.AdapterSnapshot) error {
 			}
 		}
 	}
-	_, err := gens.New(s.opts.HomerHome).Publish(store, meta)
-	return err
+	return gens.New(s.opts.HomerHome).Publish(store, meta)
 }
 
 // readSnapshotFromGeneration converts the hub's current generation back

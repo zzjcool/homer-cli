@@ -91,9 +91,9 @@ func TestRunPushUploadsHubSnapshot(t *testing.T) {
 	var uploaded []core.AdapterSnapshot
 	report := RunPush(PushOptions{HomerHome: home, Yes: true}, &PushDeps{
 		UI: HeadlessUI{},
-		HubSink: func(snapshot []core.AdapterSnapshot) error {
+		HubSink: func(snapshot []core.AdapterSnapshot) (int, error) {
 			uploaded = snapshot
-			return nil
+			return 1, nil
 		},
 	})
 	if !report.OK || report.Status != PushStatusPushed {

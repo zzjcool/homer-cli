@@ -149,9 +149,8 @@ func NewServer(opts ServeOptions) (*Server, error) {
 	// (generations/, keys/) is rooted there.
 	if strings.TrimSpace(opts.HomerHome) == "" {
 		paths := core.GetHomerPaths(func(key string) string {
-			if key == "HOMER_HOME" {
-				return ""
-			}
+			// HOMER_HOME must flow through the real environment so
+			// tests (and deployments) that set it keep working.
 			return os.Getenv(key)
 		})
 		opts.HomerHome = paths.Home
