@@ -28,9 +28,14 @@ var DefaultPIAdapter = core.AdapterConfig{
 			Mode:  core.SyncMode("mirror"),
 		},
 		"extensions": {
+			// pi 的插件二次开发目录（TS 源码），不是配置：插件安装由
+			// packages（manifest）同步，这里镜像只会产出文件树噪音
+			// （含 macOS AppleDouble ._ 垃圾）。默认关闭；确有源码备份
+			// 需求的用户可自行启用。
 			Paths:   []string{"extensions/"},
 			Mode:    core.SyncMode("mirror"),
 			Exclude: []string{"*cache*"},
+			Enabled: boolPtr(false),
 		},
 		"agents": {
 			Paths: []string{"agents/"},
@@ -58,6 +63,9 @@ var DefaultPIAdapter = core.AdapterConfig{
 		"git/",
 		"tmp/",
 		"bin/",
+		// macOS AppleDouble metadata noise (._foo next to foo) — never
+		// configuration, never wanted in a synced tree.
+		"._*",
 		"*.bak",
 		"*.bak-*",
 		"*.bak*",

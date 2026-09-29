@@ -53,7 +53,8 @@ func TestStatusReportListsFiles(t *testing.T) {
 	}
 }
 
-// Manifest categories (pi/packages) list PACKAGE NAMES, not the virtual
+// Manifest categories (pi/packages, vscode/extensions) list PACKAGE
+// NAMES, never the virtual manifest file — see applyManifestView.
 // manifest file: "which extensions are installed" is one line per
 // package — the virtual file is an implementation detail.
 func TestStatusReportManifestListsPackages(t *testing.T) {

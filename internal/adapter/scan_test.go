@@ -81,20 +81,22 @@ func TestFrozenDefaultAdapters(t *testing.T) {
 		t.Fatal("built-in adapter ids changed")
 	}
 
-	trueValue := true
+	trueValue, falseValue := true, false
 	wantPI := core.AdapterConfig{
 		Root:    "~/.pi/agent",
 		Enabled: &trueValue,
 		Categories: map[string]core.CategoryConfig{
-			"settings":   {Paths: []string{"settings.json", "keybindings.json"}, Mode: core.SyncMode("merge")},
-			"skills":     {Paths: []string{"skills/"}, Mode: core.SyncMode("mirror")},
-			"extensions": {Paths: []string{"extensions/"}, Mode: core.SyncMode("mirror"), Exclude: []string{"*cache*"}},
+			"settings": {Paths: []string{"settings.json", "keybindings.json"}, Mode: core.SyncMode("merge")},
+			"skills":   {Paths: []string{"skills/"}, Mode: core.SyncMode("mirror")},
+			// extensions 是 pi 插件二次开发目录（TS 源码），不是配置：
+			// 插件安装由 packages manifest 同步，镜像只会产出文件树噪音。
+			"extensions": {Paths: []string{"extensions/"}, Mode: core.SyncMode("mirror"), Enabled: &falseValue, Exclude: []string{"*cache*"}},
 			"agents":     {Paths: []string{"agents/"}, Mode: core.SyncMode("mirror")},
 			"models":     {Paths: []string{"models.json"}, Mode: core.SyncMode("merge"), ExcludeKeys: []string{"apiKeys"}},
 			"prompts":    {Paths: []string{"prompts/"}, Mode: core.SyncMode("mirror")},
 			"themes":     {Paths: []string{"themes/"}, Mode: core.SyncMode("mirror")},
 		},
-		Ignore: []string{"auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
+		Ignore: []string{"auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "._*", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
 	}
 	if !reflect.DeepEqual(pi.DefaultPIAdapter, wantPI) {
 		t.Fatalf("pi defaults changed:\n got %#v\nwant %#v", pi.DefaultPIAdapter, wantPI)
@@ -158,7 +160,9 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 	if got := outcome.Snapshot.AdapterID; got != "pi" {
 		t.Fatalf("adapter id = %q", got)
 	}
-	wantCategories := []string{"settings", "skills", "extensions", "agents", "models", "prompts", "themes"}
+	// extensions is disabled by default (plugin dev source dir, not
+	// configuration) — it must not appear in the scan at all.
+	wantCategories := []string{"settings", "skills", "agents", "models", "prompts", "themes"}
 	gotCategories := make([]string, 0, len(outcome.Snapshot.Categories))
 	for _, cat := range outcome.Snapshot.Categories {
 		gotCategories = append(gotCategories, cat.Category)
@@ -176,9 +180,9 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 	if got := snapshotKeys(category(t, outcome.Snapshot, "skills")); !reflect.DeepEqual(got, []string{"bar/SKILL.md", "foo/SKILL.md", "foo/reference/notes.md"}) {
 		t.Fatalf("skills keys = %#v", got)
 	}
-	if got := snapshotKeys(category(t, outcome.Snapshot, "extensions")); !reflect.DeepEqual(got, []string{"tool/index.js"}) {
-		t.Fatalf("extensions keys = %#v", got)
-	}
+	// Disabled categories leave no snapshot; the fixtures above (and the
+	// excluded cache entries) prove the ignore logic stays intact for
+	// whoever re-enables it.
 	if got := snapshotKeys(category(t, outcome.Snapshot, "agents")); !reflect.DeepEqual(got, []string{"reviewer.md"}) {
 		t.Fatalf("agents keys = %#v", got)
 	}
