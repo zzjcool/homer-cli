@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/core"
 )
 
 // Version is injected by the command package when it knows the build version.
@@ -142,6 +143,18 @@ var writeMutex sync.Mutex
 func NewServer(opts ServeOptions) (*Server, error) {
 	if strings.TrimSpace(opts.Addr) == "" {
 		return nil, errors.New("web server address is required")
+	}
+	// An empty HomerHome must resolve to the machine default (~/.homer),
+	// never the process working directory — the storage layout
+	// (generations/, keys/) is rooted there.
+	if strings.TrimSpace(opts.HomerHome) == "" {
+		paths := core.GetHomerPaths(func(key string) string {
+			if key == "HOMER_HOME" {
+				return ""
+			}
+			return os.Getenv(key)
+		})
+		opts.HomerHome = paths.Home
 	}
 	// Advisor rule 4: a hub without an administrator password refuses to
 	// bind beyond loopback — finish first-run setup on the machine itself

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -366,10 +367,16 @@ var generationMutex sync.Mutex
 // handleSnapshotUpload backs POST /api/snapshot (agent push transport).
 // It publishes the payload as a new hub generation — the generation
 // counter itself is the compare-and-swap the advisor ruling requires.
+// snapshotBodyLimit bounds a snapshot upload: a full machine snapshot is
+// plain-text configuration, easily a few hundred KB and plausibly a few
+// MB for heavy setups — far beyond the console's 64KB form limit.
+const snapshotBodyLimit = 32 << 20
+
 func (s *Server) handleSnapshotUpload(w http.ResponseWriter, r *http.Request) {
 	var payload snapshotPayload
-	if err := readJSONBody(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+	decoder := json.NewDecoder(io.LimitReader(r.Body, snapshotBodyLimit))
+	if err := decoder.Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", "请求体不是有效的 JSON（或超过 32MB 上限）", nil)
 		return
 	}
 	generationMutex.Lock()

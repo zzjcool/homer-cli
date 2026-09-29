@@ -1,7 +1,9 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -384,5 +386,31 @@ func TestResolveDelegatesToMachine(t *testing.T) {
 	}
 	if !mergedOnAgent {
 		t.Fatal("resolve must delegate the merge to the machine (hub runs no local merge)")
+	}
+}
+
+// A real machine's snapshot is far beyond the console's 64KB JSON body
+// limit — the snapshot endpoint must accept multi-MB payloads.
+func TestSnapshotUploadAcceptsLargePayload(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	// ~1MB of content across many files.
+	store := map[string]map[string]string{"pi": {}}
+	big := strings.Repeat("x", 4096)
+	for i := 0; i < 300; i++ {
+		store["pi"][fmt.Sprintf("settings/file-%d.json", i)] = big
+	}
+	body, err := json.Marshal(snapshotPayload{Store: store, HomerJSON: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/snapshot", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("large snapshot upload = %d body=%s", recorder.Code, recorder.Body)
 	}
 }
