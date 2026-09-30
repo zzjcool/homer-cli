@@ -46,12 +46,31 @@ func (e *localExecutor) Status(ctx context.Context) (commands.StatusReport, erro
 	}
 	report, err := commands.RunStatus(commands.StatusOptions{HomerHome: e.homerHome})
 	if err != nil {
+		// A fresh machine (no homer.json yet) is a LEGAL state — "new
+		// machine awaiting dispatch", not a task failure. Returning the
+		// error would surface as a 502 "agent unreachable" in the
+		// console, which is both wrong and alarming. Degraded to an
+		// empty report that explains itself; every other error still
+		// propagates.
+		if missingConfig(err) {
+			return commands.StatusReport{
+				Adapters: []commands.StatusAdapterReport{},
+				Errors:   []string{err.Error()},
+			}, nil
+		}
 		return commands.StatusReport{}, err
 	}
 	if err := contextError(ctx); err != nil {
 		return commands.StatusReport{}, err
 	}
 	return report, nil
+}
+
+// missingConfig reports whether the error is the fresh-machine "no
+// homer.json yet" state, matched STRUCTURALLY on the sentinel — a
+// message-text match would silently break on any copy change.
+func missingConfig(err error) bool {
+	return core.IsConfigNotInitialized(err)
 }
 
 func (e *localExecutor) Diff(ctx context.Context, params web.DiffParams) (string, error) {

@@ -80,6 +80,8 @@ func agentStatusForCode(code string) int {
 		return http.StatusNotFound
 	case "agent-unreachable":
 		return http.StatusBadGateway
+	case "agent-offline":
+		return http.StatusServiceUnavailable
 	case "agent-timeout":
 		return http.StatusGatewayTimeout
 	case "agents-disabled":
@@ -107,6 +109,8 @@ func errorMessage(code string) string {
 		return "agent 不存在"
 	case "agent-unreachable":
 		return "agent 无法连接"
+	case "agent-offline":
+		return "机器已离线"
 	case "agent-timeout":
 		return "agent 请求超时"
 	case "bad-request":

@@ -122,7 +122,12 @@ func (r *Registry) Get(agentID string) (AgentInfo, bool) {
 	if !ok {
 		return AgentInfo{}, false
 	}
-	return agent.info, true
+	// Staleness is derived from LastSeen at read time — a registered
+	// agent that stopped polling must read as stale even without a
+	// List() pass (fast-fail paths key on this).
+	info := agent.info
+	info.Stale = time.Since(info.LastSeen) >= AgentStaleAfter
+	return info, true
 }
 
 // taskInfo is a read-only protocol helper used by the report endpoint. It is

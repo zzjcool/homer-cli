@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,5 +221,26 @@ func TestDispatcherConnectTimeout(t *testing.T) {
 	_, err := dispatcher.AgentStatus(ctx, "slow")
 	if err == nil || !hasAgentCode(err, "agent-timeout", http.StatusGatewayTimeout) {
 		t.Fatalf("connect timeout error = %v", err)
+	}
+}
+
+// An OFFLINE machine must fail fast with a clear offline message — not
+// burn the 60s dispatcher timeout before 504. (User story: clicked
+// "查看" on a disconnected machine, waited a minute for nothing.)
+func TestDispatcherStatusOfflineFailsFast(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(AgentInfo{AgentID: "gone", Hostname: "gone", Mode: AgentModeConnect, LastSeen: time.Now().Add(-10 * time.Minute)})
+	dispatcher := NewDispatcher(registry, "token")
+	started := time.Now()
+	_, err := dispatcher.AgentStatus(context.Background(), "gone")
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("offline agent must not report success")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("offline agent must fail fast (took %v)", elapsed)
+	}
+	if !strings.Contains(err.Error(), "离线") {
+		t.Fatalf("error must say the machine is offline, got: %v", err)
 	}
 }

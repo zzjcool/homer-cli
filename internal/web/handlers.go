@@ -234,6 +234,20 @@ func (s *Server) handleHealth(w http.ResponseWriter) {
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	report, err := commands.RunStatus(commands.StatusOptions{HomerHome: s.opts.HomerHome, JSON: true})
 	if err != nil {
+		// Listen-mode parity with the connect-mode executor: a fresh
+		// machine (no homer.json) is a LEGAL state — answer with the
+		// degraded empty report instead of 409→502, so the console's
+		// status drawer works identically across agent modes.
+		if core.IsConfigNotInitialized(err) {
+			writeJSON(w, http.StatusOK, struct {
+				OK     bool                  `json:"ok"`
+				Report commands.StatusReport `json:"report"`
+			}{true, commands.StatusReport{
+				Adapters: []commands.StatusAdapterReport{},
+				Errors:   []string{err.Error()},
+			}})
+			return
+		}
 		writeCommandError(w, err)
 		return
 	}

@@ -388,7 +388,11 @@ func RunStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, erro
 	config, err := core.LoadConfig(paths)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return StatusReport{}, core.NewCliError(fmt.Sprintf("未找到 homer 配置: %s；请先运行 `homer init` 生成 homer.json 与 store 快照。", paths.ConfigFile))
+			// Sentinel-based: consumers (agentd executor, web
+			// handleStatus) match with core.IsConfigNotInitialized —
+			// structural, immune to message-copy changes.
+			return StatusReport{}, core.NewCliErrorWithCause(core.ErrConfigNotInitialized,
+				fmt.Sprintf("未找到 homer 配置: %s；请先运行 `homer init` 生成 homer.json 与 store 快照。", paths.ConfigFile))
 		}
 		return StatusReport{}, err
 	}

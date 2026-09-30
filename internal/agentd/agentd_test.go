@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -616,5 +617,48 @@ func TestAgentdPoll401IsLogged(t *testing.T) {
 	}
 	if !daemon.retries.log("poll-failed", "poll 失败（重试中）: 401") {
 		t.Fatal("first poll-failed occurrence must log")
+	}
+}
+
+// Degraded status (fresh machine: zero adapters + explaining errors)
+// must keep the drift Error alive — the console's "新机器 · 等待下发"
+// badge keys on it. (Cross-validation catch: the Status degradation
+// alone would have silently turned fresh machines into "已对齐".)
+func TestDriftSummaryPreservesDegradedError(t *testing.T) {
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer hubServer.Close()
+	home := t.TempDir() // no homer.json — fresh machine
+	cfg := Config{ConnectURL: hubServer.URL, Token: "t", AgentID: "fresh", PollWait: time.Second, PollInterval: time.Hour, ReportTimeout: time.Second}
+	daemon := New(cfg, NewLocalExecutor(home))
+	drift := daemon.driftSummary(context.Background())
+	if drift == nil || drift.Error == "" {
+		t.Fatalf("fresh machine drift must carry the degraded error, got %+v", drift)
+	}
+	if !strings.Contains(drift.Error, "未找到 homer 配置") {
+		t.Fatalf("drift error should explain the fresh-machine state, got %q", drift.Error)
+	}
+}
+
+// The console's fresh-machine badge keys on drift.Error containing BOTH
+// "homer" and "init" (index.html substring match). This test makes that
+// implicit contract explicit — copy changes anywhere in the chain
+// (status.go message, WrapConfigNotInitialized, executor degradation)
+// turn this red before the badge silently breaks.
+func TestDriftErrorCarriesFreshMachineBadgeMarkers(t *testing.T) {
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer hubServer.Close()
+	daemon := New(Config{ConnectURL: hubServer.URL, Token: "t", AgentID: "fresh", PollWait: time.Second, PollInterval: time.Hour, ReportTimeout: time.Second}, NewLocalExecutor(t.TempDir()))
+	drift := daemon.driftSummary(context.Background())
+	if drift == nil || drift.Error == "" {
+		t.Fatalf("fresh machine drift must carry an error, got %+v", drift)
+	}
+	if !strings.Contains(drift.Error, "homer") || !strings.Contains(drift.Error, "init") {
+		t.Fatalf("drift error must contain both badge markers (homer, init) for the console badge, got %q", drift.Error)
 	}
 }

@@ -771,7 +771,20 @@ async function openMachineView(a) {
     clear(body);
     const adapters = (d && d.report && d.report.adapters) || d.adapters || [];
     if (!adapters.length) {
-      body.append(el("div", "muted", "这台机器还没有可报告的配置（新机器等下发后会有内容）"));
+      // 优先展示机器自己解释的原因（如"未找到 homer 配置…等待下发"），
+      // fallback 才是通用文案——空态不等于新机器（也可能全 disabled）。
+      const reason = (d && d.report && d.report.errors && d.report.errors[0]) || "";
+      if (reason) {
+        body.append(el("div", "muted", reason));
+        const hint = el("div", "muted small", "新机器等第一次「下发」后会有内容（下发会自动初始化配置）。");
+        hint.style.marginTop = "6px";
+        body.append(hint);
+      } else {
+        const disabled = (d && d.report && d.report.disabled) || [];
+        body.append(el("div", "muted", disabled.length
+          ? "所有适配器均已禁用：" + disabled.join("、")
+          : "这台机器还没有可报告的配置"));
+      }
       return;
     }
     adapters.forEach(adapter => {
@@ -813,7 +826,8 @@ async function openMachineView(a) {
             if (existing && existing.classList.contains("view-filelist")) { existing.remove(); label.textContent = "▸ " + cat.name; return; }
             label.textContent = "▾ " + cat.name;
             const box = el("div", "view-filelist");
-            const statusText = s => s === "conflict" ? "冲突" : s === "push" ? "↑未收取" : s === "pull" ? "↓待下发" : s === "delete" ? "已删除" : "无变化";
+            const STATUS_TEXT = { conflict: "冲突", push: "↑未收取", pull: "↓待下发", delete: "已删除" };
+            const statusText = s => STATUS_TEXT[s] || "无变化";
             files.forEach(f => {
               const line2 = el("div", "view-file");
               line2.append(el("span", null, f.path));

@@ -75,6 +75,9 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 }
 
 func (d *Dispatcher) AgentStatus(ctx context.Context, agentID string) (json.RawMessage, error) {
+	if err := d.requireOnline(agentID); err != nil {
+		return nil, err
+	}
 	info, err := d.agentInfo(agentID)
 	if err != nil {
 		return nil, err
@@ -175,6 +178,22 @@ func (d *Dispatcher) agentInfo(agentID string) (AgentInfo, error) {
 		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("agent %q is not registered", agentID))
 	}
 	return info, nil
+}
+
+// requireOnline fails fast for stale machines. A task enqueued for a
+// disconnected agent burns the full dispatcherTimeout (60s) before
+// 504ing — the user clicked one button and waited a minute for
+// nothing. Connectivity tasks (AgentStatus) must refuse immediately.
+func (d *Dispatcher) requireOnline(agentID string) error {
+	info, err := d.agentInfo(agentID)
+	if err != nil {
+		return err
+	}
+	if info.Stale {
+		return newAgentError("agent-offline", http.StatusServiceUnavailable,
+			fmt.Errorf("机器 %s 离线（最后心跳 %s 前）。请等它重新上线或先在机器上重启 agent", agentID, time.Since(info.LastSeen).Round(time.Second)))
+	}
+	return nil
 }
 
 func (d *Dispatcher) enqueueAndWait(ctx context.Context, agentID string, kind TaskKind, options TaskOptions) (json.RawMessage, error) {

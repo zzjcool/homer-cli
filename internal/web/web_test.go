@@ -239,13 +239,21 @@ func TestStatusRoute(t *testing.T) {
 func TestStatusNotInitialized(t *testing.T) {
 	home := t.TempDir()
 	server := newWebServer(t, webFixture{home: home}, "test-token", nil, nil)
+	// A fresh machine (no homer.json) answers with a LEGAL degraded
+	// report — "new machine awaiting dispatch" is a machine state, not
+	// an error. The old 409 not-initialized surfaced as a misleading
+	// 502 "agent unreachable" in the console's status drawer.
 	response := request(t, server.Handler(), http.MethodGet, "/api/status")
-	if response.Code != http.StatusConflict {
+	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body)
 	}
 	body := decodeBody(t, response)
-	if body["error"].(map[string]any)["code"] != "not-initialized" {
-		t.Fatalf("error = %#v", body)
+	report := body["report"].(map[string]any)
+	if adapters, ok := report["adapters"].([]any); !ok || len(adapters) != 0 {
+		t.Fatalf("fresh machine report must carry zero adapters: %#v", report)
+	}
+	if errorsList, ok := report["errors"].([]any); !ok || len(errorsList) == 0 {
+		t.Fatalf("fresh machine report must explain itself in errors: %#v", report)
 	}
 }
 

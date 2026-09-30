@@ -341,6 +341,12 @@ func (d *Daemon) driftSummary(ctx context.Context) *hub.AgentDrift {
 		drift.Pull += adapter.Pull
 		drift.Conflicts += adapter.Conflicts
 	}
+	// Degraded status (e.g. fresh machine: empty adapters + Errors
+	// explaining "no homer.json yet") must surface in the drift Error —
+	// the console keys its "新机器 · 等待下发" badge on that text.
+	if len(report.Adapters) == 0 && len(report.Errors) > 0 {
+		drift.Error = report.Errors[0]
+	}
 	d.driftMu.Lock()
 	d.lastDrift = drift
 	d.lastDriftAt = now
