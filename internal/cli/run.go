@@ -42,7 +42,7 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		if validationErr := validateCommandOptions(parsed.Command, options); validationErr != nil {
 			return usageError(parsed.Command, validationErr.Error(), out, errOut)
 		}
-		return runUpgrade(options.Force, out, errOut)
+		return runUpgrade(options.Force, options.Connect, options.Home, out, errOut)
 	}
 	if parsed.Command == "" {
 		if len(parsed.Rest) > 0 {

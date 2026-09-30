@@ -553,3 +553,31 @@ func TestStorageFileContent(t *testing.T) {
 		t.Fatalf("content = %q", payload.Content)
 	}
 }
+
+// A per-agent secret must authorize the binary download too — the
+// machine's OWN upgrade path (`homer upgrade`) presents its enrollment
+// secret, not the shared hub token. (User hit 401: keys/hub-token holds
+// a burned hr_ code after enrollment.)
+func TestAgentSecretDownloadsBinary(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server, err := NewServer(ServeOptions{
+		Addr:       "127.0.0.1:0",
+		HomerHome:  fixture.home,
+		Token:      "hub-token-value",
+		Enrollment: testEnrollmentService{},
+		AgentEndpointAuthorized: func(r *http.Request) bool {
+			return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer agent-secret-")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/dl/homer", nil)
+	request.Header.Set("Authorization", "Bearer agent-secret-xyz")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("agent-secret download = %d body=%s", recorder.Code, recorder.Body)
+	}
+}

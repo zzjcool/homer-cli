@@ -59,6 +59,14 @@ func (s *Server) authorized(r *http.Request) bool {
 	if s.opts.Enrollment != nil && s.opts.Enrollment.ValidCode(provided) {
 		return true
 	}
+	// An enrolled machine's per-agent secret authorizes its OWN upgrade
+	// path (`homer upgrade`): keys/hub-token still holds the burned hr_
+	// code from install time, so the machine presents agent.json's
+	// secret instead. Delegated to the agent API's machine-credential
+	// authority (the same check /agent/v1/* uses).
+	if s.opts.AgentEndpointAuthorized != nil && s.opts.AgentEndpointAuthorized(r) {
+		return true
+	}
 	// Rule 6: no more implicit loopback trust. Without any credential
 	// configured the API stays locked (setup/login endpoints aside).
 	return false

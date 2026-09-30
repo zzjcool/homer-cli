@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"io"
 	"os"
 	"strings"
@@ -70,10 +71,38 @@ func renderVersionChecked(current string, outcome versionCheckOutcome) string {
 	return strings.Join(lines, "\n")
 }
 
-// runUpgrade implements `homer upgrade`: check the latest release and, when
-// it is newer (or --force is given), download, verify and replace this
-// binary. Non-interactive; the user asked for the upgrade explicitly.
-func runUpgrade(force bool, out, errOut io.Writer) int {
+// runUpgrade implements `homer upgrade`. Two channels, hub first:
+//
+//  1. HUB channel (agent machines): pull the hub's OWN binary via
+//     /dl/homer with the machine's per-agent secret (agent.json) or the
+//     hub token (keys/hub-token). This is the fleet's self-update path —
+//     the user story: "为什么升级这么麻烦，能不能增加一个命令，我执行
+//     一下，自己就升级了".
+//  2. GITHUB channel (no hub credential): the original release-based
+//     self-update, unchanged.
+func runUpgrade(force bool, connect, home string, out, errOut io.Writer) int {
+	// Hub channel first: commands.RunUpgrade resolves the machine's own
+	// credential (agent.json secret > keys/hub-token) and hub address.
+	// It reports NoCredential when neither exists (GitHub-only installs).
+	report := commands.RunUpgrade(commands.UpgradeOptions{
+		HomerHome: home,
+		Connect:   connect,
+		Out:       out,
+		ErrOut:    errOut,
+	})
+	if report.OK {
+		return 0
+	}
+	if report.Status != "no-credential" {
+		// An enrolled machine (credential exists) must NOT silently fall
+		// back to GitHub: the release channel is far behind the hub
+		// build — a "successful" fallback would DOWNGRADE the machine
+		// and strip its features. Surface the hub error instead.
+		writeLine(errOut, "homer upgrade: hub 通道失败: "+report.Note)
+		writeLine(errOut, "homer upgrade: 接入机器不从 GitHub release 升级（会降级）；请检查 hub 可达后重试")
+		return 1
+	}
+
 	current := currentVersion()
 	client := upgrade.NewClient(os.Getenv("HOMER_INSTALL_BASE_URL"))
 	latest, err := client.FetchLatest()
