@@ -341,11 +341,15 @@ func (d *Daemon) driftSummary(ctx context.Context) *hub.AgentDrift {
 		drift.Pull += adapter.Pull
 		drift.Conflicts += adapter.Conflicts
 	}
-	// Degraded status (e.g. fresh machine: empty adapters + Errors
-	// explaining "no homer.json yet") must surface in the drift Error —
-	// the console keys its "新机器 · 等待下发" badge on that text.
-	if len(report.Adapters) == 0 && len(report.Errors) > 0 {
-		drift.Error = report.Errors[0]
+	// Fresh-machine marker (fallback scan carries the "no homer.json
+	// yet" line in Errors) must surface in the drift Error — the
+	// console keys its "新机器 · 等待下发" badge on it, and a fresh
+	// machine must not read as "↑N 项未收取" before a baseline exists.
+	for _, message := range report.Errors {
+		if strings.Contains(message, "未找到 homer 配置") {
+			drift.Error = message
+			break
+		}
 	}
 	d.driftMu.Lock()
 	d.lastDrift = drift

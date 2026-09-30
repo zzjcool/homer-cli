@@ -8,9 +8,10 @@ import (
 )
 
 // A fresh machine (no homer.json yet) must answer status with a LEGAL
-// empty report — "new machine awaiting dispatch" is a machine state,
-// not a task failure. The 502 the user saw ("查询失败：请求失败（502）")
-// came from treating this as an executor error.
+// report: the built-in adapters fall back to defaults and scan what is
+// actually installed (the user story: "为什么不是直接扫描他的 pi 当前
+// 安装的插件"), plus an Errors marker line for the console badge. The
+// 502 the user saw came from treating this as an executor error.
 func TestStatusOnFreshMachineIsLegalEmpty(t *testing.T) {
 	home := t.TempDir() // no homer.json anywhere
 	executor := NewLocalExecutorWithHub(home, "", "")
@@ -20,10 +21,15 @@ func TestStatusOnFreshMachineIsLegalEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh machine status must not error: %v", err)
 	}
-	if len(report.Adapters) != 0 {
-		t.Fatalf("fresh machine must report zero adapters, got %+v", report.Adapters)
+	// Errors must carry the fresh-machine marker (drift badge keys on
+	// it) — even though the scan itself succeeded via defaults.
+	marked := false
+	for _, message := range report.Errors {
+		if strings.Contains(message, "未找到 homer 配置") {
+			marked = true
+		}
 	}
-	if len(report.Errors) == 0 || !strings.Contains(report.Errors[0], "未找到 homer 配置") {
-		t.Fatalf("fresh machine must explain itself in report.Errors: %+v", report.Errors)
+	if !marked {
+		t.Fatalf("fresh machine report must carry the marker in Errors: %+v", report.Errors)
 	}
 }

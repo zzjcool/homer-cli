@@ -239,21 +239,27 @@ func TestStatusRoute(t *testing.T) {
 func TestStatusNotInitialized(t *testing.T) {
 	home := t.TempDir()
 	server := newWebServer(t, webFixture{home: home}, "test-token", nil, nil)
-	// A fresh machine (no homer.json) answers with a LEGAL degraded
-	// report — "new machine awaiting dispatch" is a machine state, not
-	// an error. The old 409 not-initialized surfaced as a misleading
-	// 502 "agent unreachable" in the console's status drawer.
+	// A fresh machine (no homer.json) answers with a LEGAL report: the
+	// built-in adapters fall back to defaults and scan what is actually
+	// installed, plus an errors marker line. The old 409
+	// not-initialized surfaced as a misleading 502 "agent unreachable"
+	// in the console's status drawer.
 	response := request(t, server.Handler(), http.MethodGet, "/api/status")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body)
 	}
 	body := decodeBody(t, response)
 	report := body["report"].(map[string]any)
-	if adapters, ok := report["adapters"].([]any); !ok || len(adapters) != 0 {
-		t.Fatalf("fresh machine report must carry zero adapters: %#v", report)
+	marked := false
+	if errorsList, ok := report["errors"].([]any); ok {
+		for _, item := range errorsList {
+			if message, ok := item.(string); ok && strings.Contains(message, "未找到 homer 配置") {
+				marked = true
+			}
+		}
 	}
-	if errorsList, ok := report["errors"].([]any); !ok || len(errorsList) == 0 {
-		t.Fatalf("fresh machine report must explain itself in errors: %#v", report)
+	if !marked {
+		t.Fatalf("fresh machine report must carry the marker in errors: %#v", report["errors"])
 	}
 }
 

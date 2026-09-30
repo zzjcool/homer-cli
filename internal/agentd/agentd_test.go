@@ -620,10 +620,9 @@ func TestAgentdPoll401IsLogged(t *testing.T) {
 	}
 }
 
-// Degraded status (fresh machine: zero adapters + explaining errors)
-// must keep the drift Error alive — the console's "新机器 · 等待下发"
-// badge keys on it. (Cross-validation catch: the Status degradation
-// alone would have silently turned fresh machines into "已对齐".)
+// Fresh-machine drift must carry the fallback marker in Error — the
+// console's "新机器 · 等待下发" badge keys on it, and a fresh machine
+// must not read as "↑N 项未收取" before a baseline exists.
 func TestDriftSummaryPreservesDegradedError(t *testing.T) {
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

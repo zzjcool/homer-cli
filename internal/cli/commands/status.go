@@ -388,19 +388,41 @@ func RunStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, erro
 	config, err := core.LoadConfig(paths)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Sentinel-based: consumers (agentd executor, web
-			// handleStatus) match with core.IsConfigNotInitialized —
-			// structural, immune to message-copy changes.
-			return StatusReport{}, core.NewCliErrorWithCause(core.ErrConfigNotInitialized,
-				fmt.Sprintf("未找到 homer 配置: %s；请先运行 `homer init` 生成 homer.json 与 store 快照。", paths.ConfigFile))
+			// A machine without homer.json still HAS live configuration
+			// worth showing: the built-in adapters (pi/herdr/opencode/
+			// vscode) are compiled into the binary. Fall back to the
+			// defaults for this READ-ONLY scan — "查看" on a fresh
+			// machine shows what is installed instead of refusing.
+			// (Write paths — push baseline, store — never fall back.)
+			config := &core.HomerConfig{Version: 1, Adapters: defaultAdaptersForScan()}
+			report, err := runStatusWithConfig(opts, paths, config, injected...)
+			if err != nil {
+				return StatusReport{}, err
+			}
+			// The marker rides in Errors (not Warnings) on purpose:
+			// driftSummary keys the console's "新机器 · 等待下发" badge
+			// on it — a fresh machine must not read as "↑32 项未收取"
+			// (its local files are not drift until a baseline exists).
+			report.Errors = append(report.Errors, fmt.Sprintf(
+				"未找到 homer 配置: %s；请先运行 `homer init` 生成 homer.json 与 store 快照。", paths.ConfigFile))
+			report.Warnings = append([]string{fmt.Sprintf(
+				"这台机器还没有接入配置基线。以下为内置适配器的实况扫描；执行一次「下发」或 `homer init` 后进入正式同步。")}, report.Warnings...)
+			return report, nil
 		}
 		return StatusReport{}, err
 	}
 
+	return runStatusWithConfig(opts, paths, config, injected...)
+}
+
+// runStatusWithConfig is RunStatus's body with the config already
+// resolved (real config, or the built-in defaults fallback).
+func runStatusWithConfig(opts StatusOptions, paths core.HomerPaths, config *core.HomerConfig, injected ...DriftSources) (StatusReport, error) {
 	var sources DriftSources
 	if provided, ok := sourceFromArgs(injected); ok {
 		sources = provided
 	} else {
+		var err error
 		sources, err = CollectSnapshotSources(paths, config)
 		if err != nil {
 			return StatusReport{}, err
@@ -458,4 +480,14 @@ func findLocalEntry(snapshots []core.AdapterSnapshot, adapterID, category string
 // tests ported from the TypeScript command module.
 func runStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, error) {
 	return RunStatus(opts, injected...)
+}
+
+// defaultAdaptersForScan clones the compiled-in adapter defaults for the
+// read-only fresh-machine fallback (never persisted, never a baseline).
+func defaultAdaptersForScan() map[string]core.AdapterConfig {
+	selected := make(map[string]core.AdapterConfig, len(knownAdapterOrder))
+	for _, id := range knownAdapterOrder {
+		selected[id] = cloneAdapterConfig(KNOWN_ADAPTERS[id])
+	}
+	return selected
 }

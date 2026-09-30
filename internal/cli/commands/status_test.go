@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -102,4 +104,45 @@ func TestApplyManifestViewExpandsPackages(t *testing.T) {
 	if files[0].Path != "npm:pi-lens" || files[1].Path != "npm:pi-sop" {
 		t.Fatalf("package names = %+v", files)
 	}
+}
+
+// A machine without homer.json must still SHOW its live configuration:
+// the built-in default adapters (pi/herdr/opencode/vscode) are compiled
+// into the binary — scanning them read-only needs no init. The report
+// carries a warning explaining the fallback (no baseline yet).
+func TestStatusFallsBackToDefaultsOnFreshMachine(t *testing.T) {
+	home := t.TempDir()
+	// A pi installation exists on this fresh machine (packages +
+	// settings), but no homer.json.
+	piRoot := filepath.Join(home, ".pi", "agent")
+	if err := os.MkdirAll(filepath.Join(piRoot, "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(piRoot, "extensions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(piRoot, "settings.json"), []byte(`{"theme":"dark"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOMER_HOME", home)
+	t.Setenv("HOME", home)
+	report, err := RunStatus(StatusOptions{})
+	if err != nil {
+		t.Fatalf("fresh machine status must fall back to defaults: %v", err)
+	}
+	found := false
+	for _, adapter := range report.Adapters {
+		if adapter.ID == "pi" {
+			found = true
+			for _, category := range adapter.Categories {
+				if category.Name == "settings" && len(category.Files) > 0 {
+					return // PASS: live config visible without init
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("pi adapter missing from fallback scan: %+v", report.Adapters)
+	}
+	t.Fatal("pi settings files missing from fallback scan")
 }
