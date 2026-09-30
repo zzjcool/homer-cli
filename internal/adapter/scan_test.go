@@ -91,10 +91,16 @@ func TestFrozenDefaultAdapters(t *testing.T) {
 			// extensions 是 pi 插件二次开发目录（TS 源码），不是配置：
 			// 插件安装由 packages manifest 同步，镜像只会产出文件树噪音。
 			"extensions": {Paths: []string{"extensions/"}, Mode: core.SyncMode("mirror"), Enabled: &falseValue, Exclude: []string{"*cache*"}},
-			"agents":     {Paths: []string{"agents/"}, Mode: core.SyncMode("mirror")},
-			"models":     {Paths: []string{"models.json"}, Mode: core.SyncMode("merge"), ExcludeKeys: []string{"apiKeys"}},
-			"prompts":    {Paths: []string{"prompts/"}, Mode: core.SyncMode("mirror")},
-			"themes":     {Paths: []string{"themes/"}, Mode: core.SyncMode("mirror")},
+			// packages 是旗舰类别：按名同步插件（listCmd 盘点，
+			// applyCmd 补装）。新机器不配置也能看到/同步插件。
+			"packages": func() core.CategoryConfig {
+				kind := core.CategoryKindManifest
+				return core.CategoryConfig{Mode: core.SyncMode("mirror"), Kind: &kind, ListCmd: "pi list", ApplyCmd: "pi install", IDPattern: "^  (npm:[A-Za-z0-9@/._-]+)$"}
+			}(),
+			"agents":  {Paths: []string{"agents/"}, Mode: core.SyncMode("mirror")},
+			"models":  {Paths: []string{"models.json"}, Mode: core.SyncMode("merge"), ExcludeKeys: []string{"apiKeys"}},
+			"prompts": {Paths: []string{"prompts/"}, Mode: core.SyncMode("mirror")},
+			"themes":  {Paths: []string{"themes/"}, Mode: core.SyncMode("mirror")},
 		},
 		Ignore: []string{"auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "**/._*", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
 	}
@@ -161,8 +167,9 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 		t.Fatalf("adapter id = %q", got)
 	}
 	// extensions is disabled by default (plugin dev source dir, not
-	// configuration) — it must not appear in the scan at all.
-	wantCategories := []string{"settings", "skills", "agents", "models", "prompts", "themes"}
+	// configuration) — it must not appear in the scan at all. packages
+	// (manifest) appears last.
+	wantCategories := []string{"settings", "skills", "agents", "models", "prompts", "themes", "packages"}
 	gotCategories := make([]string, 0, len(outcome.Snapshot.Categories))
 	for _, cat := range outcome.Snapshot.Categories {
 		gotCategories = append(gotCategories, cat.Category)

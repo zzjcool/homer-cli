@@ -12,6 +12,8 @@ const PI_ADAPTER_ID = PIAdapterID
 
 func boolPtr(value bool) *bool { return &value }
 
+func kindPtr(kind core.CategoryKind) *core.CategoryKind { return &kind }
+
 // DefaultPIAdapter is the frozen pi configuration from the legacy TypeScript
 // source (the sole source of truth for this adapter's categories and ignore
 // list).
@@ -40,6 +42,17 @@ var DefaultPIAdapter = core.AdapterConfig{
 		"agents": {
 			Paths: []string{"agents/"},
 			Mode:  core.SyncMode("mirror"),
+		},
+		// packages is THE flagship category: plugin sync by name
+		// (listCmd inventories what is installed; applyCmd installs the
+		// missing ones on pull). A fresh machine's plugins must be
+		// visible (and syncable) without any configuration.
+		"packages": {
+			Mode:      core.SyncMode("mirror"),
+			Kind:      kindPtr(core.CategoryKindManifest),
+			ListCmd:   "pi list",
+			ApplyCmd:  "pi install",
+			IDPattern: "^  (npm:[A-Za-z0-9@/._-]+)$",
 		},
 		"models": {
 			Paths:       []string{"models.json"},

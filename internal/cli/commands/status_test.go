@@ -146,3 +146,21 @@ func TestStatusFallsBackToDefaultsOnFreshMachine(t *testing.T) {
 	}
 	t.Fatal("pi settings files missing from fallback scan")
 }
+
+// The pi/packages manifest category IS the flagship scenario (plugin
+// sync: "查看 pi 安装了什么插件"). It must be part of the compiled
+// default adapters so fresh machines report their plugins without any
+// configuration — a machine with pi plugins installed must show them.
+func TestDefaultAdaptersIncludePiPackages(t *testing.T) {
+	config := defaultAdaptersForScan()
+	piPackages, ok := config["pi"].Categories["packages"]
+	if !ok {
+		t.Fatal("compiled default must include pi/packages (plugin manifest — the flagship sync category)")
+	}
+	if piPackages.Kind == nil || *piPackages.Kind != core.CategoryKindManifest {
+		t.Fatal("pi/packages must be a manifest category")
+	}
+	if piPackages.ListCmd == "" || piPackages.ApplyCmd == "" {
+		t.Fatal("pi/packages must carry listCmd and applyCmd")
+	}
+}
