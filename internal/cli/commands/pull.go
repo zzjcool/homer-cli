@@ -20,6 +20,13 @@ type PullOptions struct {
 	Home      string
 	JSON      bool
 	Yes       bool
+	// Adapters restricts the pull to these ids. Nil applies the whole
+	// remote snapshot. A non-nil slice leaves every other adapter on the
+	// machine untouched.
+	Adapters []string
+	// PreferRemote rewrites conflicts into the center's content. Used
+	// when the user chose "以中心为准" for a specific adapter.
+	PreferRemote bool
 }
 
 // PullDeps contains pull-specific injection points. Shared git behavior stays
@@ -425,10 +432,27 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		manifestCommandWarnings = manifestCommandChangeWarnings(paths.Home, *config, git)
 	}
 	sources := collectSources(sourceInput, paths, *config, false, depsHubSnapshot(deps))
+	if options.Adapters != nil {
+		ids, err := syncx.ParseAdapterIDs(options.Adapters)
+		if err != nil {
+			report.Errors = []string{err.Error()}
+			return report
+		}
+		if err := pullSelectionError(*config, sources.Remote, ids); err != nil {
+			report.Errors = []string{err.Error()}
+			return report
+		}
+		sources.Base = syncx.FilterSnapshots(sources.Base, ids)
+		sources.Local = syncx.FilterSnapshots(sources.Local, ids)
+		sources.Remote = syncx.FilterSnapshots(sources.Remote, ids)
+	}
 	warnings := append([]string{}, sources.Warnings...)
 	warnings = append(warnings, manifestCommandWarnings...)
 	sourceErrors := append([]string{}, sources.Errors...)
 	plan := syncx.PlanPull(*config, sources.Base, sources.Local, sources.Remote)
+	if options.PreferRemote {
+		plan = preferRemotePlan(plan, sources.Remote)
+	}
 	remainingPlan, manifestTasks, manifestWarnings := syncx.SplitManifestActions(*config, plan, sources.Local)
 	warnings = append(warnings, manifestWarnings...)
 	if len(remainingPlan.Actions) == 0 && len(manifestTasks) == 0 && len(manifestCommandWarnings) == 0 {

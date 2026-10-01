@@ -16,6 +16,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
+	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
 
 // Manual sync (planner-frozen MVP step 2): one console action collapses
@@ -104,6 +105,13 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 // machine's own executor uploads the snapshot (its HubSink); the hub
 // side only verifies a generation actually landed.
 func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, confirmed bool) {
+	scope, err := readSyncScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	// Collect never force-publishes a conflict; resolution has its own action.
+	scope.Overwrite = false
 	agentID := r.URL.Query().Get("agent")
 	if agentID == "" {
 		writeError(w, http.StatusBadRequest, "bad-request", "缺少 agent 参数（要收取哪台机器）", nil)
@@ -124,7 +132,7 @@ func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, 
 	if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
 		before = head.Generation
 	}
-	raw, err := s.opts.Agents.AgentPush(r.Context(), agentID, true)
+	raw, err := s.opts.Agents.AgentPush(r.Context(), agentID, true, scope)
 	if err != nil {
 		writeErrorValue(w, err)
 		return
@@ -139,13 +147,14 @@ func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, 
 	}
 	result := agentApplyResult{AgentID: agentID, Hostname: name, OK: true}
 	var payload struct {
-		OK     bool   `json:"ok"`
-		Status string `json:"status"`
+		OK     bool     `json:"ok"`
+		Status string   `json:"status"`
+		Errors []string `json:"errors"`
 	}
 	if json.Unmarshal(raw, &payload) != nil || !payload.OK {
 		result.OK = false
 		result.Status = payload.Status
-		result.Error = name + msgAgentNotApplied
+		result.Error = agentResultError(name, payload.Status, payload.Errors)
 	}
 	head, ok := gens.New(s.opts.HomerHome).Read()
 	published := ok && head.Generation > before
@@ -180,6 +189,12 @@ func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, 
 // current generation. Offline machines are skipped; one failure never
 // stops the rest.
 func (s *Server) syncDispatchToMachines(w http.ResponseWriter, r *http.Request, confirmed bool) {
+	scope, err := readSyncScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	scope.Overwrite = false
 	if !confirmed {
 		writeJSON(w, http.StatusConflict, syncReport{
 			OK: false, Status: "aborted", Direction: string(syncDispatch),
@@ -194,7 +209,13 @@ func (s *Server) syncDispatchToMachines(w http.ResponseWriter, r *http.Request, 
 		})
 		return
 	}
-	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents)
+	if scope.Explicit {
+		if err := s.requireCenterAdapters(scope.Adapters); err != nil {
+			writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+			return
+		}
+	}
+	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents, scope)
 	allOK := true
 	for _, result := range results {
 		if !result.OK && !result.Skipped {
@@ -270,7 +291,7 @@ func (s *Server) syncToOthers(w http.ResponseWriter, r *http.Request, confirmed 
 		})
 		return
 	}
-	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents)
+	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents, SyncScope{})
 	allOK := true
 	for _, result := range results {
 		if !result.Skipped && !result.OK {
@@ -298,7 +319,7 @@ func (s *Server) syncToOthers(w http.ResponseWriter, r *http.Request, confirmed 
 // fanoutPullOnlineAgents asks every online machine to apply the center's
 // content. Stale machines are reported skipped; single failures never
 // break the loop.
-func fanoutPullOnlineAgents(ctx context.Context, agents AgentsSource) []agentApplyResult {
+func fanoutPullOnlineAgents(ctx context.Context, agents AgentsSource, scope SyncScope) []agentApplyResult {
 	results := []agentApplyResult{}
 	if agents == nil {
 		return results
@@ -314,7 +335,7 @@ func fanoutPullOnlineAgents(ctx context.Context, agents AgentsSource) []agentApp
 			results = append(results, result)
 			continue
 		}
-		raw, err := agents.AgentPull(ctx, info.AgentID, true)
+		raw, err := agents.AgentPull(ctx, info.AgentID, true, scope)
 		switch {
 		case err != nil:
 			result.OK = false
@@ -361,12 +382,28 @@ func humanStatusSentence(status string, messages []string) string {
 	return msgGenericFailure
 }
 
+func agentResultError(name, status string, messages []string) string {
+	switch status {
+	case "conflicts", "conflicts-remain":
+		return msgBothChanged
+	case "secrets-rejected":
+		return msgSecretsStopped
+	}
+	if len(messages) > 0 && !strings.Contains(messages[0], "homer merge") && !strings.Contains(messages[0], "git ") {
+		return messages[0]
+	}
+	return name + msgAgentNotApplied
+}
+
 // snapshotPayload is the wire format of the no-git data plane: an agent
 // uploads its prepared snapshot; pullers download the hub's current one.
 type snapshotPayload struct {
 	HomerJSON  string                       `json:"homerJson"`
 	Store      map[string]map[string]string `json:"store"`
 	Generation int                          `json:"generation"`
+	// Adapters, when set, merges just those adapters into the previous
+	// generation. Omitted, the upload replaces the generation entirely.
+	Adapters []string `json:"adapters,omitempty"`
 }
 
 // generationMutex serializes generation publication only. It must NOT be
@@ -393,7 +430,27 @@ func (s *Server) handleSnapshotUpload(w http.ResponseWriter, r *http.Request) {
 	generationMutex.Lock()
 	defer generationMutex.Unlock()
 	layout := gens.New(s.opts.HomerHome)
-	generation, err := layout.Publish(payload.Store, []byte(payload.HomerJSON))
+	store := payload.Store
+	if store == nil {
+		store = map[string]map[string]string{}
+	}
+	if payload.Adapters != nil {
+		ids, err := syncx.ParseAdapterIDs(payload.Adapters)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+			return
+		}
+		var base map[string]map[string]string
+		if head, ok := layout.Read(); ok {
+			base, err = readGenerationStore(head.StoreDir)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "storage-read", "读取存储内容失败: "+err.Error(), nil)
+				return
+			}
+		}
+		store = syncx.MergeScopedStore(base, store, ids)
+	}
+	generation, err := layout.Publish(store, []byte(payload.HomerJSON))
 	if err != nil {
 		writeErrorValue(w, err)
 		return

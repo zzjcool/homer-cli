@@ -464,6 +464,8 @@ type sourceStub struct {
 	pullErr     error
 	pushValues  []bool
 	pullValues  []bool
+	pushScopes  []SyncScope
+	pullScopes  []SyncScope
 	pulledAgent []string
 	// onPush runs inside AgentPush — tests simulate a machine whose own
 	// executor uploads into the hub storage here.
@@ -495,9 +497,10 @@ func (s *sourceStub) AgentStatus(_ context.Context, _ string) (json.RawMessage, 
 func (s *sourceStub) AgentDiff(_ context.Context, _ string, _ DiffParams) (string, error) {
 	return s.diffText, s.diffErr
 }
-func (s *sourceStub) AgentPush(_ context.Context, _ string, confirm bool) (json.RawMessage, error) {
+func (s *sourceStub) AgentPush(_ context.Context, _ string, confirm bool, scope SyncScope) (json.RawMessage, error) {
 	s.mu.Lock()
 	s.pushValues = append(s.pushValues, confirm)
+	s.pushScopes = append(s.pushScopes, scope)
 	hook := s.onPush
 	s.mu.Unlock()
 	if hook != nil {
@@ -505,9 +508,10 @@ func (s *sourceStub) AgentPush(_ context.Context, _ string, confirm bool) (json.
 	}
 	return s.pushRaw, s.pushErr
 }
-func (s *sourceStub) AgentPull(_ context.Context, agentID string, confirm bool) (json.RawMessage, error) {
+func (s *sourceStub) AgentPull(_ context.Context, agentID string, confirm bool, scope SyncScope) (json.RawMessage, error) {
 	s.mu.Lock()
 	s.pullValues = append(s.pullValues, confirm)
+	s.pullScopes = append(s.pullScopes, scope)
 	s.pulledAgent = append(s.pulledAgent, agentID)
 	s.mu.Unlock()
 	return s.pullRaw, s.pullErr

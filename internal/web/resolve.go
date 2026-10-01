@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -111,7 +112,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents)
+		results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents, SyncScope{})
 		allOK := true
 		errors := []string{}
 		for _, result := range results {
@@ -155,12 +156,32 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	// "local" lets the machine resolve and publish (its executor's push
 	// path applies the local-wins merge and uploads the result);
 	// "center" has it apply the storage's current generation.
+	scope, scopeErr := readSyncScope(r)
+	if scopeErr != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", scopeErr.Error(), nil)
+		return
+	}
+	if scope.Explicit {
+		scope.Overwrite = true
+		if choice == resolveCenter {
+			if err := s.requireCenterAdapters(scope.Adapters); err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, errNoCenterSnapshot) {
+					status = http.StatusConflict
+				}
+				writeError(w, status, "bad-request", err.Error(), nil)
+				return
+			}
+		}
+	} else {
+		scope.Overwrite = false
+	}
 	var raw json.RawMessage
 	var err error
 	if choice == resolveLocal {
-		raw, err = s.opts.Agents.AgentPush(r.Context(), agentID, true)
+		raw, err = s.opts.Agents.AgentPush(r.Context(), agentID, true, scope)
 	} else {
-		raw, err = s.opts.Agents.AgentPull(r.Context(), agentID, true)
+		raw, err = s.opts.Agents.AgentPull(r.Context(), agentID, true, scope)
 	}
 	if err != nil {
 		writeErrorValue(w, err)
@@ -180,7 +201,7 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	if result.OK && choice == resolveLocal {
 		// The machine published a new generation — deliver it to everyone
 		// else who is online.
-		for _, applied := range fanoutPullOnlineAgents(r.Context(), s.opts.Agents) {
+		for _, applied := range fanoutPullOnlineAgents(r.Context(), s.opts.Agents, scope) {
 			if applied.AgentID != agentID {
 				agents = append(agents, applied)
 			}

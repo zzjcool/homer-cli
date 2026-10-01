@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,9 +21,13 @@ import (
 type Executor interface {
 	Status(ctx context.Context) (commands.StatusReport, error)
 	Diff(ctx context.Context, params web.DiffParams) (string, error)
-	Push(ctx context.Context, confirm bool) (commands.PushReport, error)
-	Pull(ctx context.Context, confirm bool) (commands.PullReport, error)
+	Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error)
+	Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error)
 }
+
+// errNoHubSnapshot is the empty-center response. A collect treats it as
+// "publish these adapters into a new generation"; a dispatch still fails.
+var errNoHubSnapshot = errors.New("hub has no snapshot")
 
 type localExecutor struct {
 	homerHome string
@@ -91,24 +96,41 @@ func (e *localExecutor) Diff(ctx context.Context, params web.DiffParams) (string
 	return text, nil
 }
 
-func (e *localExecutor) Push(ctx context.Context, confirm bool) (commands.PushReport, error) {
+func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error) {
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err
 	}
 	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
 	if e.hubURL != "" {
+		if adapters != nil {
+			snapshot, _, err := e.downloadHubSnapshot(ctx)
+			switch {
+			case errors.Is(err, errNoHubSnapshot):
+				deps.HubSnapshot = []core.AdapterSnapshot{}
+			case err != nil:
+				return commands.PushReport{}, err
+			default:
+				deps.HubSnapshot = snapshot
+			}
+		}
+		captured := adapters
 		deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
-			return e.uploadHubSnapshot(ctx, snapshot)
+			return e.uploadHubSnapshot(ctx, snapshot, captured)
 		}
 	}
-	report := commands.RunPush(commands.PushOptions{HomerHome: e.homerHome, Yes: confirm}, deps)
+	report := commands.RunPush(commands.PushOptions{
+		HomerHome: e.homerHome,
+		Yes:       confirm,
+		Adapters:  adapters,
+		Overwrite: overwrite,
+	}, deps)
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err
 	}
 	return report, nil
 }
 
-func (e *localExecutor) Pull(ctx context.Context, confirm bool) (commands.PullReport, error) {
+func (e *localExecutor) Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error) {
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err
 	}
@@ -123,7 +145,12 @@ func (e *localExecutor) Pull(ctx context.Context, confirm bool) (commands.PullRe
 		}
 		deps.HubSnapshot = snapshot
 	}
-	report := commands.RunPull(commands.PullOptions{HomerHome: e.homerHome, Yes: confirm}, deps)
+	report := commands.RunPull(commands.PullOptions{
+		HomerHome:    e.homerHome,
+		Yes:          confirm,
+		Adapters:     adapters,
+		PreferRemote: preferRemote,
+	}, deps)
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err
 	}
@@ -158,6 +185,7 @@ type hubSnapshotPayload struct {
 	Generation int                          `json:"generation"`
 	HomerJSON  string                       `json:"homerJson"`
 	Store      map[string]map[string]string `json:"store"`
+	Adapters   []string                     `json:"adapters,omitempty"`
 }
 
 // downloadHubSnapshot fetches the hub's current generation and converts it
@@ -175,6 +203,9 @@ func (e *localExecutor) downloadHubSnapshot(ctx context.Context) ([]core.Adapter
 		return nil, nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		return nil, nil, errNoHubSnapshot
+	}
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return nil, nil, fmt.Errorf("hub snapshot: %s %s", response.Status, strings.TrimSpace(string(body)))
@@ -214,7 +245,7 @@ func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta [
 }
 
 // uploadHubSnapshot pushes prepared snapshots to the hub.
-func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.AdapterSnapshot) (int, error) {
+func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.AdapterSnapshot, adapters []string) (int, error) {
 	store := map[string]map[string]string{}
 	for _, adapter := range snapshot {
 		for _, category := range adapter.Categories {
@@ -238,7 +269,7 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 	if data, err := os.ReadFile(paths.ConfigFile); err == nil {
 		meta = data
 	}
-	body, err := json.Marshal(hubSnapshotPayload{Store: store, HomerJSON: string(meta)})
+	body, err := json.Marshal(hubSnapshotPayload{Store: store, HomerJSON: string(meta), Adapters: adapters})
 	if err != nil {
 		return 0, err
 	}
@@ -332,11 +363,26 @@ func (d agentSyncDeps) PullDeps() *commands.PullDeps {
 	return deps
 }
 
-func (d agentSyncDeps) PushDeps() *commands.PushDeps {
+func (d agentSyncDeps) PushDeps(adapters []string) *commands.PushDeps {
 	deps := &commands.PushDeps{}
 	if d.executor.hubURL != "" {
+		if adapters != nil {
+			snapshot, _, err := d.executor.downloadHubSnapshot(context.Background())
+			switch {
+			case errors.Is(err, errNoHubSnapshot):
+				deps.HubSnapshot = []core.AdapterSnapshot{}
+			case err != nil:
+				deps.HubErr = err
+			default:
+				deps.HubSnapshot = snapshot
+			}
+		}
+		captured := adapters
 		deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
-			return d.executor.uploadHubSnapshot(context.Background(), snapshot)
+			if deps.HubErr != nil {
+				return 0, deps.HubErr
+			}
+			return d.executor.uploadHubSnapshot(context.Background(), snapshot, captured)
 		}
 	}
 	return deps

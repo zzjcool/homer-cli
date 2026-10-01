@@ -85,8 +85,8 @@ type AgentsSource interface {
 	ListAgents() []AgentInfo
 	AgentStatus(ctx context.Context, agentID string) (json.RawMessage, error)
 	AgentDiff(ctx context.Context, agentID string, params DiffParams) (string, error)
-	AgentPush(ctx context.Context, agentID string, confirm bool) (json.RawMessage, error)
-	AgentPull(ctx context.Context, agentID string, confirm bool) (json.RawMessage, error)
+	AgentPush(ctx context.Context, agentID string, confirm bool, scope SyncScope) (json.RawMessage, error)
+	AgentPull(ctx context.Context, agentID string, confirm bool, scope SyncScope) (json.RawMessage, error)
 	// RemoveAgent drops a machine from the list entirely (optional:
 	// embedded sources without removal keep 501 semantics).
 	RemoveAgent(agentID string) bool
@@ -121,7 +121,9 @@ type SyncDepsSource interface {
 	// PullDeps returns deps for /api/pull on this server's home.
 	PullDeps() *commands.PullDeps
 	// PushDeps returns deps for /api/push on this server's home.
-	PushDeps() *commands.PushDeps
+	// adapters is nil for an unrestricted push and the explicit selection
+	// otherwise; the sink must publish that selection as a merge.
+	PushDeps(adapters []string) *commands.PushDeps
 }
 
 // EnrollmentService is the subset of the enrollment manager the console

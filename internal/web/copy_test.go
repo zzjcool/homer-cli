@@ -16,6 +16,7 @@ func TestConsoleUserCopy(t *testing.T) {
 		"allow-secrets", "commit", "bare", "仓库",
 		"/api/push", "/api/pull", "查看状态", "查看差异", "处理漂移", "推送", "拉取",
 		"同步到其他机器", "从中心同步", "以本机为准", "这台机器的改动",
+		"处理改动",
 	} {
 		if strings.Contains(html, banned) {
 			t.Fatalf("console copy contains git word %q — the console must speak in sync vocabulary", banned)
@@ -28,6 +29,8 @@ func TestConsoleUserCopy(t *testing.T) {
 		"有尚未同步的改动",
 		"全部对齐",
 		"收取", "下发", "确认收取", "确认下发", "/api/sync?",
+		"/api/sync/choices", "勾选要动的适配器", "body: { adapters: adapters }",
+		"全选", "清除",
 		"以这台机器为准", "以中心为准", "/api/resolve?",
 		"/api/console",
 		// 配置查看（存储视角 / 机器视角）

@@ -118,6 +118,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handlePull(w, r)
+	case path == "/api/sync/choices":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleSyncChoices(w, r)
 	case path == "/api/sync":
 		// Manual sync (MVP): one action, human sentences only.
 		if r.Method != http.MethodPost {
@@ -276,23 +282,43 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	scope, err := readSyncScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
+	var adapters []string
+	if scope.Explicit {
+		adapters = scope.Adapters
+	}
 	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
 	if s.opts.SyncDeps != nil {
-		deps = s.opts.SyncDeps.PushDeps()
+		deps = s.opts.SyncDeps.PushDeps(adapters)
 		deps.UI = commands.HeadlessUI{}
 	}
 	report := commands.RunPush(commands.PushOptions{
 		HomerHome: s.opts.HomerHome,
 		Yes:       confirmValue(r),
+		Adapters:  adapters,
+		Overwrite: scope.Overwrite,
 	}, deps)
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
+	scope, err := readSyncScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
+	var adapters []string
+	if scope.Explicit {
+		adapters = scope.Adapters
+	}
 	deps := &commands.PullDeps{UI: commands.HeadlessUI{}, NoFetch: true}
 	if s.opts.SyncDeps != nil {
 		deps = s.opts.SyncDeps.PullDeps()
@@ -304,8 +330,10 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	report := commands.RunPull(commands.PullOptions{
-		HomerHome: s.opts.HomerHome,
-		Yes:       confirmValue(r),
+		HomerHome:    s.opts.HomerHome,
+		Yes:          confirmValue(r),
+		Adapters:     adapters,
+		PreferRemote: scope.Overwrite,
 	}, deps)
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
@@ -449,7 +477,13 @@ func (s *Server) handleAgentDiff(w http.ResponseWriter, r *http.Request, agentID
 }
 
 func (s *Server) handleAgentPush(w http.ResponseWriter, r *http.Request, agentID string) {
-	raw, err := s.opts.Agents.AgentPush(r.Context(), agentID, confirmValue(r))
+	scope, err := readSyncScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	scope.Overwrite = false
+	raw, err := s.opts.Agents.AgentPush(r.Context(), agentID, confirmValue(r), scope)
 	if err != nil {
 		writeErrorValue(w, err)
 		return
@@ -458,7 +492,23 @@ func (s *Server) handleAgentPush(w http.ResponseWriter, r *http.Request, agentID
 }
 
 func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID string) {
-	raw, err := s.opts.Agents.AgentPull(r.Context(), agentID, confirmValue(r))
+	scope, err := readSyncScope(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	scope.Overwrite = false
+	if scope.Explicit {
+		if err := s.requireCenterAdapters(scope.Adapters); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, errNoCenterSnapshot) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, "bad-request", err.Error(), nil)
+			return
+		}
+	}
+	raw, err := s.opts.Agents.AgentPull(r.Context(), agentID, confirmValue(r), scope)
 	if err != nil {
 		writeErrorValue(w, err)
 		return

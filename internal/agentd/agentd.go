@@ -511,9 +511,9 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 				}{output.(string)}
 			}
 		case hub.TaskKindPush:
-			output, err = d.exec.Push(ctx, task.Options.Confirm)
+			output, err = d.exec.Push(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite)
 		case hub.TaskKindPull:
-			output, err = d.exec.Pull(ctx, task.Options.Confirm)
+			output, err = d.exec.Pull(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite)
 		default:
 			err = fmt.Errorf("unsupported task kind %q", task.Kind)
 		}

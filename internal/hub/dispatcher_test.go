@@ -92,7 +92,7 @@ func TestDispatcherConfirmPassthrough(t *testing.T) {
 	for _, confirm := range []bool{false, true} {
 		resultCh := make(chan error, 1)
 		go func(confirm bool) {
-			_, err := dispatcher.AgentPush(context.Background(), "connect-a", confirm)
+			_, err := dispatcher.AgentPush(context.Background(), "connect-a", confirm, web.SyncScope{})
 			resultCh <- err
 		}(confirm)
 		task, ok := registry.Poll("connect-a", time.Second, context.Background())
@@ -173,6 +173,53 @@ func TestDispatcherListenNonOKMapping(t *testing.T) {
 	}
 }
 
+func TestDispatcherForwardsAdapterScope(t *testing.T) {
+	var adapters, overwrite, confirm string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adapters = r.URL.Query().Get("adapters")
+		overwrite = r.URL.Query().Get("overwrite")
+		confirm = r.URL.Query().Get("confirm")
+		_, _ = w.Write([]byte(`{"ok":true,"status":"pushed"}`))
+	}))
+	defer server.Close()
+	registry := NewRegistry()
+	if err := registry.Register(AgentInfo{AgentID: "listen-scope", Mode: AgentModeListen, Addr: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(registry, "")
+	if _, err := dispatcher.AgentPush(context.Background(), "listen-scope", true, web.SyncScope{
+		Explicit: true, Adapters: []string{"vscode", "pad"}, Overwrite: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if adapters != "vscode,pad" || overwrite != "true" || confirm != "true" {
+		t.Fatalf("query adapters=%q overwrite=%q confirm=%q", adapters, overwrite, confirm)
+	}
+
+	registry = NewRegistry()
+	if err := registry.Register(AgentInfo{AgentID: "connect-scope", Mode: AgentModeConnect}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher = NewDispatcher(registry, "")
+	done := make(chan error, 1)
+	go func() {
+		_, err := dispatcher.AgentPull(context.Background(), "connect-scope", true, web.SyncScope{
+			Explicit: true, Adapters: []string{"pad"},
+		})
+		done <- err
+	}()
+	task, ok := registry.Poll("connect-scope", time.Second, context.Background())
+	if !ok || task.Kind != TaskKindPull || len(task.Options.Adapters) != 1 || task.Options.Adapters[0] != "pad" || task.Options.Overwrite {
+		t.Fatalf("task = %+v ok=%v", task, ok)
+	}
+	if err := registry.Submit(TaskResult{TaskID: task.TaskID, AgentID: "connect-scope", Kind: task.Kind, OK: true, Report: json.RawMessage(`{"ok":true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDispatcherListenWriteStatusPassthrough(t *testing.T) {
 	// Remote push/pull preserves the agent's 409 (confirm gate) and 422
 	// (command failure) responses instead of remapping them to 502: the web
@@ -194,11 +241,11 @@ func TestDispatcherListenWriteStatusPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatcher := NewDispatcher(registry, "")
-	raw, err := dispatcher.AgentPush(context.Background(), "write-a", false)
+	raw, err := dispatcher.AgentPush(context.Background(), "write-a", false, web.SyncScope{})
 	if err != nil || string(raw) != `{"ok":false,"status":"aborted"}` {
 		t.Fatalf("push 409 passthrough = %q err=%v", raw, err)
 	}
-	raw, err = dispatcher.AgentPull(context.Background(), "write-a", true)
+	raw, err = dispatcher.AgentPull(context.Background(), "write-a", true, web.SyncScope{})
 	if err != nil || string(raw) != `{"ok":false,"status":"conflicts"}` {
 		t.Fatalf("pull 422 passthrough = %q err=%v", raw, err)
 	}

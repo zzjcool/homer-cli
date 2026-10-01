@@ -138,6 +138,14 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 
 /* dialogs */
 dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-width: 460px; width: calc(100% - 32px); }
+#dlg-confirm { max-width: 560px; }
+.choice-list { display: grid; gap: 8px; margin-top: 10px; max-height: 42vh; overflow: auto; }
+.choice-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+.choice-item input { width: auto; min-height: 0; margin-top: 3px; }
+.choice-item .choice-copy { display: grid; gap: 2px; }
+.choice-item .choice-id { font-weight: 650; }
+.choice-item.disabled { opacity: .6; cursor: default; }
+.choice-tools { display: flex; gap: 8px; margin-top: 10px; }
 dialog::backdrop { background: #0007; }
 dialog h2 { margin: 0 0 8px; font-size: 1.1rem; }
 dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 18px 0 0; }
@@ -274,8 +282,9 @@ const $ = id => document.getElementById(id);
  * GET  /api/console       {published, generation, machines:[{agentId,hostname,stale,drift:{push,pull,conflicts}}]}
  * GET  /api/status        {report:{...}} (机器视角的兼容端点)
  * GET  /api/diff?adapter&category  {empty, text}
- * POST /api/sync?direction=collect&agent=<id>&confirm=true   收取一台机器
- * POST /api/sync?direction=dispatch&confirm=true             下发给所有在线机器
+ * GET  /api/sync/choices?direction=collect|dispatch|resolve&agent=<id>
+ * POST /api/sync?direction=collect&agent=<id>&confirm=true   body {adapters}
+ * POST /api/agents/<id>/pull?confirm=true                    body {adapters}
  * POST /api/resolve?choice=local|center&agent=<id>&confirm=true  在某台机器上裁决
  * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,drift}]}
  * 错误: 401 / 409(code=not-initialized|aborted|conflicts) / 422(secrets-rejected)
@@ -398,13 +407,11 @@ function renderHero() {
     if (push) parts.push("↑" + push + " 项未收取");
     if (pull) parts.push("↓" + pull + " 项待下发");
     numbers.textContent = parts.join(" · ") + " · 存储 第 " + c.generation + " 代 · 在线 " + online + "/" + all;
-    const btn = el("button", "primary", "处理改动");
-    btn.type = "button";
-    btn.addEventListener("click", confirmStorageSync);
+    const note = el("p", "muted small", "到机器列表里点「收取」或「下发」，勾选要动的适配器。");
     const viewBtn = el("button", "small-btn", "查看存储内容");
     viewBtn.type = "button";
     viewBtn.addEventListener("click", openStorageView);
-    hero.append(concl, numbers, btn, viewBtn);
+    hero.append(concl, numbers, note, viewBtn);
     return;
   }
   concl.append(el("span", "dot ok"), document.createTextNode("全部对齐"));
@@ -473,7 +480,7 @@ function renderAgents(agents, disabledFeature) {
     // 收取：让这台机器把它的配置上传到中心存储
     const collectBtn = el("button", "small-btn", "收取");
     collectBtn.type = "button";
-    collectBtn.title = "把这台机器的配置存入中心";
+    collectBtn.title = "选择要存入中心的适配器";
     collectBtn.disabled = a.stale;
     collectBtn.addEventListener("click", () => confirmCollect(a));
     line.append(collectBtn);
@@ -481,7 +488,7 @@ function renderAgents(agents, disabledFeature) {
     // 下发：让这台机器应用中心存储的当前内容
     const dispatchBtn = el("button", "small-btn", "下发");
     dispatchBtn.type = "button";
-    dispatchBtn.title = "把中心的内容下发到这台机器";
+    dispatchBtn.title = "选择要下发到这台机器的适配器";
     dispatchBtn.disabled = a.stale;
     dispatchBtn.addEventListener("click", () => confirmDispatch(a));
     line.append(dispatchBtn);
@@ -556,75 +563,138 @@ async function loadAgents() {
 }
 
 /* ---------- write actions: collect / dispatch / resolve ---------- */
-function confirmCollect(agent) {
-  $("confirm-title").textContent = "收取 " + (agent.hostname || agent.agentId);
-  $("confirm-desc").textContent = "把 " + (agent.hostname || agent.agentId) + " 的配置存入中心存储。其他机器这次不动。";
+function selectedAdapters() {
+  const picked = [];
+  $("confirm-choices").querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => {
+    if (input.checked && !input.disabled) picked.push(input.dataset.adapter);
+  });
+  return picked;
+}
+function updateScopeConfirm() {
+  $("btn-confirm-ok").disabled = selectedAdapters().length === 0;
+}
+function renderScopeChoices(data) {
+  $("confirm-desc").textContent = data.hint || "选择要操作的适配器。";
+  const box = $("confirm-choices");
+  clear(box);
+  const list = data.adapters || [];
+  if (!list.length) return;
+  const tools = el("div", "choice-tools");
+  const all = el("button", "small-btn", "全选");
+  all.type = "button";
+  all.addEventListener("click", ev => {
+    ev.preventDefault();
+    box.querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => {
+      if (!input.disabled) input.checked = true;
+    });
+    updateScopeConfirm();
+  });
+  const none = el("button", "small-btn", "清除");
+  none.type = "button";
+  none.addEventListener("click", ev => {
+    ev.preventDefault();
+    box.querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => { input.checked = false; });
+    updateScopeConfirm();
+  });
+  tools.append(all, none);
+  const rows = el("div", "choice-list");
+  list.forEach(item => {
+    const label = el("label", "choice-item" + (item.enabled ? "" : " disabled"));
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.dataset.adapter = item.id;
+    input.checked = !!item.checked && !!item.enabled;
+    input.disabled = !item.enabled;
+    input.addEventListener("change", updateScopeConfirm);
+    const copy = el("span", "choice-copy");
+    copy.append(el("span", "choice-id", item.id));
+    const detail = [item.detail, item.reason].filter(Boolean).join(" · ");
+    if (detail) copy.append(el("span", "muted small", detail));
+    label.append(input, copy);
+    rows.append(label);
+  });
+  box.append(tools, rows);
+  updateScopeConfirm();
+}
+function openScopeDialog(opts) {
+  $("confirm-title").textContent = opts.title;
+  $("confirm-desc").textContent = "正在读取可选项…";
   $("confirm-choices").replaceChildren();
-  $("btn-confirm-ok").textContent = "确认收取";
-  app.pendingAction = { kind: "collect", agentId: agent.agentId, name: agent.hostname || agent.agentId };
+  const okBtn = $("btn-confirm-ok");
+  okBtn.disabled = true;
+  okBtn.textContent = opts.okLabel;
+  app.pendingAction = null;
   $("dlg-confirm").showModal();
+  api("/api/sync/choices?direction=" + encodeURIComponent(opts.direction) + "&agent=" + encodeURIComponent(opts.agent.agentId))
+    .then(data => {
+      if (!$("dlg-confirm").open) return;
+      renderScopeChoices(data);
+      app.pendingAction = opts.action;
+    })
+    .catch(e => {
+      if (!$("dlg-confirm").open) return;
+      $("confirm-desc").textContent = e.message || "读取可选项失败";
+      okBtn.disabled = true;
+    });
+}
+function confirmCollect(agent) {
+  const name = agent.hostname || agent.agentId;
+  openScopeDialog({
+    agent: agent,
+    direction: "collect",
+    title: "收取 " + name,
+    okLabel: "确认收取",
+    action: { kind: "collect", agentId: agent.agentId, name: name },
+  });
 }
 function confirmDispatch(agent) {
-  $("confirm-title").textContent = "下发到 " + (agent.hostname || agent.agentId);
-  $("confirm-desc").textContent = "用中心存储的当前内容更新 " + (agent.hostname || agent.agentId) + " 上的对应文件，覆盖前先备份。其他机器这次不动。";
-  $("confirm-choices").replaceChildren();
-  $("btn-confirm-ok").textContent = "确认下发";
-  app.pendingAction = { kind: "dispatch-one", agentId: agent.agentId, name: agent.hostname || agent.agentId };
-  $("dlg-confirm").showModal();
-}
-function confirmStorageSync() {
-  const c = app.console;
-  let push = 0, pull = 0;
-  (c.machines || []).forEach(m => {
-    if (m.stale || !m.drift) return;
-    push += m.drift.push || 0;
-    pull += m.drift.pull || 0;
+  const name = agent.hostname || agent.agentId;
+  openScopeDialog({
+    agent: agent,
+    direction: "dispatch",
+    title: "下发到 " + name,
+    okLabel: "确认下发",
+    action: { kind: "dispatch-one", agentId: agent.agentId, name: name },
   });
-  $("confirm-title").textContent = "处理改动";
-  $("confirm-desc").textContent = "存储当前为第 " + c.generation + " 代。未收取 " + push + " 项，待下发 " + pull + " 项。";
-  $("confirm-choices").replaceChildren();
-  $("btn-confirm-ok").textContent = "确认处理";
-  app.pendingAction = { kind: "sync-storage" };
-  $("dlg-confirm").showModal();
 }
 function confirmResolveOn(choice, agent) {
   const local = choice === "local";
-  const n = agent.drift ? agent.drift.conflicts : 0;
-  $("confirm-title").textContent = local ? "以这台机器为准" : "以中心为准";
-  $("confirm-desc").textContent = local
-    ? "把 " + (agent.hostname || agent.agentId) + " 上的内容保留并写入中心存储，然后下发给其他在线机器。"
-    : "用中心存储的内容覆盖 " + (agent.hostname || agent.agentId) + " 上的对应文件，覆盖前先备份。其他机器不动。";
-  $("confirm-choices").replaceChildren();
-  $("btn-confirm-ok").textContent = local ? "确认以这台机器为准" : "确认以中心为准";
-  app.pendingAction = { kind: "resolve-on", choice, agentId: agent.agentId };
-  $("dlg-confirm").showModal();
+  const name = agent.hostname || agent.agentId;
+  openScopeDialog({
+    agent: agent,
+    direction: "resolve",
+    title: local ? "以这台机器为准" : "以中心为准",
+    okLabel: local ? "确认以这台机器为准" : "确认以中心为准",
+    action: { kind: "resolve-on", choice: choice, agentId: agent.agentId, name: name },
+  });
 }
 
 $("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
 // 显式接线，不依赖 dialog 表单的隐式提交行为（兼容性兜底）
 $("btn-confirm-ok").addEventListener("click", ev => {
   ev.preventDefault();
+  const action = app.pendingAction;
+  const adapters = selectedAdapters();
+  if (!action || !adapters.length) return;
   const okBtn = $("btn-confirm-ok");
   okBtn.disabled = true; okBtn.textContent = "处理中…";
   // 直接执行（close→事件→fetch 的链路在 headless 环境会丢事件），
   // 然后关对话框；真实浏览器与 headless 行为一致
   $("dlg-confirm").returnValue = "confirm";
-  const action = app.pendingAction;
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
-  if (action && action.kind === "collect") executeCollect(action.agentId, action.name);
-  if (action && action.kind === "dispatch-one") executeDispatchOne(action.agentId, action.name);
-  if (action && action.kind === "sync-storage") executeStorageSync();
-  if (action && action.kind === "resolve-on") executeResolveOn(action.choice, action.agentId);
+  if (action.kind === "collect") executeCollect(action.agentId, action.name, adapters);
+  if (action.kind === "dispatch-one") executeDispatchOne(action.agentId, action.name, adapters);
+  if (action.kind === "resolve-on") executeResolveOn(action.choice, action.agentId, adapters);
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
   $("dlg-confirm").close("cancel");
 });
-async function executeCollect(agentId, name) {
+async function executeCollect(agentId, name, adapters) {
   const okBtn = $("btn-confirm-ok");
   try {
-    const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST" });
+    const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast("已从 " + name + " 收取，存入中心");
     else {
       const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
@@ -639,10 +709,10 @@ async function executeCollect(agentId, name) {
     }
   } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
-async function executeDispatchOne(agentId, name) {
+async function executeDispatchOne(agentId, name, adapters) {
   const okBtn = $("btn-confirm-ok");
   try {
-    const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST" });
+    const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast("已下发到 " + name);
     else {
       const lines = (d.errors || []);
@@ -653,37 +723,10 @@ async function executeDispatchOne(agentId, name) {
     showAlert("下发没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
   } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
-async function executeStorageSync() {
+async function executeResolveOn(choice, agentId, adapters) {
   const okBtn = $("btn-confirm-ok");
   try {
-    const c = app.console;
-    // 先收取有未收改动的在线机器（一台一台来，每台都更新存储），
-    // 最后统一下发。
-    const toCollect = (c.machines || []).filter(m => !m.stale && m.drift && m.drift.push > 0);
-    const failures = [];
-    for (const m of toCollect) {
-      try {
-        const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(m.agentId) + "&confirm=true", { method: "POST" });
-        if (!d.ok) failures.push((m.hostname || m.agentId) + " 收取失败");
-      } catch (e) { failures.push((m.hostname || m.agentId) + " 收取失败：" + e.message); }
-    }
-    let dispatchMsg = null;
-    try {
-      const d = await api("/api/sync?direction=dispatch&confirm=true", { method: "POST" });
-      if (!d.ok) {
-        const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
-        failures.push(...(lines.length ? lines : ["下发没有全部完成。"]));
-      } else dispatchMsg = "已下发到所有在线机器";
-    } catch (e) { failures.push(e.message); }
-    if (failures.length) showAlert("同步没有全部完成", failures, null);
-    else toast(dispatchMsg || "已处理全部改动");
-    await refresh();
-  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
-}
-async function executeResolveOn(choice, agentId) {
-  const okBtn = $("btn-confirm-ok");
-  try {
-    const d = await api("/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST" });
+    const d = await api("/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
     else {
       const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));

@@ -80,6 +80,14 @@ type PushDeps struct {
 	// records it so a later zero-drift push knows it has already
 	// published (no needless generation churn).
 	HubSink func(snapshot []core.AdapterSnapshot) (int, error)
+	// HubSnapshot is the center's current generation. Scoped collects
+	// compare against it. Nil means the center has nothing yet. It is
+	// ignored by an unrestricted push, which still publishes the whole
+	// machine snapshot.
+	HubSnapshot []core.AdapterSnapshot
+	// HubErr is a failure to read the center before a scoped collect.
+	// The push stops before it writes the machine store.
+	HubErr error
 }
 
 // These aliases make the shared command-layer seam discoverable under the
@@ -401,6 +409,12 @@ type PushOptions struct {
 	JSON      bool
 	Yes       bool
 	NoPush    bool
+	// Adapters restricts the push to these ids. Nil publishes every
+	// enabled adapter. A non-nil slice is an explicit selection.
+	Adapters []string
+	// Overwrite publishes the selection even when it conflicts with the
+	// center. Conflict resolution ("以这台机器为准") sets it.
+	Overwrite bool
 }
 
 type PushStatus string
@@ -497,6 +511,23 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		sourceInput = deps.Sources
 	}
 	sources := collectSources(sourceInput, paths, *config, true)
+	if options.Adapters != nil && deps != nil && deps.HubSink != nil {
+		return runScopedHubPush(options, deps, paths, *config, sources)
+	}
+	if options.Adapters != nil {
+		ids, err := syncx.ParseAdapterIDs(options.Adapters)
+		if err != nil {
+			report.Errors = []string{err.Error()}
+			return report
+		}
+		if err := adapterSelectionError(*config, ids); err != nil {
+			report.Errors = []string{err.Error()}
+			return report
+		}
+		sources.Base = syncx.FilterSnapshots(sources.Base, ids)
+		sources.Local = syncx.FilterSnapshots(sources.Local, ids)
+		sources.Remote = syncx.FilterSnapshots(sources.Remote, ids)
+	}
 	warnings := append([]string{}, sources.Warnings...)
 	warnings = append(warnings, sources.Errors...)
 
@@ -865,6 +896,110 @@ func writeReportJSON(out io.Writer, text string) error {
 
 // Keep a package-local spelling matching the archived command modules.
 func runPush(options PushOptions, deps *PushDeps) PushReport { return RunPush(options, deps) }
+
+// runScopedHubPush stores only the selected adapters in the center.
+// Adapters outside the selection are not scanned for secrets and are not
+// uploaded. The center merges the upload; this function does not replace
+// the generation by itself.
+func runScopedHubPush(options PushOptions, deps *PushDeps, paths core.HomerPaths, config core.HomerConfig, sources syncx.SyncSources) PushReport {
+	warnings := append([]string{}, sources.Warnings...)
+	warnings = append(warnings, sources.Errors...)
+
+	ids, err := syncx.ParseAdapterIDs(options.Adapters)
+	if err != nil {
+		report := newPushCommandReport(PushStatusError)
+		report.Warnings = warnings
+		report.Errors = []string{err.Error()}
+		return report
+	}
+	if err := adapterSelectionError(config, ids); err != nil {
+		report := newPushCommandReport(PushStatusError)
+		report.Warnings = warnings
+		report.Errors = []string{err.Error()}
+		return report
+	}
+	if deps.HubErr != nil {
+		report := newPushCommandReport(PushStatusError)
+		report.Warnings = warnings
+		report.Errors = errorLines(deps.HubErr)
+		return report
+	}
+
+	base := syncx.FilterSnapshots(sources.Base, ids)
+	local := syncx.FilterSnapshots(sources.Local, ids)
+	remote := deps.HubSnapshot
+	if remote == nil {
+		remote = []core.AdapterSnapshot{}
+	}
+	prepared := syncx.PrepareStoreSnapshot(local, config)
+	findings := secretscan.FilterIgnored(secretscan.ScanSnapshots(prepared), secretIgnorePaths(&config))
+	if len(findings) > 0 {
+		report := newPushCommandReport(PushStatusSecretsRejected)
+		report.Secrets = findings
+		report.Warnings = warnings
+		report.Errors = []string{
+			fmt.Sprintf("检测到 %d 处疑似密钥，已拒绝推送（store 未写入，未产生 commit）", len(findings)),
+			"请移除密钥，或在 homer.json 的 secrets.ignorePaths 中显式豁免该路径。",
+		}
+		return report
+	}
+
+	publish, conflicts := syncx.DecideScopedPublish(config, base, local, remote, ids)
+	if len(conflicts) > 0 && !options.Overwrite {
+		for _, conflict := range conflicts {
+			warnings = append(warnings, "冲突: "+conflictRef(conflict))
+		}
+		report := newPushCommandReport(PushStatusConflicts)
+		report.Warnings = warnings
+		report.Errors = []string{fmt.Sprintf("本地与远端有 %d 处冲突，已拒绝推送（请运行 `homer merge` 逐项裁决）", len(conflicts))}
+		return report
+	}
+	if len(conflicts) > 0 && options.Overwrite {
+		publish = true
+	}
+	if !publish {
+		report := newPushCommandReport(PushStatusNoDrift)
+		report.Warnings = warnings
+		return report
+	}
+	if !options.Yes {
+		report := newPushCommandReport(PushStatusAborted)
+		report.ChangedFiles = snapshotFileRefs(prepared)
+		report.Warnings = warnings
+		report.Errors = []string{"已取消：未确认推送（store 未写入，未产生 commit）"}
+		return report
+	}
+
+	for _, snapshot := range prepared {
+		if err := core.WriteSnapshotToStore(paths, snapshot); err != nil {
+			report := newPushCommandReport(PushStatusError)
+			report.ChangedFiles = snapshotFileRefs(prepared)
+			report.Warnings = warnings
+			report.Errors = errorLines(err)
+			return report
+		}
+	}
+	generation, err := deps.HubSink(prepared)
+	if err != nil {
+		report := newPushCommandReport(PushStatusError)
+		report.ChangedFiles = snapshotFileRefs(prepared)
+		report.Warnings = warnings
+		report.Errors = errorLines(err)
+		return report
+	}
+	if stateErr := nowGenerationState(paths, "push", generation); stateErr != nil {
+		report := newPushCommandReport(PushStatusError)
+		report.ChangedFiles = snapshotFileRefs(prepared)
+		report.Warnings = warnings
+		report.Errors = errorLines(stateErr)
+		return report
+	}
+	report := newPushCommandReport(PushStatusPushed)
+	report.ChangedFiles = snapshotFileRefs(prepared)
+	report.PushedToRemote = true
+	report.Warnings = warnings
+	return report
+}
 
 // nowGenerationState records a successful no-git sync: the machine's
 // store now holds the content, so the store itself is the baseline.

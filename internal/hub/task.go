@@ -29,9 +29,11 @@ type Task struct {
 }
 
 type TaskOptions struct {
-	Adapter  string `json:"adapter,omitempty"`
-	Category string `json:"category,omitempty"`
-	Confirm  bool   `json:"confirm,omitempty"`
+	Adapter   string   `json:"adapter,omitempty"`
+	Category  string   `json:"category,omitempty"`
+	Confirm   bool     `json:"confirm,omitempty"`
+	Adapters  []string `json:"adapters,omitempty"`
+	Overwrite bool     `json:"overwrite,omitempty"`
 }
 
 type TaskResult struct {

@@ -18,6 +18,12 @@ var ageRecipientPattern = regexp.MustCompile(`^age1[02-9ac-hj-np-z]{58}$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var adapterIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
+// ValidAdapterID reports whether id can be used as an adapter key.
+// The same pattern gates homer.json and any user-chosen sync scope.
+func ValidAdapterID(id string) bool {
+	return adapterIDPattern.MatchString(id)
+}
+
 var bareAllowEscapePatterns = map[string]struct{}{
 	"*":   {},
 	"*/":  {},

@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -191,6 +192,30 @@ func apiGet(t *testing.T, url string, headers map[string]string, proc *exec.Cmd)
 	buf := make([]byte, 1<<16)
 	n, _ := response.Body.Read(buf)
 	return string(buf[:n])
+}
+
+func apiPostJSON(t *testing.T, rawURL string, headers map[string]string, body any) (int, string) {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, rawURL, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	buf := make([]byte, 1<<20)
+	n, _ := response.Body.Read(buf)
+	return response.StatusCode, string(buf[:n])
 }
 
 func apiPost(t *testing.T, url string, headers map[string]string) string {
@@ -837,6 +862,159 @@ func TestPureServerFourStepStory(t *testing.T) {
 	if !strings.Contains(string(content), "theme") {
 		t.Fatalf("machine B settings = %q — bootstrap dispatch did not deliver content", content)
 	}
+}
+
+// TestSelectiveAdapterSync collects and dispatches one adapter at a time.
+// The center keeps adapters that were not selected, and a machine only
+// receives the adapters the operator checked.
+func TestSelectiveAdapterSync(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")
+	binary := binaryOf(t)
+	machineA := makeMachine(t, root, "A", global, true)
+	machineB := makeMachine(t, root, "B", global, false)
+	if result := runHomer(t, binary, machineA, "init", "--json"); result.code != 0 {
+		t.Fatalf("init A failed: %s%s", result.stdout, result.stderr)
+	}
+	vscodeMarker := "vscode-only-marker"
+	piMarker := "pi-only-marker"
+	writeFile(t, vscodeSettings(machineA), "{\n  \"homerE2E\": \""+vscodeMarker+"\"\n}\n")
+	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"theme\": \"light\",\n  \"homerE2E\": \""+piMarker+"\"\n}\n")
+
+	serverHome := filepath.Join(root, "server-home")
+	if err := os.MkdirAll(serverHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	token := "selective-sync-token"
+	hubPort := freePort(t)
+	hubProc := startHomer(t, binary, machineA, global,
+		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", serverHome)
+	defer stopProc(t, hubProc)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+	auth := map[string]string{"Authorization": "Bearer " + token}
+	agentA := startHomer(t, binary, machineA, global,
+		"agent", "--connect", hubURL, "--token", token, "--id", "machine-a", "--home", machineA.homerHome)
+	defer stopProc(t, agentA)
+	waitRegistered(t, hubURL, auth, hubProc, "machine-a")
+
+	choices := apiGet(t, hubURL+"/api/sync/choices?direction=collect&agent=machine-a", auth, hubProc)
+	ids := map[string]bool{}
+	for _, item := range jsonPath(t, choices, "adapters").([]any) {
+		ids[item.(map[string]any)["id"].(string)] = true
+	}
+	if !ids["vscode"] || !ids["pi"] {
+		t.Fatalf("collect choices = %s", choices)
+	}
+
+	code, collect := apiPostJSON(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth, map[string]any{"adapters": []string{"vscode"}})
+	if code != http.StatusOK || jsonPath(t, collect, "ok") != true {
+		t.Fatalf("collect vscode = %d %s\nhub: %s", code, collect, procOutput[hubProc])
+	}
+	stored := storageAdapterIDs(t, apiGet(t, hubURL+"/api/storage", auth, hubProc))
+	if !stored["vscode"] || stored["pi"] {
+		t.Fatalf("storage after vscode collect = %#v", stored)
+	}
+	if body := apiGet(t, hubURL+"/api/storage/file?adapter=vscode&path=settings/settings.json", auth, hubProc); !strings.Contains(body, vscodeMarker) {
+		t.Fatalf("stored vscode = %s", body)
+	}
+	generation := strings.TrimSpace(string(mustReadFile(t, filepath.Join(serverHome, "HEAD"))))
+
+	code, rejected := apiPostJSON(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth, map[string]any{"adapters": []string{"nope"}})
+	if code == http.StatusOK && jsonPath(t, rejected, "ok") == true {
+		t.Fatalf("unknown adapter was collected: %s", rejected)
+	}
+	code, empty := apiPostJSON(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth, map[string]any{"adapters": []string{}})
+	if code != http.StatusBadRequest || !strings.Contains(empty, "请选择至少一个适配器") {
+		t.Fatalf("empty selection = %d %s", code, empty)
+	}
+	code, invalid := apiPostJSON(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth, map[string]any{"adapters": []string{"../pi"}})
+	if code != http.StatusBadRequest {
+		t.Fatalf("invalid adapter = %d %s", code, invalid)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(serverHome, "HEAD")))); got != generation {
+		t.Fatalf("rejected collects advanced HEAD from %s to %s", generation, got)
+	}
+
+	code, collectPi := apiPostJSON(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth, map[string]any{"adapters": []string{"pi"}})
+	if code != http.StatusOK || jsonPath(t, collectPi, "ok") != true {
+		t.Fatalf("collect pi = %d %s", code, collectPi)
+	}
+	stored = storageAdapterIDs(t, apiGet(t, hubURL+"/api/storage", auth, hubProc))
+	if !stored["vscode"] || !stored["pi"] {
+		t.Fatalf("storage after pi collect = %#v", stored)
+	}
+	if body := apiGet(t, hubURL+"/api/storage/file?adapter=vscode&path=settings/settings.json", auth, hubProc); !strings.Contains(body, vscodeMarker) {
+		t.Fatalf("vscode changed while collecting pi: %s", body)
+	}
+
+	writeFile(t, vscodeSettings(machineA), "{\n  \"homerE2E\": \"vscode-second\"\n}\n")
+	code, again := apiPostJSON(t, hubURL+"/api/sync?direction=collect&agent=machine-a&confirm=true", auth, map[string]any{"adapters": []string{"vscode"}})
+	if code != http.StatusOK || jsonPath(t, again, "ok") != true {
+		t.Fatalf("recollect vscode = %d %s", code, again)
+	}
+	if body := apiGet(t, hubURL+"/api/storage/file?adapter=vscode&path=settings/settings.json", auth, hubProc); !strings.Contains(body, "vscode-second") {
+		t.Fatalf("vscode was not updated: %s", body)
+	}
+	if body := apiGet(t, hubURL+"/api/storage/file?adapter=pi&path=settings/settings.json", auth, hubProc); !strings.Contains(body, piMarker) {
+		t.Fatalf("pi changed while recollecting vscode: %s", body)
+	}
+
+	agentB := startHomer(t, binary, machineB, global,
+		"agent", "--connect", hubURL, "--token", token, "--id", "machine-b", "--home", machineB.homerHome)
+	defer stopProc(t, agentB)
+	waitRegistered(t, hubURL, auth, hubProc, "machine-b")
+
+	code, missing := apiPostJSON(t, hubURL+"/api/agents/machine-b/pull?confirm=true", auth, map[string]any{"adapters": []string{"herdr"}})
+	if code != http.StatusBadRequest || !strings.Contains(missing, "中心没有适配器 herdr") {
+		t.Fatalf("dispatch missing herdr = %d %s", code, missing)
+	}
+	code, dispatch := apiPostJSON(t, hubURL+"/api/agents/machine-b/pull?confirm=true", auth, map[string]any{"adapters": []string{"vscode"}})
+	if code != http.StatusOK || jsonPath(t, dispatch, "ok") != true {
+		t.Fatalf("dispatch vscode = %d %s\nhub: %s", code, dispatch, procOutput[hubProc])
+	}
+	bVSCode, err := os.ReadFile(vscodeSettings(machineB))
+	if err != nil || !strings.Contains(string(bVSCode), "vscode-second") {
+		t.Fatalf("B vscode = %q err=%v", bVSCode, err)
+	}
+	if _, err := os.Stat(filepath.Join(piRoot(machineB), "settings.json")); err == nil {
+		t.Fatal("dispatching vscode also wrote pi settings")
+	}
+
+	code, dispatchPi := apiPostJSON(t, hubURL+"/api/agents/machine-b/pull?confirm=true", auth, map[string]any{"adapters": []string{"pi"}})
+	if code != http.StatusOK || jsonPath(t, dispatchPi, "ok") != true {
+		t.Fatalf("dispatch pi = %d %s", code, dispatchPi)
+	}
+	bPi, err := os.ReadFile(filepath.Join(piRoot(machineB), "settings.json"))
+	if err != nil || !strings.Contains(string(bPi), piMarker) {
+		t.Fatalf("B pi = %q err=%v", bPi, err)
+	}
+	bVSCode, err = os.ReadFile(vscodeSettings(machineB))
+	if err != nil || !strings.Contains(string(bVSCode), "vscode-second") {
+		t.Fatalf("dispatching pi changed vscode: %q err=%v", bVSCode, err)
+	}
+}
+
+func vscodeSettings(m machine) string {
+	return filepath.Join(m.fakeHome, ".config", "Code", "settings.json")
+}
+
+func storageAdapterIDs(t *testing.T, body string) map[string]bool {
+	t.Helper()
+	ids := map[string]bool{}
+	for _, item := range jsonPath(t, body, "adapters").([]any) {
+		ids[item.(map[string]any)["id"].(string)] = true
+	}
+	return ids
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
 }
 
 // waitRegistered blocks until agentID appears in the hub's registry.

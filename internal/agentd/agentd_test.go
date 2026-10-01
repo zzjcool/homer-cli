@@ -338,10 +338,12 @@ func TestLocalExecutor(t *testing.T) {
 }
 
 type call struct {
-	kind     hub.TaskKind
-	adapter  string
-	category string
-	confirm  bool
+	kind      hub.TaskKind
+	adapter   string
+	category  string
+	confirm   bool
+	adapters  string
+	overwrite bool
 }
 
 type recordingExecutor struct {
@@ -369,13 +371,13 @@ func (e *recordingExecutor) Diff(ctx context.Context, params web.DiffParams) (st
 	return "diff", nil
 }
 
-func (e *recordingExecutor) Push(ctx context.Context, confirm bool) (commands.PushReport, error) {
-	e.record(call{kind: hub.TaskKindPush, confirm: confirm})
+func (e *recordingExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error) {
+	e.record(call{kind: hub.TaskKindPush, confirm: confirm, adapters: strings.Join(adapters, ","), overwrite: overwrite})
 	return commands.PushReport{OK: true, Status: commands.PushStatusPushed}, nil
 }
 
-func (e *recordingExecutor) Pull(ctx context.Context, confirm bool) (commands.PullReport, error) {
-	e.record(call{kind: hub.TaskKindPull, confirm: confirm})
+func (e *recordingExecutor) Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error) {
+	e.record(call{kind: hub.TaskKindPull, confirm: confirm, adapters: strings.Join(adapters, ","), overwrite: preferRemote})
 	return commands.PullReport{OK: true, Status: commands.PullStatusApplied}, nil
 }
 
@@ -537,7 +539,7 @@ func TestLocalExecutorHubTransport(t *testing.T) {
 	ctx := context.Background()
 
 	// Pull: the hub's current generation lands in the tool directory.
-	pullReport, err := executor.Pull(ctx, true)
+	pullReport, err := executor.Pull(ctx, true, nil, false)
 	if err != nil || !pullReport.OK || pullReport.Status != commands.PullStatusApplied {
 		t.Fatalf("pull = %#v err=%v", pullReport, err)
 	}
@@ -550,7 +552,7 @@ func TestLocalExecutorHubTransport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("next-change\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pushReport, err := executor.Push(ctx, true)
+	pushReport, err := executor.Push(ctx, true, nil, false)
 	if err != nil || !pushReport.OK || pushReport.Status != commands.PushStatusPushed {
 		t.Fatalf("push = %#v err=%v", pushReport, err)
 	}

@@ -135,24 +135,33 @@ func (d *Dispatcher) AgentDiff(ctx context.Context, agentID string, params web.D
 	}
 }
 
-func (d *Dispatcher) AgentPush(ctx context.Context, agentID string, confirm bool) (json.RawMessage, error) {
-	return d.writeAgent(ctx, agentID, TaskKindPush, confirm)
+func (d *Dispatcher) AgentPush(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
+	return d.writeAgent(ctx, agentID, TaskKindPush, confirm, scope)
 }
 
-func (d *Dispatcher) AgentPull(ctx context.Context, agentID string, confirm bool) (json.RawMessage, error) {
-	return d.writeAgent(ctx, agentID, TaskKindPull, confirm)
+func (d *Dispatcher) AgentPull(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
+	return d.writeAgent(ctx, agentID, TaskKindPull, confirm, scope)
 }
 
-func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKind, confirm bool) (json.RawMessage, error) {
+func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKind, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
 	info, err := d.agentInfo(agentID)
 	if err != nil {
 		return nil, err
 	}
-	options := TaskOptions{Confirm: confirm}
+	options := TaskOptions{Confirm: confirm, Overwrite: scope.Overwrite}
+	if scope.Explicit {
+		options.Adapters = append([]string(nil), scope.Adapters...)
+	}
 	switch info.Mode {
 	case AgentModeListen:
 		query := url.Values{}
 		query.Set("confirm", strconv.FormatBool(confirm))
+		if scope.Explicit {
+			query.Set("adapters", strings.Join(scope.Adapters, ","))
+		}
+		if scope.Overwrite {
+			query.Set("overwrite", "true")
+		}
 		path := "push"
 		if kind == TaskKindPull {
 			path = "pull"
