@@ -70,9 +70,25 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 				Error:     info.Drift.Error,
 			}
 		}
+		agent.Host = webHost(info.Host)
 		agents = append(agents, agent)
 	}
 	return agents
+}
+
+func webHost(host *HostSnapshot) *web.HostSnapshot {
+	if host == nil {
+		return nil
+	}
+	raw, err := json.Marshal(host)
+	if err != nil {
+		return nil
+	}
+	var out web.HostSnapshot
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return &out
 }
 
 func (d *Dispatcher) AgentStatus(ctx context.Context, agentID string) (json.RawMessage, error) {

@@ -140,6 +140,36 @@ func TestDispatcherListAgents(t *testing.T) {
 	}
 }
 
+func TestDispatcherListAgentsHost(t *testing.T) {
+	registry := NewRegistry()
+	usage := 22.0
+	if err := registry.Register(AgentInfo{
+		AgentID:  "box",
+		Hostname: "box",
+		Mode:     AgentModeConnect,
+		Host: &HostSnapshot{
+			OS:     "linux",
+			Arch:   "amd64",
+			Memory: &HostMemory{Total: 2048, Used: 512},
+			CPU:    &HostCPU{Cores: 4, Usage: &usage},
+			Nets:   []HostNet{{Name: "enp3s0", Addrs: []string{"10.0.0.8/24"}, Up: true}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agents := NewDispatcher(registry, "").ListAgents()
+	if len(agents) != 1 || agents[0].Host == nil {
+		t.Fatalf("agents = %+v", agents)
+	}
+	host := agents[0].Host
+	if host.OS != "linux" || host.Memory == nil || host.Memory.Used != 512 || host.CPU == nil || host.CPU.Cores != 4 || host.CPU.Usage == nil || *host.CPU.Usage != 22 {
+		t.Fatalf("host = %+v", host)
+	}
+	if len(host.Nets) != 1 || host.Nets[0].Addrs[0] != "10.0.0.8/24" {
+		t.Fatalf("nets = %+v", host.Nets)
+	}
+}
+
 func hasAgentCode(err error, code string, status int) bool {
 	var agentErr *web.AgentError
 	return errors.As(err, &agentErr) && agentErr.Code == code && agentErr.Status == status

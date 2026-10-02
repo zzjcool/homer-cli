@@ -112,25 +112,27 @@ func (a *AgentAPI) authorized(r *http.Request) bool {
 }
 
 type registerRequest struct {
-	AgentID  string      `json:"agentId"`
-	Hostname string      `json:"hostname"`
-	Mode     AgentMode   `json:"mode"`
-	Addr     string      `json:"addr"`
-	Version  string      `json:"version"`
-	Drift    *AgentDrift `json:"drift,omitempty"`
+	AgentID  string        `json:"agentId"`
+	Hostname string        `json:"hostname"`
+	Mode     AgentMode     `json:"mode"`
+	Addr     string        `json:"addr"`
+	Version  string        `json:"version"`
+	Drift    *AgentDrift   `json:"drift,omitempty"`
+	Host     *HostSnapshot `json:"host,omitempty"`
 }
 
 // enrollRequest is the Tailscale-style onboarding payload: an agent
 // presents a one-time enrollment code and its identity, and receives a
 // per-agent secret that replaces the shared hub token from then on.
 type enrollRequest struct {
-	Code     string      `json:"code"`
-	AgentID  string      `json:"agentId"`
-	Hostname string      `json:"hostname"`
-	Mode     AgentMode   `json:"mode"`
-	Addr     string      `json:"addr"`
-	Version  string      `json:"version"`
-	Drift    *AgentDrift `json:"drift,omitempty"`
+	Code     string        `json:"code"`
+	AgentID  string        `json:"agentId"`
+	Hostname string        `json:"hostname"`
+	Mode     AgentMode     `json:"mode"`
+	Addr     string        `json:"addr"`
+	Version  string        `json:"version"`
+	Drift    *AgentDrift   `json:"drift,omitempty"`
+	Host     *HostSnapshot `json:"host,omitempty"`
 }
 
 func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +163,7 @@ func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		Mode:     request.Mode,
 		Addr:     request.Addr,
 		Version:  request.Version,
+		Host:     request.Host,
 	}); err != nil {
 		// Registration validates mode/addr shape; the code stays burned —
 		// a malformed agent should not get a second try with the same code.
@@ -191,6 +194,7 @@ func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Mode:     request.Mode,
 		Addr:     request.Addr,
 		Version:  request.Version,
+		Host:     request.Host,
 	}); err != nil {
 		writeAgentError(w, http.StatusBadRequest, "bad-request", "请求参数无效")
 		return
@@ -211,9 +215,10 @@ func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 type pollRequest struct {
-	AgentID     string      `json:"agentId"`
-	WaitSeconds *int        `json:"waitSeconds"`
-	Drift       *AgentDrift `json:"drift,omitempty"`
+	AgentID     string        `json:"agentId"`
+	WaitSeconds *int          `json:"waitSeconds"`
+	Drift       *AgentDrift   `json:"drift,omitempty"`
+	Host        *HostSnapshot `json:"host,omitempty"`
 }
 
 type pollResponse struct {
@@ -245,6 +250,9 @@ func (a *AgentAPI) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 	if request.Drift != nil {
 		a.Registry.UpdateDrift(request.AgentID, *request.Drift)
+	}
+	if request.Host != nil {
+		a.Registry.UpdateHost(request.AgentID, *request.Host)
 	}
 	task, ok := a.Registry.Poll(request.AgentID, time.Duration(waitSeconds)*time.Second, r.Context())
 	if r.Context().Err() != nil {
