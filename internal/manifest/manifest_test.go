@@ -63,13 +63,13 @@ func TestManifestContentRoundTrip(t *testing.T) {
 }
 
 func TestValidID(t *testing.T) {
-	valid := []string{"a", "A1", "pub.one", "pub_one", "pub-one", "x.y-z_1"}
+	valid := []string{"a", "A1", "pub.one", "pub_one", "pub-one", "x.y-z_1", "pub.one@1.2.3", "npm:pi-lens", "npm:pi-lens@4.3.0", "npm:@zzjcool/pi-herdr-subagents@0.9.0"}
 	for _, id := range valid {
 		if !ValidID(id) {
 			t.Errorf("ValidID(%q) = false", id)
 		}
 	}
-	invalid := []string{"", "-first", ".first", "_first", "has space", "semi;colon", "$(touch)", "a/b", "a\\b", "é"}
+	invalid := []string{"", "-first", ".first", "_first", "has space", "semi;colon", "$(touch)", "a/b", "a\\b", "é", "npm:../x@1.0.0", "npm:pi-lens@$(touch)"}
 	for _, id := range invalid {
 		if ValidID(id) {
 			t.Errorf("ValidID(%q) = true", id)
@@ -209,6 +209,46 @@ func TestApplyTasksContinuesAfterFailure(t *testing.T) {
 // themselves carry registry prefixes (npm:) or scopes (@org/) that the
 // default pattern rejects. A category-level pattern filters listCmd
 // output to exactly the installable IDs.
+func TestVersionedListCommandAndPinnedNpmVersion(t *testing.T) {
+	if got := VersionedListCommand("code --list-extensions"); got != "code --list-extensions --show-versions" {
+		t.Fatalf("vscode list = %q", got)
+	}
+	if got := VersionedListCommand("code --list-extensions --show-versions"); got != "code --list-extensions --show-versions" {
+		t.Fatalf("vscode list already versioned = %q", got)
+	}
+	if got := VersionedListCommand("pi list"); got != "pi list" {
+		t.Fatalf("pi list = %q", got)
+	}
+
+	modules := t.TempDir()
+	writePackageJSON(t, modules, "pi-lens", "4.3.0")
+	writePackageJSON(t, modules, "@zzjcool/pi-herdr-subagents", "0.9.0")
+	snapshot := core.CategorySnapshot{
+		Category: "packages",
+		Files: core.SnapshotFiles{
+			VirtualFileName("packages"): {Kind: "file", Content: "npm:pi-lens\nnpm:@zzjcool/pi-herdr-subagents\nnpm:missing@1.2.3\n"},
+		},
+	}
+	PinNpmVersions(modules, snapshot)
+	got := strings.Split(strings.TrimSuffix(snapshot.Files[VirtualFileName("packages")].Content, "\n"), "\n")
+	want := []string{"npm:@zzjcool/pi-herdr-subagents@0.9.0", "npm:missing@1.2.3", "npm:pi-lens@4.3.0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pinned = %#v, want %#v", got, want)
+	}
+}
+
+func writePackageJSON(t *testing.T, modules, name, version string) {
+	t.Helper()
+	dir := filepath.Join(modules, filepath.FromSlash(name))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"name":"` + strings.ReplaceAll(name, `"`, "") + `","version":"` + version + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestScanCategoryWithIDPattern(t *testing.T) {
 	port := &fakePort{output: []byte(`User packages:
   npm:pi-lens

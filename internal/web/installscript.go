@@ -20,10 +20,14 @@ HUB={{.HUB}}
 GOOS_EXPECT={{.GOOS}}
 GOARCH_EXPECT={{.GOARCH}}
 TOKEN=
+LISTEN=
+ADVERTISE=
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
+    --listen) LISTEN="$2"; shift 2 ;;
+    --advertise) ADVERTISE="$2"; shift 2 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
@@ -79,15 +83,28 @@ fi
 AGENT_BIN=""
 if [ -x "$BIN_DIR/homer" ]; then AGENT_BIN="$BIN_DIR/homer"; fi
 if [ -z "$AGENT_BIN" ] && command -v homer >/dev/null 2>&1; then AGENT_BIN="$(command -v homer)"; fi
+if [ -n "$LISTEN" ] && [ -z "$ADVERTISE" ]; then
+  echo "缺少 --advertise <hub 能访问的地址>（中心直连需要告诉 hub 往哪连）" >&2
+  exit 1
+fi
 if [ -n "$AGENT_BIN" ]; then
   LOG="$HOMER_HOME/agent.log"
-  nohup "$AGENT_BIN" agent --connect "$HUB" >>"$LOG" 2>&1 &
-  echo ">> agent 已在后台启动（日志: $LOG，PID: $!）"
+  if [ -n "$LISTEN" ]; then
+    nohup "$AGENT_BIN" agent --listen "$LISTEN" --advertise "$ADVERTISE" --hub "$HUB" >>"$LOG" 2>&1 &
+    echo ">> agent 已在后台启动（中心直连 $ADVERTISE，日志: $LOG，PID: $!）"
+  else
+    nohup "$AGENT_BIN" agent --connect "$HUB" >>"$LOG" 2>&1 &
+    echo ">> agent 已在后台启动（机器上报，日志: $LOG，PID: $!）"
+  fi
   echo ">> 几秒后刷新控制台，这台机器会出现在机器列表。"
-  echo ">> 停止: pkill -f 'homer agent'；重启: nohup $AGENT_BIN agent --connect $HUB >>$LOG 2>&1 &"
+  echo ">> 停止: pkill -f 'homer agent'"
 else
   echo ">> homer agent 未在 PATH，token 已保存；装好后运行:"
-  echo ">>   nohup homer agent --connect $HUB >>$HOMER_HOME/agent.log 2>&1 &"
+  if [ -n "$LISTEN" ]; then
+    echo ">>   nohup homer agent --listen $LISTEN --advertise $ADVERTISE --hub $HUB >>$HOMER_HOME/agent.log 2>&1 &"
+  else
+    echo ">>   nohup homer agent --connect $HUB >>$HOMER_HOME/agent.log 2>&1 &"
+  fi
 fi
 `
 

@@ -3,6 +3,7 @@ package agentd
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/hub"
+	"github.com/zzjcool/homer-cli/internal/sshkey"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -94,6 +96,9 @@ type Daemon struct {
 	// retries logs one line per failing key per minute — the silent-401
 	// lesson: a doomed retry loop must be visible in the log, never spam.
 	retries *retryLogger
+	// dialSecret is the per-agent bearer this listen server accepts when
+	// the hub dials back. It is published after enrollment.
+	dialSecret atomic.Value
 }
 
 func New(cfg Config, exec Executor) *Daemon {
@@ -151,6 +156,9 @@ func (d *Daemon) runListen(ctx context.Context) error {
 		}
 		d.cfg.AdvertiseURL = advertiseURL
 	}
+	if secret := strings.TrimSpace(d.cfg.AgentSecret); secret != "" {
+		d.dialSecret.Store(secret)
+	}
 	hostname := localHostname()
 	identity := &web.AgentIdentity{
 		AgentID:  d.cfg.AgentID,
@@ -163,6 +171,10 @@ func (d *Daemon) runListen(ctx context.Context) error {
 		Token:     d.cfg.Token,
 		Identity:  identity,
 		SyncDeps:  d.syncDeps(),
+		// The hub dials this port with the per-agent secret from enrollment,
+		// which does not exist yet when the listener starts.
+		AgentEndpointAuthorized: d.listenAuthorized,
+		LocalResolve:            d.resolveLocal,
 	})
 	if err != nil {
 		return err
@@ -396,6 +408,7 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		Addr     string            `json:"addr,omitempty"`
 		Version  string            `json:"version,omitempty"`
 		Code     string            `json:"code,omitempty"`
+		Drift    *hub.AgentDrift   `json:"drift,omitempty"`
 		Host     *hub.HostSnapshot `json:"host,omitempty"`
 	}{
 		AgentID:  d.cfg.AgentID,
@@ -404,6 +417,9 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		Version:  web.Version,
 		Code:     d.cfg.EnrollCode,
 		Host:     d.hostSnapshot(),
+	}
+	if mode == hub.AgentModeListen {
+		payload.Drift = d.driftSummary(ctx)
 	}
 	if mode == hub.AgentModeListen {
 		if strings.TrimSpace(d.cfg.AdvertiseURL) == "" {
@@ -424,43 +440,84 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 	// per-agent secret to this agentID and registers it in one step. The
 	// code is one-shot; on success it is dropped from memory for good.
 	if strings.TrimSpace(d.cfg.EnrollCode) != "" {
-		responseBody, err := d.postJSONWithClient(ctx, client, d.endpointURL("enroll"), body)
-		if err != nil {
+		err := d.redeemEnrollment(ctx, client, mode, body)
+		if err == nil {
+			return nil
+		}
+		// keys/hub-token keeps the one-time code after a successful enroll.
+		// The next start presents that burned code and would retry forever,
+		// even though agent.json already holds the live secret. Fall
+		// through and register with the secret.
+		if strings.TrimSpace(d.cfg.AgentSecret) == "" {
 			return err
 		}
-		var enrolled struct {
-			OK          bool   `json:"ok"`
-			AgentSecret string `json:"agentSecret"`
-			Error       *struct {
-				Code    string   `json:"code"`
-				Message string   `json:"message"`
-				Details []string `json:"details"`
-			} `json:"error"`
-		}
-		if err := json.Unmarshal(responseBody, &enrolled); err != nil {
-			return err
-		}
-		if enrolled.Error != nil {
-			return fmt.Errorf("接入失败: %s", enrolled.Error.Message)
-		}
-		if !enrolled.OK || enrolled.AgentSecret == "" {
-			return fmt.Errorf("接入失败: hub 未返回 agent 密钥")
-		}
-		d.cfg.AgentSecret = enrolled.AgentSecret
-		d.cfg.EnrollCode = "" // one-shot: never keep it around
-		if err := d.saveAgentConfig(string(mode)); err != nil {
-			return err
-		}
-		return nil
+		d.cfg.EnrollCode = ""
 	}
 	// Plain registration (already enrolled, or legacy hub-token agents).
 	if _, err := d.postJSONWithClient(ctx, client, d.endpointURL("register"), body); err != nil {
 		return err
 	}
+	d.syncExecutorCredential()
 	if err := d.saveAgentConfig(string(mode)); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (d *Daemon) redeemEnrollment(ctx context.Context, client *http.Client, mode hub.AgentMode, body []byte) error {
+	responseBody, err := d.postJSONWithClient(ctx, client, d.endpointURL("enroll"), body)
+	if err != nil {
+		return err
+	}
+	var enrolled struct {
+		OK          bool   `json:"ok"`
+		AgentSecret string `json:"agentSecret"`
+		Error       *struct {
+			Code    string   `json:"code"`
+			Message string   `json:"message"`
+			Details []string `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &enrolled); err != nil {
+		return err
+	}
+	if enrolled.Error != nil {
+		return fmt.Errorf("接入失败: %s", enrolled.Error.Message)
+	}
+	if !enrolled.OK || enrolled.AgentSecret == "" {
+		return fmt.Errorf("接入失败: hub 未返回 agent 密钥")
+	}
+	d.cfg.AgentSecret = enrolled.AgentSecret
+	d.cfg.EnrollCode = ""
+	d.syncExecutorCredential()
+	return d.saveAgentConfig(string(mode))
+}
+
+// syncExecutorCredential copies the live bearer onto the task executor.
+// Enrollment learns the per-agent secret only after the executor has
+// already been constructed (often with an empty credential, because the
+// one-time code is not a snapshot bearer). Poll uses cfg.AgentSecret
+// directly and stays healthy; push/pull go through the executor and would
+// otherwise keep calling /api/snapshot unauthenticated.
+func (d *Daemon) syncExecutorCredential() {
+	if d == nil || d.exec == nil {
+		return
+	}
+	credential := strings.TrimSpace(d.cfg.AgentSecret)
+	if credential == "" {
+		credential = strings.TrimSpace(d.cfg.Token)
+	}
+	if secret := strings.TrimSpace(d.cfg.AgentSecret); secret != "" {
+		d.dialSecret.Store(secret)
+	}
+	if credential == "" {
+		return
+	}
+	setter, ok := d.exec.(interface{ SetHubCredential(string) })
+	if !ok {
+		return
+	}
+	setter.SetHubCredential(credential)
 }
 
 func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool, error) {
@@ -512,6 +569,11 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 	go func() {
 		var output any
 		var err error
+		if task.Options.Resolve == "local" || task.Options.Resolve == "center" {
+			output, err = resolveOnExecutor(ctx, d.exec, task.Options.Resolve)
+			completed <- executionResult{report: output, err: err}
+			return
+		}
 		switch task.Kind {
 		case hub.TaskKindStatus:
 			output, err = d.exec.Status(ctx)
@@ -526,6 +588,13 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 			output, err = d.exec.Push(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite)
 		case hub.TaskKindPull:
 			output, err = d.exec.Pull(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite)
+		case hub.TaskKindSSHKey:
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				output = sshkey.Report{GitHubUser: task.Options.GitHubUser, Errors: []string{"无法确定用户主目录: " + homeErr.Error()}}
+				break
+			}
+			output = sshkey.Install(home, task.Options.GitHubUser, task.Options.SSHKeys)
 		default:
 			err = fmt.Errorf("unsupported task kind %q", task.Kind)
 		}
@@ -542,7 +611,18 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 			result.Error = err.Error()
 			return result
 		}
-		result.OK = taskResultOK(task.Kind, output.report)
+		switch report := output.report.(type) {
+		case commands.MergeReport:
+			if task.Options.Resolve != "" {
+				result.OK = report.OK
+			} else {
+				result.OK = taskResultOK(task.Kind, output.report)
+			}
+		case sshkey.Report:
+			result.OK = report.OK
+		default:
+			result.OK = taskResultOK(task.Kind, output.report)
+		}
 		result.Report = encoded
 		return result
 	case <-ctx.Done():
@@ -697,6 +777,43 @@ func durationSeconds(value time.Duration) int {
 	// second: the hub then performs an immediate poll and the caller's
 	// PollInterval controls the cadence.
 	return int(value / time.Second)
+}
+
+func (d *Daemon) listenAuthorized(r *http.Request) bool {
+	want, _ := d.dialSecret.Load().(string)
+	if want == "" {
+		return false
+	}
+	got := bearerFromRequest(r)
+	if got == "" || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func bearerFromRequest(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix = "Bearer "
+	if !strings.HasPrefix(value, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(value, prefix))
+}
+
+func (d *Daemon) resolveLocal(ctx context.Context, choice string) (json.RawMessage, error) {
+	report, err := resolveOnExecutor(ctx, d.exec, choice)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(report)
+}
+
+func resolveOnExecutor(ctx context.Context, exec Executor, choice string) (commands.MergeReport, error) {
+	local, ok := exec.(*localExecutor)
+	if !ok {
+		return commands.MergeReport{}, fmt.Errorf("该 executor 不能在机器上裁决冲突")
+	}
+	return local.Resolve(ctx, choice)
 }
 
 func taskResultOK(kind hub.TaskKind, report any) bool {

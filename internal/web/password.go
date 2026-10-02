@@ -306,9 +306,11 @@ func (s *Server) handleAuthAPI(w http.ResponseWriter, r *http.Request, path stri
 			writeError(w, http.StatusUnauthorized, "unauthorized", "未授权", nil)
 			return
 		}
+		connect, listen := s.joinCommandsForRequest(r)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"command": s.joinCommandForRequest(r),
+			"ok":            true,
+			"command":       connect,
+			"listenCommand": listen,
 		})
 	default:
 		writeMethodNotAllowed(w)
@@ -411,20 +413,31 @@ func validatePassword(password string) string {
 // freshly minted one-time enrollment code. The shared hub token is never
 // exposed here — each machine gets its own credential at enrollment.
 func (s *Server) joinCommandForRequest(r *http.Request) string {
+	connect, _ := s.joinCommandsForRequest(r)
+	return connect
+}
+
+// joinCommandsForRequest mints one enrollment code and renders both
+// bootstrap lines: the machine dials the hub, or the hub dials the machine.
+func (s *Server) joinCommandsForRequest(r *http.Request) (string, string) {
 	base := requestBaseURL(r)
 	if s.opts.Enrollment == nil {
-		// Hub without enrollment support: fall back to the legacy
-		// hub-token shape (embedded deployments).
 		if s.opts.Token == "" {
-			return fmt.Sprintf("homer agent --connect %s", base)
+			return fmt.Sprintf("homer agent --connect %s", base),
+				fmt.Sprintf("homer agent --listen 0.0.0.0:7761 --advertise http://<这台机器的IP>:7761 --hub %s", base)
 		}
-		return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, s.opts.Token)
+		token := s.opts.Token
+		return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, token),
+			fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s --listen 0.0.0.0:7761 --advertise http://<这台机器的IP>:7761", base, token)
 	}
 	code, err := s.opts.Enrollment.Mint(24 * time.Hour)
 	if err != nil {
-		return fmt.Sprintf("# 接入码生成失败: %s", err.Error())
+		message := fmt.Sprintf("# 接入码生成失败: %s", err.Error())
+		return message, message
 	}
-	return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, code)
+	connect := fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, code)
+	listen := fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s --listen 0.0.0.0:7761 --advertise http://<这台机器的IP>:7761", base, code)
+	return connect, listen
 }
 
 // readJSONBody decodes a small JSON request body (auth payloads only).

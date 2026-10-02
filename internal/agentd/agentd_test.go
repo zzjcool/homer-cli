@@ -561,6 +561,70 @@ func TestLocalExecutorHubTransport(t *testing.T) {
 	}
 }
 
+// A machine that joins with a one-time code builds its executor before the
+// per-agent secret exists. The first 下发 must still present that secret
+// when it downloads /api/snapshot — poll already uses cfg.AgentSecret, and
+// a stale empty executor credential is a 401 that the console shows as 502.
+func TestEnrollUpdatesSnapshotCredential(t *testing.T) {
+	registry := hub.NewRegistry()
+	api := hub.NewAgentAPI(registry, "hub-token")
+	code, err := api.Enrollment.Mint(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshotAuth atomic.Value
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/snapshot" {
+			snapshotAuth.Store(r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"generation":1,"homerJson":"","store":{}}`)
+			return
+		}
+		api.ServeHTTP(w, r)
+	}))
+	defer hubServer.Close()
+
+	home := t.TempDir()
+	executor := NewLocalExecutorWithHub(home, hubServer.URL, "")
+	cfg := Config{
+		Home:          home,
+		HomerHome:     home,
+		ConnectURL:    hubServer.URL,
+		EnrollCode:    code,
+		AgentID:       "fresh-enroll",
+		PollWait:      time.Second,
+		PollInterval:  10 * time.Millisecond,
+		ReportTimeout: 2 * time.Second,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- New(cfg, executor).Run(ctx) }()
+	waitFor(t, 2*time.Second, func() bool {
+		_, ok := registry.Get(cfg.AgentID)
+		return ok
+	})
+	task := hub.Task{TaskID: "enroll-pull", Kind: hub.TaskKindPull, Options: hub.TaskOptions{Confirm: true}, CreatedAt: time.Now()}
+	if err := registry.Enqueue(cfg.AgentID, task); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		_, ok := snapshotAuth.Load().(string)
+		return ok
+	})
+	auth, _ := snapshotAuth.Load().(string)
+	bearer := strings.TrimPrefix(auth, "Bearer ")
+	if !strings.HasPrefix(auth, "Bearer ") || api.Enrollment.AuthorizedAgent(bearer) != cfg.AgentID {
+		t.Fatalf("snapshot Authorization = %q, want the enrolled per-agent secret", auth)
+	}
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+}
+
 // retryLogger must throttle: the same key logs once per window, never
 // spamming a dead-looped agent's log (the lesson from the silent 401
 // death loop).

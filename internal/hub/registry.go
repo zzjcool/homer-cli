@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,11 +18,15 @@ type AgentInfo struct {
 	Version  string    `json:"version,omitempty"`
 	Stale    bool      `json:"stale"`
 	// Drift is the machine's last self-reported status summary relative
-	// to the storage it last synced with (uploaded with each poll).
+	// to the storage it last synced with (uploaded with each poll, or with
+	// a listen agent's registration heartbeat).
 	Drift *AgentDrift `json:"drift,omitempty"`
 	// Host is the machine's last self-reported resource snapshot
 	// (CPU, memory, disks, interfaces), uploaded with each poll.
 	Host *HostSnapshot `json:"host,omitempty"`
+	// DialSecret is the per-agent bearer the hub uses when it dials a
+	// listen-mode machine. It never leaves the process.
+	DialSecret string `json:"-"`
 }
 
 // AgentDrift is the per-machine status summary the console renders in the
@@ -87,8 +92,12 @@ func (r *Registry) Register(info AgentInfo) error {
 	info.Stale = false
 	info.Host = normalizeHost(info.Host)
 	if agent, ok := r.agents[info.AgentID]; ok {
-		// Re-registration (listen agents do this every minute) must not
-		// wipe the last drift or resource report when the payload omits them.
+		// Re-registration refreshes identity and address. Keep the dial
+		// secret, last drift, and last resource report when this call
+		// omitted them, or a listen heartbeat would wipe them.
+		if info.DialSecret == "" {
+			info.DialSecret = agent.info.DialSecret
+		}
 		if info.Host == nil {
 			info.Host = agent.info.Host
 		}
@@ -103,6 +112,19 @@ func (r *Registry) Register(info AgentInfo) error {
 		notify: make(chan struct{}),
 	}
 	return nil
+}
+
+// SetDialSecret records the bearer the hub should present when it dials
+// this listen-mode machine.
+func (r *Registry) SetDialSecret(agentID, secret string) {
+	if strings.TrimSpace(agentID) == "" || secret == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentID]; ok {
+		agent.info.DialSecret = secret
+	}
 }
 
 // UpdateDrift caches a machine's self-reported status summary.

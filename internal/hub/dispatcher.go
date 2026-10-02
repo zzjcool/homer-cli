@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -100,7 +101,7 @@ func (d *Dispatcher) AgentStatus(ctx context.Context, agentID string) (json.RawM
 	}
 	switch info.Mode {
 	case AgentModeListen:
-		body, err := d.direct(ctx, info.Addr, http.MethodGet, "status", nil, false)
+		body, err := d.direct(ctx, info, http.MethodGet, "status", nil, nil, false)
 		if err != nil {
 			return nil, d.directError(err)
 		}
@@ -127,7 +128,7 @@ func (d *Dispatcher) AgentDiff(ctx context.Context, agentID string, params web.D
 		query := url.Values{}
 		query.Set("adapter", params.Adapter)
 		query.Set("category", params.Category)
-		body, err := d.direct(ctx, info.Addr, http.MethodGet, "diff", query, false)
+		body, err := d.direct(ctx, info, http.MethodGet, "diff", query, nil, false)
 		if err != nil {
 			return "", d.directError(err)
 		}
@@ -152,37 +153,81 @@ func (d *Dispatcher) AgentDiff(ctx context.Context, agentID string, params web.D
 }
 
 func (d *Dispatcher) AgentPush(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
-	return d.writeAgent(ctx, agentID, TaskKindPush, confirm, scope)
+	return d.writeAgent(ctx, agentID, TaskKindPush, taskOptionsForScope(confirm, scope))
 }
 
 func (d *Dispatcher) AgentPull(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
-	return d.writeAgent(ctx, agentID, TaskKindPull, confirm, scope)
+	return d.writeAgent(ctx, agentID, TaskKindPull, taskOptionsForScope(confirm, scope))
 }
 
-func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKind, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
-	info, err := d.agentInfo(agentID)
-	if err != nil {
-		return nil, err
-	}
+func taskOptionsForScope(confirm bool, scope web.SyncScope) TaskOptions {
 	options := TaskOptions{Confirm: confirm, Overwrite: scope.Overwrite}
 	if scope.Explicit {
 		options.Adapters = append([]string(nil), scope.Adapters...)
 	}
+	return options
+}
+
+// AgentInstallSSHKeys asks a machine to append keys to the agent user's
+// authorized_keys. Connect-mode machines receive a task; listen-mode
+// machines are dialed directly. The keys were already fetched by the hub.
+func (d *Dispatcher) AgentInstallSSHKeys(ctx context.Context, agentID, githubUser string, keys []string) (json.RawMessage, error) {
+	info, err := d.agentInfo(agentID)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.requireOnline(agentID); err != nil {
+		return nil, err
+	}
+	options := TaskOptions{Confirm: true, GitHubUser: githubUser, SSHKeys: append([]string(nil), keys...)}
+	if info.Mode == AgentModeListen {
+		payload, err := json.Marshal(options)
+		if err != nil {
+			return nil, err
+		}
+		body, err := d.direct(ctx, info, http.MethodPost, "ssh-key", nil, payload, true)
+		if err != nil {
+			return nil, d.directError(err)
+		}
+		return body, nil
+	}
+	return d.enqueueAndWait(ctx, info.AgentID, TaskKindSSHKey, options)
+}
+
+// AgentResolve asks one machine to apply a conflict choice through merge.
+// Scoped console buttons use AgentPush/AgentPull with an explicit selection
+// instead, so this path stays available for a whole-machine choice.
+func (d *Dispatcher) AgentResolve(ctx context.Context, agentID, choice string) (json.RawMessage, error) {
+	kind := TaskKindPull
+	if choice == "local" {
+		kind = TaskKindPush
+	}
+	return d.writeAgent(ctx, agentID, kind, TaskOptions{Confirm: true, Resolve: choice})
+}
+
+func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKind, options TaskOptions) (json.RawMessage, error) {
+	info, err := d.agentInfo(agentID)
+	if err != nil {
+		return nil, err
+	}
 	switch info.Mode {
 	case AgentModeListen:
 		query := url.Values{}
-		query.Set("confirm", strconv.FormatBool(confirm))
-		if scope.Explicit {
-			query.Set("adapters", strings.Join(scope.Adapters, ","))
+		query.Set("confirm", strconv.FormatBool(options.Confirm))
+		if len(options.Adapters) > 0 {
+			query.Set("adapters", strings.Join(options.Adapters, ","))
 		}
-		if scope.Overwrite {
+		if options.Overwrite {
 			query.Set("overwrite", "true")
+		}
+		if options.Resolve != "" {
+			query.Set("resolve", options.Resolve)
 		}
 		path := "push"
 		if kind == TaskKindPull {
 			path = "pull"
 		}
-		body, err := d.direct(ctx, info.Addr, http.MethodPost, path, query, true)
+		body, err := d.direct(ctx, info, http.MethodPost, path, query, nil, true)
 		if err != nil {
 			return nil, d.directError(err)
 		}
@@ -258,20 +303,34 @@ func (d *Dispatcher) enqueueAndWait(ctx context.Context, agentID string, kind Ta
 	return append(json.RawMessage(nil), result.Report...), nil
 }
 
-func (d *Dispatcher) direct(ctx context.Context, addr string, method string, endpoint string, query url.Values, writeOperation bool) ([]byte, error) {
+func (d *Dispatcher) direct(ctx context.Context, info AgentInfo, method string, endpoint string, query url.Values, payload []byte, writeOperation bool) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	endpointURL, err := agentEndpointURL(addr, endpoint, query)
+	endpointURL, err := agentEndpointURL(info.Addr, endpoint, query)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpointURL, nil)
+	var bodyReader io.Reader
+	if len(payload) > 0 {
+		bodyReader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpointURL, bodyReader)
 	if err != nil {
 		return nil, err
 	}
-	if d != nil && d.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+d.Token)
+	if len(payload) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	token := ""
+	if d != nil {
+		token = d.Token
+	}
+	if info.DialSecret != "" {
+		token = info.DialSecret
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := d.httpClient()
 	resp, err := client.Do(req)

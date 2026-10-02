@@ -1,0 +1,75 @@
+name: homer-console-e2e
+
+# Browser-driven console scenarios. The hub starts empty. Each box stays
+# idle until the test runs the exact install command copied from the page.
+services:
+  keys:
+    image: homer-console-e2e
+    hostname: keys
+    init: true
+    entrypoint: ["keys-server"]
+
+  hub:
+    build:
+      context: ../..
+      dockerfile: e2e/Dockerfile
+    image: homer-console-e2e
+    init: true
+    depends_on: [keys]
+    environment:
+      HOMER_GITHUB_KEYS_BASE: http://keys:8080
+    entrypoint: ["homer", "serve", "--addr", "0.0.0.0:7760", "--home", "/root/.homer"]
+
+  box-a:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-a
+    init: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /root/.pi/agent
+        printf '%s\n' '{"marker":"from-box-a"}' > /root/.pi/agent/settings.json
+        exec sleep infinity
+
+  box-b:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-b
+    init: true
+    entrypoint: ["sleep", "infinity"]
+
+  box-c:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-c
+    init: true
+    entrypoint: ["sleep", "infinity"]
+
+  box-bad:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-bad
+    init: true
+    entrypoint: ["sleep", "infinity"]
+
+  box-reuse:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-reuse
+    init: true
+    entrypoint: ["sleep", "infinity"]
+
+  box-rejoin:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-rejoin
+    init: true
+    entrypoint: ["sleep", "infinity"]
+
+  box-listen:
+    image: homer-console-e2e
+    depends_on: [hub]
+    hostname: box-listen
+    init: true
+    entrypoint: ["sleep", "infinity"]

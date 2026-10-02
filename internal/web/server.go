@@ -161,6 +161,10 @@ type ServeOptions struct {
 	// pushed by the hub's dispatcher). When nil the legacy git transport
 	// runs.
 	SyncDeps SyncDepsSource
+	// LocalResolve runs a conflict choice on this process. Set only on a
+	// listen-mode agent, where the hub dials /api/push or /api/pull with
+	// ?resolve=local|center.
+	LocalResolve func(ctx context.Context, choice string) (json.RawMessage, error)
 }
 
 // SyncDepsSource builds command deps per request. The snapshot/secret
@@ -212,15 +216,15 @@ func NewServer(opts ServeOptions) (*Server, error) {
 		})
 		opts.HomerHome = paths.Home
 	}
-	// Advisor rule 4: a hub without an administrator password refuses to
-	// bind beyond loopback — finish first-run setup on the machine itself
-	// (or over LAN) before exposing the console publicly. The token-only
-	// path stays available for scripted deployments.
+	// Advisor rule 4: a hub console without an administrator password
+	// refuses to bind beyond loopback. A listen-mode agent (Identity set)
+	// is not a console: it binds so the hub can dial it, and every request
+	// still needs the per-agent secret.
 	hasPassword := false
 	if info, err := os.Stat(filepath.Join(opts.HomerHome, "keys", "hub-password")); err == nil && !info.IsDir() {
 		hasPassword = true
 	}
-	if opts.Token == "" && !hasPassword && !isLoopbackAddr(opts.Addr) {
+	if opts.Identity == nil && opts.Token == "" && !hasPassword && !isLoopbackAddr(opts.Addr) {
 		return nil, fmt.Errorf("尚未设置管理员密码：请先用回环地址启动（homer serve）并在浏览器完成初始化，或用 --token 提供机器令牌")
 	}
 	server := &Server{opts: opts, auth: newAuthStore(opts.HomerHome)}

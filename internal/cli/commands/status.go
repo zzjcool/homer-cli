@@ -353,6 +353,7 @@ func applyManifestView(report *StatusReport, kinds map[string]map[string]string,
 			if !isManifest {
 				continue
 			}
+			category.Kind = "manifest"
 			content := ""
 			if locals[adapter.ID] != nil {
 				content = locals[adapter.ID][category.Name]

@@ -19,6 +19,7 @@ const (
 	TaskKindDiff   TaskKind = "diff"
 	TaskKindPush   TaskKind = "push"
 	TaskKindPull   TaskKind = "pull"
+	TaskKindSSHKey TaskKind = "ssh-key"
 )
 
 type Task struct {
@@ -34,6 +35,15 @@ type TaskOptions struct {
 	Confirm   bool     `json:"confirm,omitempty"`
 	Adapters  []string `json:"adapters,omitempty"`
 	Overwrite bool     `json:"overwrite,omitempty"`
+	// Resolve is set by the console's conflict buttons: "local" keeps this
+	// machine, "center" applies the hub generation. Empty for ordinary
+	// push/pull.
+	Resolve string `json:"resolve,omitempty"`
+	// GitHubUser and SSHKeys carry a login-key install. The hub fills
+	// SSHKeys after reading the user's public keys; the agent only writes
+	// them into authorized_keys.
+	GitHubUser string   `json:"githubUser,omitempty"`
+	SSHKeys    []string `json:"sshKeys,omitempty"`
 }
 
 type TaskResult struct {

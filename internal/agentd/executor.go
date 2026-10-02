@@ -49,7 +49,8 @@ func (e *localExecutor) Status(ctx context.Context) (commands.StatusReport, erro
 	if err := contextError(ctx); err != nil {
 		return commands.StatusReport{}, err
 	}
-	report, err := commands.RunStatus(commands.StatusOptions{HomerHome: e.homerHome})
+	opts := commands.StatusOptions{HomerHome: e.homerHome}
+	report, err := e.statusReport(ctx, opts)
 	if err != nil {
 		// A fresh machine (no homer.json yet) is a LEGAL state — "new
 		// machine awaiting dispatch", not a task failure. Returning the
@@ -78,6 +79,35 @@ func missingConfig(err error) bool {
 	return core.IsConfigNotInitialized(err)
 }
 
+// statusReport is RunStatus, plus the hub generation as the remote side
+// when this executor has a hub. Local status only sees the store baseline,
+// so a center change never showed up as ↓ or as a conflict until this.
+func (e *localExecutor) statusReport(ctx context.Context, opts commands.StatusOptions) (commands.StatusReport, error) {
+	if e == nil || e.hubURL == "" {
+		return commands.RunStatus(opts)
+	}
+	paths := core.GetHomerPaths(func(key string) string {
+		if key == "HOMER_HOME" {
+			return e.homerHome
+		}
+		return os.Getenv(key)
+	})
+	config, err := core.LoadConfig(paths)
+	if err != nil {
+		return commands.RunStatus(opts)
+	}
+	sources, err := commands.CollectSnapshotSources(paths, config)
+	if err != nil {
+		return commands.RunStatus(opts)
+	}
+	remote, _, downloadErr := e.downloadHubSnapshot(ctx)
+	if downloadErr != nil {
+		return commands.RunStatus(opts)
+	}
+	sources.Remote = remote
+	return commands.RunStatus(opts, sources)
+}
+
 func (e *localExecutor) Diff(ctx context.Context, params web.DiffParams) (string, error) {
 	if err := contextError(ctx); err != nil {
 		return "", err
@@ -99,6 +129,15 @@ func (e *localExecutor) Diff(ctx context.Context, params web.DiffParams) (string
 func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error) {
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err
+	}
+	// Console 收取 on a brand-new machine: there is no homer.json yet, but
+	// the button is still offered. The hub transport initializes from the
+	// built-in adapters so local files can be uploaded. A plain local push
+	// (no hub) must keep refusing to create homer.json.
+	if e.hubURL != "" {
+		if err := e.ensureInitialized(); err != nil {
+			return commands.PushReport{}, err
+		}
 	}
 	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
 	if e.hubURL != "" {
@@ -177,7 +216,76 @@ var _ Executor = (*localExecutor)(nil)
 // snapshots upload through the push pipeline. The credential is the
 // agent's bearer secret.
 func NewLocalExecutorWithHub(homerHome, hubURL, credential string) Executor {
-	return &localExecutor{homerHome: homerHome, hubURL: strings.TrimSpace(hubURL), credential: credential}
+	return &localExecutor{homerHome: homerHome, hubURL: strings.TrimSpace(hubURL), credential: strings.TrimSpace(credential)}
+}
+
+// SetHubCredential replaces the bearer sent to /api/snapshot. The executor
+// is built before a one-time enrollment code is redeemed, so the per-agent
+// secret does not exist yet; the daemon pushes it here as soon as enroll
+// succeeds. Leaving the original empty credential in place makes the first
+// 下发 download the hub snapshot with no Authorization and the hub answers 401.
+func (e *localExecutor) SetHubCredential(credential string) {
+	if e == nil {
+		return
+	}
+	e.credential = strings.TrimSpace(credential)
+}
+
+// ensureInitialized creates homer.json when this machine has never been
+// initialized. RunInit with All is non-interactive: it records the built-in
+// adapters and a store snapshot of whatever is already on disk.
+func (e *localExecutor) ensureInitialized() error {
+	if e == nil {
+		return errors.New("nil executor")
+	}
+	paths := core.GetHomerPaths(func(key string) string {
+		if key == "HOMER_HOME" {
+			return e.homerHome
+		}
+		return os.Getenv(key)
+	})
+	if _, err := os.Stat(paths.ConfigFile); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	_, err := commands.RunInit(commands.InitOptions{HomerHome: e.homerHome, All: true})
+	return err
+}
+
+// Resolve applies a console conflict choice on this machine. "local" keeps
+// the machine's content and uploads it; "center" overwrites local files
+// from the hub generation. A plain push/pull refuses while conflicts
+// remain, so the choice has to go through merge.
+func (e *localExecutor) Resolve(ctx context.Context, choice string) (commands.MergeReport, error) {
+	if err := contextError(ctx); err != nil {
+		return commands.MergeReport{}, err
+	}
+	if choice != "local" && choice != "center" {
+		return commands.MergeReport{}, fmt.Errorf("unknown resolve choice %q", choice)
+	}
+	deps := &commands.MergeDeps{UI: commands.HeadlessUI{}, NoFetch: true}
+	if e.hubURL != "" {
+		snapshot, _, err := e.downloadHubSnapshot(ctx)
+		if err != nil {
+			return commands.MergeReport{}, err
+		}
+		deps.HubSnapshot = snapshot
+		if choice == "local" {
+			deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
+				return e.uploadHubSnapshot(ctx, snapshot, nil)
+			}
+		}
+	}
+	report := commands.RunMerge(commands.MergeOptions{
+		HomerHome:    e.homerHome,
+		AcceptLocal:  choice == "local",
+		AcceptRemote: choice == "center",
+	}, deps)
+	if err := contextError(ctx); err != nil {
+		return commands.MergeReport{}, err
+	}
+	return report, nil
 }
 
 // hubSnapshotPayload mirrors the wire format of /api/snapshot.
