@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,7 +12,7 @@ import (
 )
 
 // Advisor ruling 2026-09-28: dual-layer credentials.
-// Humans: password -> HttpOnly session cookie (in-memory opaque token).
+// Humans: password -> HMAC-signed HttpOnly session cookie (key in keys/session-key).
 // Agents/scripts: existing Bearer hub token, unchanged.
 
 func authFixture(t *testing.T) webFixture {
@@ -147,8 +148,8 @@ func setupFromLoopback(t *testing.T, handler http.Handler, body string) *httptes
 	return response
 }
 
-// Rule 2: login issues an opaque HttpOnly session cookie that authorizes
-// /api/*; logout revokes it.
+// Rule 2: login issues an HMAC-signed HttpOnly session cookie that authorizes
+// /api/*. Logout clears the cookie; a copy of it stays valid until expiry.
 func TestLoginSessionLifecycle(t *testing.T) {
 	fixture := authFixture(t)
 	server := newWebServer(t, fixture, "", nil, nil)
@@ -175,8 +176,19 @@ func TestLoginSessionLifecycle(t *testing.T) {
 	if cookie == nil || cookie.Value == "" {
 		t.Fatal("no session cookie issued")
 	}
-	if !cookie.HttpOnly || cookie.Path != "/" || cookie.MaxAge != 43200 {
-		t.Fatalf("cookie flags = HttpOnly:%v Path:%s MaxAge:%d", cookie.HttpOnly, cookie.Path, cookie.MaxAge)
+	if !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteStrictMode || cookie.MaxAge != int(sessionMaxAge.Seconds()) {
+		t.Fatalf("cookie flags = HttpOnly:%v Path:%s SameSite:%v MaxAge:%d", cookie.HttpOnly, cookie.Path, cookie.SameSite, cookie.MaxAge)
+	}
+	keyInfo, err := os.Stat(filepath.Join(fixture.home, "keys", sessionKeyFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("session key mode = %v", keyInfo.Mode().Perm())
+	}
+	keyBytes, err := os.ReadFile(filepath.Join(fixture.home, "keys", sessionKeyFilename))
+	if err != nil || len(keyBytes) != sessionKeySize {
+		t.Fatalf("session key len = %d err=%v", len(keyBytes), err)
 	}
 
 	// wrong password is rejected (no lockout of the correct one)
@@ -193,23 +205,30 @@ func TestLoginSessionLifecycle(t *testing.T) {
 	if authedResponse.Code != http.StatusOK {
 		t.Fatalf("status with session = %d body=%s", authedResponse.Code, authedResponse.Body)
 	}
+	if extra := sessionCookie(authedResponse); extra != nil {
+		t.Fatalf("fresh session was reissued, MaxAge=%d", extra.MaxAge)
+	}
 
 	// Bearer token still works in parallel (agent contract unchanged)
 	if response := requestWithToken(t, handler, http.MethodGet, "/api/status", ""); response.Code != http.StatusUnauthorized {
 		t.Fatalf("empty bearer = %d", response.Code)
 	}
 
-	// logout revokes
+	// logout clears the browser cookie and does not revoke a copy
 	logout := postJSON(t, handler, "/api/auth/logout", "{}", cookie)
 	if logout.Code != http.StatusOK {
 		t.Fatalf("logout = %d", logout.Code)
+	}
+	cleared := sessionCookie(logout)
+	if cleared == nil || cleared.MaxAge >= 0 || cleared.Value != "" {
+		t.Fatalf("logout cookie = %#v", cleared)
 	}
 	after := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	after.AddCookie(cookie)
 	afterResponse := httptest.NewRecorder()
 	handler.ServeHTTP(afterResponse, after)
-	if afterResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("status after logout = %d", afterResponse.Code)
+	if afterResponse.Code != http.StatusOK {
+		t.Fatalf("copied cookie after logout = %d", afterResponse.Code)
 	}
 }
 
@@ -257,8 +276,9 @@ func TestJoinCommandRequiresAuth(t *testing.T) {
 	}
 }
 
-// Rule 2: password file removal invalidates all live sessions.
-func TestPasswordRotationClearsSessions(t *testing.T) {
+// Deleting the administrator password returns the hub to first-run and
+// rejects session cookies. Replacing the file does not.
+func TestPasswordRemovalDropsSession(t *testing.T) {
 	fixture := authFixture(t)
 	server := newWebServer(t, fixture, "", nil, nil)
 	handler := server.Handler()
@@ -272,7 +292,6 @@ func TestPasswordRotationClearsSessions(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("no session")
 	}
-	// deleting the password file drops all sessions.
 	if err := os.Remove(filepath.Join(fixture.home, "keys", "hub-password")); err != nil {
 		t.Fatal(err)
 	}
@@ -280,10 +299,135 @@ func TestPasswordRotationClearsSessions(t *testing.T) {
 	probed.AddCookie(cookie)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, probed)
-	// sessions map clears lazily on next auth check: expect 401 after removal.
 	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("stale session survived password removal = %d", response.Code)
+		t.Fatalf("session survived password removal = %d", response.Code)
 	}
+}
+
+func TestPasswordReplacementKeepsSession(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+	cookie := setupAndLogin(t, handler)
+	if err := os.WriteFile(filepath.Join(fixture.home, "keys", "hub-password"), []byte("replaced-password-hash"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probed := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	probed.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, probed)
+	if response.Code != http.StatusOK {
+		t.Fatalf("session died after password replacement = %d", response.Code)
+	}
+}
+
+func TestSessionSurvivesRestart(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	cookie := setupAndLogin(t, server.Handler())
+	restarted := newWebServer(t, fixture, "", nil, nil)
+	probed := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	probed.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	restarted.Handler().ServeHTTP(response, probed)
+	if response.Code != http.StatusOK {
+		t.Fatalf("session died across serve restart = %d body=%s", response.Code, response.Body)
+	}
+}
+
+func TestSessionSlidesWhenHalfElapsed(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+	_ = setupAndLogin(t, handler)
+	cookie := signedSessionCookie(t, fixture.home, time.Now().Add(sessionMaxAge/2-time.Second))
+	probed := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	probed.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, probed)
+	if response.Code != http.StatusOK {
+		t.Fatalf("half-elapsed session = %d", response.Code)
+	}
+	refreshed := sessionCookie(response)
+	if refreshed == nil || refreshed.MaxAge != int(sessionMaxAge.Seconds()) || !refreshed.HttpOnly {
+		t.Fatalf("refreshed cookie = %#v", refreshed)
+	}
+	again := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	again.AddCookie(refreshed)
+	againResponse := httptest.NewRecorder()
+	handler.ServeHTTP(againResponse, again)
+	if againResponse.Code != http.StatusOK {
+		t.Fatalf("refreshed session = %d", againResponse.Code)
+	}
+	if extra := sessionCookie(againResponse); extra != nil {
+		t.Fatal("just-refreshed session was reissued again")
+	}
+}
+
+func TestExpiredSessionRejected(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+	_ = setupAndLogin(t, handler)
+	cookie := signedSessionCookie(t, fixture.home, time.Now().Add(-time.Minute))
+	probed := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	probed.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, probed)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session = %d", response.Code)
+	}
+}
+
+func TestTamperedSessionRejected(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "", nil, nil)
+	handler := server.Handler()
+	cookie := setupAndLogin(t, handler)
+	raw, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil || len(raw) == 0 {
+		t.Fatalf("cookie decode: %v len=%d", err, len(raw))
+	}
+	raw[len(raw)-1] ^= 0xff
+	cookie.Value = base64.RawURLEncoding.EncodeToString(raw)
+	probed := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	probed.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, probed)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("tampered session = %d", response.Code)
+	}
+}
+
+func setupAndLogin(t *testing.T, handler http.Handler) *http.Cookie {
+	t.Helper()
+	setup := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"password":"字password12345"}`))
+	setup.Header.Set("Content-Type", "application/json")
+	setup.RemoteAddr = "127.0.0.1:5555"
+	setup.Host = "127.0.0.1:7760"
+	setupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(setupResponse, setup)
+	if setupResponse.Code != http.StatusOK {
+		t.Fatalf("setup = %d body=%s", setupResponse.Code, setupResponse.Body)
+	}
+	login := postJSON(t, handler, "/api/auth/login", `{"password":"字password12345"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d body=%s", login.Code, login.Body)
+	}
+	cookie := sessionCookie(login)
+	if cookie == nil || cookie.Value == "" {
+		t.Fatal("no session cookie")
+	}
+	return cookie
+}
+
+func signedSessionCookie(t *testing.T, home string, expiry time.Time) *http.Cookie {
+	t.Helper()
+	key, err := os.ReadFile(filepath.Join(home, "keys", sessionKeyFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Cookie{Name: sessionCookieName, Value: signSession(key, expiry)}
 }
 
 // One-time setup code: public-internet first-run initialization. Trusted

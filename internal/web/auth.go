@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // isLoopbackAddr checks the address passed to net/http's listener. An empty
@@ -34,10 +35,12 @@ func isLoopbackAddr(addr string) bool {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	// Dual channel (advisor ruling): humans carry an opaque session cookie
-	// minted by password login; agents and scripts keep the Bearer hub token.
-	if s.auth != nil && s.auth.validSession(s.opts.HomerHome, r) {
-		return true
+	// Dual channel (advisor ruling): humans carry an HMAC-signed session
+	// cookie minted by password login; agents and scripts keep the Bearer hub token.
+	if s.auth != nil {
+		if _, ok := s.auth.validSession(s.opts.HomerHome, r); ok {
+			return true
+		}
 	}
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	const prefix = "Bearer "
@@ -74,8 +77,26 @@ func (s *Server) authorized(r *http.Request) bool {
 
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	if s.authorized(r) {
+		s.slideSession(w, r)
 		return true
 	}
 	writeError(w, http.StatusUnauthorized, "unauthorized", "未授权：请提供有效的 Bearer token", nil)
 	return false
+}
+
+// slideSession extends an active browser session once less than half of the
+// idle window remains. Bearer callers have nothing to extend.
+func (s *Server) slideSession(w http.ResponseWriter, r *http.Request) {
+	if s.auth == nil {
+		return
+	}
+	expiry, ok := s.auth.validSession(s.opts.HomerHome, r)
+	if !ok || time.Until(expiry) >= sessionMaxAge/2 {
+		return
+	}
+	cookie, err := s.auth.issueSession(s.opts.HomerHome)
+	if err != nil {
+		return
+	}
+	http.SetCookie(w, cookie)
 }

@@ -179,7 +179,7 @@ func NewServer(opts ServeOptions) (*Server, error) {
 	if opts.Identity == nil && opts.Token == "" && !hasPassword && !isLoopbackAddr(opts.Addr) {
 		return nil, fmt.Errorf("尚未设置管理员密码：请先用回环地址启动（homer serve）并在浏览器完成初始化，或用 --token 提供机器令牌")
 	}
-	server := &Server{opts: opts, auth: newAuthStore(opts.HomerHome)}
+	server := &Server{opts: opts, auth: newAuthStore()}
 	server.handler = http.HandlerFunc(server.serveHTTP)
 	return server, nil
 }

@@ -1,9 +1,12 @@
 package web
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,21 +23,27 @@ import (
 
 // Human credentials (advisor ruling 2026-09-28): the browser never touches
 // the hub token. A password is set once (bcrypt hash in keys/hub-password),
-// login exchanges it for an opaque in-memory session token carried in an
-// HttpOnly cookie. Agents keep the unchanged Bearer hub token contract.
+// login exchanges it for an HMAC-signed HttpOnly cookie. The signing key
+// lives in keys/session-key, so a serve restart keeps existing browsers
+// logged in. Logout only clears the cookie. Agents keep the unchanged
+// Bearer hub token contract.
 
 const (
-	sessionCookieName = "homer-session"
-	sessionMaxAge     = 12 * time.Hour
-	passwordMinRunes  = 12
-	passwordMaxBytes  = 72 // bcrypt input limit
+	sessionCookieName  = "homer-session"
+	sessionKeyFilename = "session-key"
+	sessionKeySize     = 32
+	sessionPayloadLen  = 8
+	sessionMaxAge      = 7 * 24 * time.Hour
+	passwordMinRunes   = 12
+	passwordMaxBytes   = 72 // bcrypt input limit
 )
 
-// authStore owns the password hash file and live sessions.
+// authStore owns the password hash file, the session signing key, and the
+// login backoff. Sessions themselves are not stored: the cookie carries the
+// expiry and a MAC.
 type authStore struct {
-	mu       sync.Mutex
-	password bool // keys/hub-password exists and parsed
-	sessions map[string]time.Time
+	mu         sync.Mutex
+	signingKey []byte
 
 	// setupCode is the one-time first-run code printed at boot (advisor
 	// fallback: remote servers initialize over the public internet by
@@ -45,34 +54,12 @@ type authStore struct {
 
 	failures    int
 	failBackoff time.Time // next allowed login attempt
-
-	// modTime detects out-of-band password changes (rotation via file
-	// replacement) so live sessions die with the old password.
-	modTime time.Time
 }
 
-func newAuthStore(home string) *authStore {
-	store := &authStore{sessions: map[string]time.Time{}}
-	store.reload(home)
+func newAuthStore() *authStore {
+	store := &authStore{}
 	store.regenerateSetupCode()
 	return store
-}
-
-func (a *authStore) reload(home string) {
-	info, err := os.Stat(filepath.Join(home, "keys", "hub-password"))
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err != nil {
-		a.password = false
-		a.modTime = time.Time{}
-		a.sessions = map[string]time.Time{} // password gone: drop everything
-		return
-	}
-	a.password = true
-	if !info.ModTime().Equal(a.modTime) {
-		a.modTime = info.ModTime()
-		a.sessions = map[string]time.Time{} // new password: old sessions die
-	}
 }
 
 // hasPassword probes the file system, not a startup snapshot: first-run
@@ -84,7 +71,7 @@ func (a *authStore) hasPassword(home string) bool {
 }
 
 // savePassword hashes and persists the administrator password (0600) and
-// resets every live session.
+// clears the login backoff.
 func (a *authStore) savePassword(home, password string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -124,21 +111,11 @@ func (a *authStore) savePassword(home, password string) error {
 		return fmt.Errorf("落盘密码文件: %w", err)
 	}
 	remove = false
-	a.reloadLocked(home)
-	return nil
-}
-
-func (a *authStore) reloadLocked(home string) {
-	info, err := os.Stat(filepath.Join(home, "keys", "hub-password"))
-	if err != nil {
-		a.password = false
-		a.sessions = map[string]time.Time{}
-		return
-	}
-	a.password = true
-	a.modTime = info.ModTime()
-	a.sessions = map[string]time.Time{}
+	a.mu.Lock()
 	a.failures = 0
+	a.failBackoff = time.Time{}
+	a.mu.Unlock()
+	return nil
 }
 
 // verifyPassword checks the candidate against the stored bcrypt hash,
@@ -180,63 +157,157 @@ func min(a, b int) int {
 	return b
 }
 
-// issueSession mints a new opaque session token and its cookie.
-func (a *authStore) issueSession() (*http.Cookie, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return nil, fmt.Errorf("生成会话: %w", err)
+// issueSession mints a signed session cookie with a fresh idle window.
+func (a *authStore) issueSession(home string) (*http.Cookie, error) {
+	key, err := a.sessionKey(home, true)
+	if err != nil {
+		return nil, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(buf)
-	a.mu.Lock()
-	a.sessions[token] = time.Now().Add(sessionMaxAge)
-	a.mu.Unlock()
+	expiry := time.Now().Add(sessionMaxAge)
+	return newSessionCookie(signSession(key, expiry), int(sessionMaxAge.Seconds())), nil
+}
+
+// validSession reports whether the request carries a live session cookie and
+// when it expires. A missing administrator password (first-run reset) rejects
+// the cookie. Replacing the password file does not.
+func (a *authStore) validSession(home string, r *http.Request) (time.Time, bool) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return time.Time{}, false
+	}
+	if !a.hasPassword(home) {
+		return time.Time{}, false
+	}
+	key, err := a.sessionKey(home, false)
+	if err != nil || len(key) != sessionKeySize {
+		return time.Time{}, false
+	}
+	return verifySignedSession(key, cookie.Value, time.Now())
+}
+
+// clearSessionCookie tells the browser to drop homer-session. A copy of the
+// cookie remains valid until it expires; this hub does not keep a revocation list.
+func clearSessionCookie() *http.Cookie {
+	return newSessionCookie("", -1)
+}
+
+func newSessionCookie(value string, maxAge int) *http.Cookie {
 	return &http.Cookie{
 		Name:     sessionCookieName,
-		Value:    token,
+		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(sessionMaxAge.Seconds()),
-	}, nil
+		MaxAge:   maxAge,
+	}
 }
 
-// validSession reports whether the request carries a live session cookie.
-func (a *authStore) validSession(home string, r *http.Request) bool {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err != nil || cookie.Value == "" {
-		return false
+// signSession binds an absolute expiry to the signing key. The cookie value
+// is raw-url base64 of 8-byte big-endian unix seconds followed by HMAC-SHA256.
+func signSession(key []byte, expiry time.Time) string {
+	payload := make([]byte, sessionPayloadLen+sha256.Size)
+	binary.BigEndian.PutUint64(payload[:sessionPayloadLen], uint64(expiry.Unix()))
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(payload[:sessionPayloadLen])
+	copy(payload[sessionPayloadLen:], mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func verifySignedSession(key []byte, token string, now time.Time) (time.Time, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) != sessionPayloadLen+sha256.Size {
+		return time.Time{}, false
 	}
-	// Out-of-band password rotation (file swap) kills sessions even mid-flight.
-	if info, statErr := os.Stat(filepath.Join(home, "keys", "hub-password")); statErr == nil {
-		a.mu.Lock()
-		rotated := !info.ModTime().Equal(a.modTime)
-		a.mu.Unlock()
-		if rotated {
-			a.reload(home)
-		}
-	} else {
-		a.reload(home)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(raw[:sessionPayloadLen])
+	if !hmac.Equal(raw[sessionPayloadLen:], mac.Sum(nil)) {
+		return time.Time{}, false
 	}
+	expiry := time.Unix(int64(binary.BigEndian.Uint64(raw[:sessionPayloadLen])), 0)
+	if !now.Before(expiry) {
+		return time.Time{}, false
+	}
+	return expiry, true
+}
+
+// sessionKey loads keys/session-key, creating it on first login. The key is
+// cached for the process. Two processes creating at once: the loser reads
+// the winner's file so both sign with the same key.
+func (a *authStore) sessionKey(home string, create bool) ([]byte, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	expiry, ok := a.sessions[cookie.Value]
-	if !ok || time.Now().After(expiry) {
-		return false
+	if len(a.signingKey) == sessionKeySize {
+		return a.signingKey, nil
 	}
-	got := []byte(cookie.Value)
-	// constant-time scan over the map is approximated by comparing only the
-	// matched key; map lookup already leaks nothing about candidates.
-	_ = subtle.ConstantTimeCompare(got, got)
-	return true
+	dir := filepath.Join(home, "keys")
+	path := filepath.Join(dir, sessionKeyFilename)
+	data, err := os.ReadFile(path)
+	if err == nil && len(data) == sessionKeySize {
+		a.signingKey = append([]byte(nil), data...)
+		return a.signingKey, nil
+	}
+	if !create {
+		if err == nil {
+			return nil, fmt.Errorf("会话密钥长度无效")
+		}
+		return nil, err
+	}
+	if err == nil {
+		_ = os.Remove(path)
+	}
+	key, err := writeSessionKey(dir, path)
+	if err != nil {
+		return nil, err
+	}
+	a.signingKey = key
+	return a.signingKey, nil
 }
 
-// dropSession revokes one session (logout).
-func (a *authStore) dropSession(r *http.Request) {
-	if cookie, err := r.Cookie(sessionCookieName); err == nil {
-		a.mu.Lock()
-		delete(a.sessions, cookie.Value)
-		a.mu.Unlock()
+func writeSessionKey(dir, path string) ([]byte, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("创建 keys 目录: %w", err)
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("加固 keys 目录: %w", err)
+	}
+	buf := make([]byte, sessionKeySize)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("生成会话密钥: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".session-key.tmp-")
+	if err != nil {
+		return nil, fmt.Errorf("写入会话密钥: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("加固会话密钥: %w", err)
+	}
+	if _, err := tmp.Write(buf); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("写入会话密钥: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("写入会话密钥: %w", err)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("落盘会话密钥: %w", err)
+		}
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, fmt.Errorf("读取会话密钥: %w", readErr)
+		}
+		if len(existing) != sessionKeySize {
+			return nil, fmt.Errorf("会话密钥长度无效")
+		}
+		return append([]byte(nil), existing...), nil
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, fmt.Errorf("加固会话密钥: %w", err)
+	}
+	return buf, nil
 }
 
 // setupPeerAllowed implements advisor rule 4: the setup POST is only
@@ -296,7 +367,7 @@ func (s *Server) handleAuthAPI(w http.ResponseWriter, r *http.Request, path stri
 	case path == "/api/auth/login" && r.Method == http.MethodPost:
 		s.handleAuthLogin(w, r)
 	case path == "/api/auth/logout" && r.Method == http.MethodPost:
-		s.auth.dropSession(r)
+		http.SetCookie(w, clearSessionCookie())
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case path == "/api/auth/join" && r.Method == http.MethodGet:
 		// The join command embeds the hub token: authenticated callers only
@@ -362,7 +433,7 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Setting the password logs the administrator in immediately.
-	cookie, err := s.auth.issueSession()
+	cookie, err := s.auth.issueSession(s.opts.HomerHome)
 	if err != nil {
 		writeErrorValue(w, err)
 		return
@@ -383,7 +454,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "密码错误", nil)
 		return
 	}
-	cookie, err := s.auth.issueSession()
+	cookie, err := s.auth.issueSession(s.opts.HomerHome)
 	if err != nil {
 		writeErrorValue(w, err)
 		return
