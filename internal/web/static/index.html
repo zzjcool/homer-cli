@@ -44,7 +44,7 @@ code, pre, .mono { font-family: var(--mono); }
 .hidden { display: none !important; }
 
 /* ============ layout ============ */
-.page { max-width: 720px; margin: 0 auto; padding: 0 16px 96px; }
+.page { max-width: 840px; margin: 0 auto; padding: 0 16px 96px; }
 header.topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
   border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 header.topbar h1 { font-size: 1.05rem; margin: 0; }
@@ -111,12 +111,30 @@ pre .ln-hunk { color: #0550ae; display: block; }
 pre .ln-meta { color: var(--ink-dim); display: block; }
 
 /* agents */
-.agent-line { display: flex; align-items: baseline; gap: 10px; padding: 8px 4px; border-top: 1px solid var(--line); flex-wrap: wrap; }
-.agent-line:first-of-type { border-top: none; }
-.agent-line .hostname { font-weight: 600; }
-.agent-line .aid { font-family: var(--mono); font-size: var(--fs-small); color: var(--ink-dim); }
-.agent-line .meta { font-size: var(--fs-small); color: var(--ink-dim); }
-.agent-line.stale { opacity: .6; }
+.agent-card { padding: 12px 4px 14px; border-top: 1px solid var(--line); }
+.agent-card:first-of-type { border-top: none; }
+.agent-card.stale { opacity: .6; }
+.agent-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.agent-head .hostname { font-weight: 600; }
+.agent-head .c-conflict { color: var(--danger); font-weight: 650; }
+.agent-head .c-clean { color: var(--ink-dim); }
+.agent-head .aid, .agent-head .ip { font-family: var(--mono); font-size: var(--fs-small); color: var(--ink-dim); }
+.agent-head .ip { color: var(--ink); }
+.agent-facts { margin: 8px 0 0 22px; display: grid; gap: 4px; }
+.meters { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.meter { display: flex; align-items: center; gap: 6px; font-size: var(--fs-small); min-width: 210px; flex: 1 1 220px; max-width: 340px; }
+.meter .label { width: 2.75em; color: var(--ink-dim); flex: none; }
+.meter .bar { flex: 1; height: 6px; background: var(--bg-sink); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; min-width: 48px; }
+.meter .bar i { display: block; height: 100%; background: var(--accent); width: 0; }
+.meter .bar i.hot { background: var(--danger); }
+.meter .val { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-sys { font-size: var(--fs-small); color: var(--ink-dim); }
+.agent-nets { display: grid; gap: 2px; }
+.agent-net { font-family: var(--mono); font-size: 0.75rem; display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+.agent-net .nic { color: var(--ink); font-weight: 600; }
+.agent-net .mac { color: var(--ink-dim); }
+.agent-net .addr { color: var(--ink); }
+.agent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .agent-empty { padding: 14px 4px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 
 /* auth screens */
@@ -286,7 +304,7 @@ const $ = id => document.getElementById(id);
  * POST /api/sync?direction=collect&agent=<id>&confirm=true   body {adapters}
  * POST /api/agents/<id>/pull?confirm=true                    body {adapters}
  * POST /api/resolve?choice=local|center&agent=<id>&confirm=true  在某台机器上裁决
- * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,drift}]}
+ * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,version,drift,host}]}
  * 错误: 401 / 409(code=not-initialized|aborted|conflicts) / 422(secrets-rejected)
  * =================================================================== */
 const app = {
@@ -430,6 +448,134 @@ function renderHeroSkeleton() {
 }
 
 /* ---------- ③ agents ---------- */
+function fmtBytes(n) {
+  n = Number(n);
+  if (!isFinite(n) || n < 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  const digits = i === 0 || n >= 100 ? 0 : n >= 10 ? 1 : 2;
+  return n.toFixed(digits) + " " + units[i];
+}
+function fmtUptime(sec) {
+  sec = Math.floor(Number(sec) || 0);
+  if (sec < 60) return sec + "秒";
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return d + "天" + (h ? h + "小时" : "");
+  if (h > 0) return h + "小时" + (m ? m + "分" : "");
+  return m + "分钟";
+}
+function fmtSeen(iso) {
+  const t = new Date(iso);
+  if (isNaN(t.getTime())) return String(iso || "");
+  const p = n => String(n).padStart(2, "0");
+  const now = new Date();
+  const clock = p(t.getHours()) + ":" + p(t.getMinutes()) + ":" + p(t.getSeconds());
+  const sameDay = t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth() && t.getDate() === now.getDate();
+  return sameDay ? clock : p(t.getMonth() + 1) + "-" + p(t.getDate()) + " " + clock;
+}
+function fmtLoad(load) {
+  const n = v => (Math.round(Number(v) * 100) / 100).toFixed(2);
+  return n(load.one) + " / " + n(load.five) + " / " + n(load.fifteen);
+}
+function hostUseful(h) {
+  if (!h) return false;
+  return !!(h.cpu || h.memory || h.swap || h.load || h.uptimeSec || h.distro || h.kernel ||
+    (h.disks && h.disks.length) || (h.nets && h.nets.length));
+}
+function primaryIP(host) {
+  const nets = (host && host.nets) || [];
+  for (let i = 0; i < nets.length; i++) {
+    const addrs = nets[i].addrs || [];
+    if (addrs.length) return String(addrs[0]).split("/")[0];
+  }
+  return "";
+}
+function usageMeter(label, pct, text) {
+  const row = el("div", "meter");
+  row.append(el("span", "label", label));
+  const bar = el("span", "bar");
+  const fill = document.createElement("i");
+  if (pct != null && isFinite(pct)) {
+    const clamped = Math.max(0, Math.min(100, pct));
+    fill.style.width = clamped + "%";
+    if (clamped >= 90) fill.className = "hot";
+  }
+  bar.append(fill);
+  row.append(bar, el("span", "val", text));
+  return row;
+}
+function memText(mem) {
+  const pct = mem.total ? Math.round(mem.used / mem.total * 100) : 0;
+  return fmtBytes(mem.used) + " / " + fmtBytes(mem.total) + " · " + pct + "%";
+}
+function renderHostFacts(a) {
+  const facts = el("div", "agent-facts");
+  const host = a.host;
+  if (!hostUseful(host)) {
+    facts.append(el("div", "agent-sys", "等待机器上报系统信息"));
+  } else {
+    const meters = el("div", "meters");
+    if (host.cpu) {
+      const cores = host.cpu.cores ? host.cpu.cores + " 核" : "";
+      const pct = host.cpu.usage;
+      const text = (pct == null ? "—" : Math.round(pct) + "%") + (cores ? " · " + cores : "");
+      meters.append(usageMeter("CPU", pct, text));
+    }
+    if (host.memory && host.memory.total) {
+      meters.append(usageMeter("内存", host.memory.used / host.memory.total * 100, memText(host.memory)));
+    }
+    if (host.swap && host.swap.total) {
+      meters.append(usageMeter("交换", host.swap.used / host.swap.total * 100, memText(host.swap)));
+    }
+    if (host.disks && host.disks.length) {
+      const disk = host.disks[0];
+      const pct = disk.total ? disk.used / disk.total * 100 : null;
+      const pctText = pct == null ? "" : " · " + Math.round(pct) + "%";
+      meters.append(usageMeter("磁盘", pct, disk.mount + "  " + fmtBytes(disk.used) + " / " + fmtBytes(disk.total) + pctText));
+    }
+    if (meters.childNodes.length) facts.append(meters);
+    const bits = [];
+    if (host.load) bits.push("负载 " + fmtLoad(host.load));
+    if (host.uptimeSec) bits.push("已运行 " + fmtUptime(host.uptimeSec));
+    if (bits.length) facts.append(el("div", "agent-sys", bits.join(" · ")));
+    if (host.disks && host.disks.length > 1) {
+      facts.append(el("div", "agent-sys", host.disks.slice(1).map(d =>
+        d.mount + " " + fmtBytes(d.used) + " / " + fmtBytes(d.total)).join(" · ")));
+    }
+    if (host.nets && host.nets.length) {
+      const block = el("div", "agent-nets");
+      block.append(el("div", "agent-sys", "网卡"));
+      host.nets.forEach(n => {
+        const row = el("div", "agent-net");
+        row.append(el("span", "nic", n.name || "—"));
+        if (n.mac) row.append(el("span", "mac", n.mac));
+        if (n.addrs && n.addrs.length) n.addrs.forEach(addr => row.append(el("span", "addr", addr)));
+        else row.append(el("span", "mac", n.up ? "无地址" : "未连接"));
+        block.append(row);
+      });
+      facts.append(block);
+    }
+  }
+  facts.append(el("div", "agent-sys", machineMeta(a)));
+  return facts;
+}
+function machineMeta(a) {
+  const parts = [];
+  const host = a.host || {};
+  if (host.distro) parts.push(host.distro);
+  else if (host.os) parts.push(host.os);
+  if (host.arch) parts.push(host.arch);
+  if (host.kernel) parts.push("内核 " + host.kernel);
+  if (host.cpu && host.cpu.model) parts.push(host.cpu.model);
+  parts.push(a.mode === "listen" ? "直连" : "主动连接");
+  if (a.version) parts.push(a.version);
+  if (a.lastSeen) parts.push("上报 " + fmtSeen(a.lastSeen));
+  if (a.stale) parts.push("离线");
+  return parts.join(" · ");
+}
 function renderAgents(agents, disabledFeature) {
   const list = $("agent-list"); clear(list);
   if (disabledFeature) {
@@ -446,28 +592,30 @@ function renderAgents(agents, disabledFeature) {
     return;
   }
   agents.forEach(a => {
-    const line = el("div", "agent-line" + (a.stale ? " stale" : ""));
-    line.append(el("span", "dot " + (a.stale ? "off" : "ok")));
-    line.append(el("span", "hostname", a.hostname));
-    line.append(el("span", "aid", a.agentId));
+    const card = el("div", "agent-card" + (a.stale ? " stale" : ""));
+    const head = el("div", "agent-head");
+    head.append(el("span", "dot " + (a.stale ? "off" : "ok")));
+    head.append(el("span", "hostname", a.hostname || a.agentId));
+    const ip = primaryIP(a.host);
+    if (ip) head.append(el("span", "ip", ip));
+    head.append(el("span", "aid", a.agentId));
     // 该机器相对存储的漂移（它自己每次心跳上报）
     if (a.drift) {
       const d = a.drift;
       if (d.error && d.error.indexOf("homer") >= 0 && d.error.indexOf("init") >= 0) {
         // 全新机器还没有自己的配置——不是故障，是等待第一次下发
-        line.append(el("span", "counts c-clean", "新机器 · 等待下发"));
+        head.append(el("span", "counts c-clean", "新机器 · 等待下发"));
       } else if (d.error) {
-        line.append(el("span", "small muted", "状态上报失败"));
+        head.append(el("span", "small muted", "状态上报失败"));
       } else if (d.push + d.pull + d.conflicts > 0) {
-        line.append(el("span", "counts " + (d.conflicts ? "c-conflict" : "c-drift"), fmtDrift(d)));
+        head.append(el("span", "counts " + (d.conflicts ? "c-conflict" : "c-drift"), fmtDrift(d)));
       } else {
-        line.append(el("span", "counts c-clean", "已对齐"));
+        head.append(el("span", "counts c-clean", "已对齐"));
       }
     } else {
-      line.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
+      head.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
     }
-    line.append(el("span", "meta",
-      (a.mode === "listen" ? "直连" : "主动连接") + " · " + a.lastSeen + (a.stale ? " · 离线" : "")));
+    const actions = el("div", "agent-actions");
 
     // 查看：这台机器当前的配置实况（适配器/分类/漂移计数）
     const viewBtn = el("button", "small-btn", "查看");
@@ -475,7 +623,7 @@ function renderAgents(agents, disabledFeature) {
     viewBtn.title = "查看这台机器当前的配置情况";
     viewBtn.disabled = a.stale;
     viewBtn.addEventListener("click", () => openMachineView(a));
-    line.append(viewBtn);
+    actions.append(viewBtn);
 
     // 收取：让这台机器把它的配置上传到中心存储
     const collectBtn = el("button", "small-btn", "收取");
@@ -483,7 +631,7 @@ function renderAgents(agents, disabledFeature) {
     collectBtn.title = "选择要存入中心的适配器";
     collectBtn.disabled = a.stale;
     collectBtn.addEventListener("click", () => confirmCollect(a));
-    line.append(collectBtn);
+    actions.append(collectBtn);
 
     // 下发：让这台机器应用中心存储的当前内容
     const dispatchBtn = el("button", "small-btn", "下发");
@@ -491,7 +639,7 @@ function renderAgents(agents, disabledFeature) {
     dispatchBtn.title = "选择要下发到这台机器的适配器";
     dispatchBtn.disabled = a.stale;
     dispatchBtn.addEventListener("click", () => confirmDispatch(a));
-    line.append(dispatchBtn);
+    actions.append(dispatchBtn);
 
     // 冲突裁决：这台机器有冲突时给出二选一
     if (a.drift && a.drift.conflicts > 0 && !a.stale) {
@@ -501,7 +649,7 @@ function renderAgents(agents, disabledFeature) {
       const centerBtn = el("button", "small-btn", "以中心为准");
       centerBtn.type = "button";
       centerBtn.addEventListener("click", () => confirmResolveOn("center", a));
-      line.append(localBtn, centerBtn);
+      actions.append(localBtn, centerBtn);
     }
 
     // 吊销：Tailscale 式单机踢除（凭证失效，行保留观察）。
@@ -528,8 +676,9 @@ function renderAgents(agents, disabledFeature) {
         await refresh();
       } catch (e) { toast("移除失败：" + e.message); }
     });
-    line.append(revoke, removeBtn);
-    list.append(line);
+    actions.append(revoke, removeBtn);
+    card.append(head, renderHostFacts(a), actions);
+    list.append(card);
   });
   const joinBtn = el("button", "small-btn", "＋ 接入新机器");
   joinBtn.type = "button"; joinBtn.addEventListener("click", openJoin);

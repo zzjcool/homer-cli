@@ -19,6 +19,9 @@ type AgentInfo struct {
 	// Drift is the machine's last self-reported status summary relative
 	// to the storage it last synced with (uploaded with each poll).
 	Drift *AgentDrift `json:"drift,omitempty"`
+	// Host is the machine's last self-reported resource snapshot
+	// (CPU, memory, disks, interfaces), uploaded with each poll.
+	Host *HostSnapshot `json:"host,omitempty"`
 }
 
 // AgentDrift is the per-machine status summary the console renders in the
@@ -82,7 +85,16 @@ func (r *Registry) Register(info AgentInfo) error {
 		info.LastSeen = time.Now()
 	}
 	info.Stale = false
+	info.Host = normalizeHost(info.Host)
 	if agent, ok := r.agents[info.AgentID]; ok {
+		// Re-registration (listen agents do this every minute) must not
+		// wipe the last drift or resource report when the payload omits them.
+		if info.Host == nil {
+			info.Host = agent.info.Host
+		}
+		if info.Drift == nil {
+			info.Drift = agent.info.Drift
+		}
 		agent.info = info
 		return nil
 	}
@@ -102,6 +114,19 @@ func (r *Registry) UpdateDrift(agentID string, drift AgentDrift) {
 		return
 	}
 	agent.info.Drift = &drift
+}
+
+// UpdateHost caches a machine's self-reported resource snapshot.
+func (r *Registry) UpdateHost(agentID string, host HostSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, ok := r.agents[agentID]
+	if !ok {
+		return
+	}
+	if normalized := normalizeHost(&host); normalized != nil {
+		agent.info.Host = normalized
+	}
 }
 
 func (r *Registry) Touch(agentID string) {
@@ -127,6 +152,7 @@ func (r *Registry) Get(agentID string) (AgentInfo, bool) {
 	// List() pass (fast-fail paths key on this).
 	info := agent.info
 	info.Stale = time.Since(info.LastSeen) >= AgentStaleAfter
+	info.Host = normalizeHost(info.Host)
 	return info, true
 }
 
@@ -169,6 +195,7 @@ func (r *Registry) List() []AgentInfo {
 	for _, agent := range r.agents {
 		info := agent.info
 		info.Stale = now.Sub(info.LastSeen) >= AgentStaleAfter
+		info.Host = normalizeHost(info.Host)
 		agents = append(agents, info)
 	}
 	sort.Slice(agents, func(i, j int) bool {

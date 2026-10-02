@@ -286,3 +286,39 @@ func TestAgentAPIEnrollFlow(t *testing.T) {
 		t.Fatalf("hub token poll after revoke = %d (management token must stay valid)", still.StatusCode)
 	}
 }
+
+func TestAgentAPIPollStoresHost(t *testing.T) {
+	registry := NewRegistry()
+	server := httptest.NewServer(NewAgentAPI(registry, "token"))
+	defer server.Close()
+	usage := 18.5
+	registered := postAgentJSON(t, server.URL+"/agent/v1/register", "token", map[string]any{
+		"agentId": "agent-a", "hostname": "box-a", "mode": "connect", "version": "v1",
+		"host": map[string]any{"os": "linux", "cpu": map[string]any{"cores": 8, "usage": usage}},
+	})
+	if registered.StatusCode != http.StatusOK {
+		t.Fatalf("register = %d %s", registered.StatusCode, registered.Body)
+	}
+	info, ok := registry.Get("agent-a")
+	if !ok || info.Host == nil || info.Host.OS != "linux" || info.Host.CPU == nil || info.Host.CPU.Cores != 8 {
+		t.Fatalf("register host = %+v", info.Host)
+	}
+	polled := postAgentJSON(t, server.URL+"/agent/v1/poll", "token", map[string]any{
+		"agentId": "agent-a", "waitSeconds": 0,
+		"host": map[string]any{
+			"os":     "linux",
+			"memory": map[string]any{"total": 1024, "used": 256},
+			"nets":   []any{map[string]any{"name": "enp3s0", "addrs": []string{"192.168.1.20/24"}, "up": true}},
+		},
+	})
+	if polled.StatusCode != http.StatusOK {
+		t.Fatalf("poll = %d %s", polled.StatusCode, polled.Body)
+	}
+	info, _ = registry.Get("agent-a")
+	if info.Host == nil || info.Host.Memory == nil || info.Host.Memory.Used != 256 || len(info.Host.Nets) != 1 {
+		t.Fatalf("poll host = %+v", info.Host)
+	}
+	if info.Host.Nets[0].Name != "enp3s0" || info.Host.Nets[0].Addrs[0] != "192.168.1.20/24" {
+		t.Fatalf("poll nets = %+v", info.Host.Nets)
+	}
+}

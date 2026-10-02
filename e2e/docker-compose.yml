@@ -7,11 +7,15 @@ volumes:
 
 services:
   origin:
-    image: alpine:3.20
+    # Same image as the hub: git is already installed, so the bare repo
+    # exists before the hub's first push. apk-adding git at startup lost
+    # the race against the hub's 60s wait.
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        apk add --no-cache git >/dev/null
         git init -q --bare -b main /srv/center.git
         chmod -R a+rwX /srv/center.git
         exec sleep infinity
@@ -32,10 +36,18 @@ services:
         printf '{\n  "fromHub": true\n}\n' \
           > /root/toolhome/.pi/agent/settings.json
         export HOME=/root/toolhome
+        ready=0
         for i in $(seq 1 60); do
-          if git ls-remote /srv/center.git >/dev/null 2>&1; then break; fi
+          if git -C /srv/center.git rev-parse --is-bare-repository >/dev/null 2>&1; then
+            ready=1
+            break
+          fi
           sleep 1
         done
+        if [ "$$ready" != 1 ]; then
+          echo "origin 仓库未就绪" >&2
+          exit 1
+        fi
         homer init --all --home /root/.homer
         homer remote /srv/center.git --home /root/.homer
         homer push --yes --home /root/.homer

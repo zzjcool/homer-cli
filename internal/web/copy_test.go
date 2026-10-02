@@ -36,6 +36,8 @@ func TestConsoleUserCopy(t *testing.T) {
 		// 配置查看（存储视角 / 机器视角）
 		"查看存储内容", "服务器存储 · 当前内容", "/api/storage",
 		"正在向这台机器实时查询", "未收取", "待下发",
+		// 机器卡片上的资源快照（agent 心跳上报）
+		"内存", "网卡", "负载", "磁盘", "已运行", "等待机器上报系统信息",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)

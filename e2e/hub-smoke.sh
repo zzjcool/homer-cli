@@ -52,6 +52,33 @@ for _ in $(seq 1 30); do
   fi
 done
 
+echo "==> 2b. 机器资源快照（agent 自己采集的 CPU / 内存 / 网卡）"
+for id in agent-a agent-b; do
+  ok=0
+  for _ in $(seq 1 15); do
+    if curl -fsS -H "$AUTH" "$HUB_URL/api/agents" 2>/dev/null \
+        | jq -e --arg id "$id" '
+            .agents[] | select(.agentId == $id) | .host
+            | (.memory.total > 0)
+              and (.cpu.cores > 0)
+              and (.cpu.usage != null)
+              and ([.nets[]? | select((.addrs // []) | length > 0)] | length >= 1)
+          ' >/dev/null; then
+      echo "    OK: $id"
+      curl -fsS -H "$AUTH" "$HUB_URL/api/agents" \
+        | jq -c --arg id "$id" '.agents[] | select(.agentId == $id) | {agentId, host: {os: .host.os, distro: .host.distro, cpu: .host.cpu, memory: .host.memory, nets: .host.nets}}'
+      ok=1
+      break
+    fi
+    sleep 2
+  done
+  if [ "$ok" != 1 ]; then
+    echo "    FAIL: $id 没有上报可用的资源快照"
+    curl -fsS -H "$AUTH" "$HUB_URL/api/agents" | jq . || true
+    exit 1
+  fi
+done
+
 echo "==> 3. 远程采集（listen 直连）"
 curl -fsS -H "$AUTH" -X POST "$HUB_URL/api/agents/agent-a/status" \
   | jq -e '.report.adapters | length >= 1' >/dev/null

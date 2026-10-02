@@ -89,6 +89,8 @@ type Daemon struct {
 	driftMu     sync.Mutex
 	lastDrift   *hub.AgentDrift
 	lastDriftAt time.Time
+	// hosts keeps the previous CPU sample for utilization deltas.
+	hosts hostCollector
 	// retries logs one line per failing key per minute — the silent-401
 	// lesson: a doomed retry loop must be visible in the log, never spam.
 	retries *retryLogger
@@ -358,6 +360,13 @@ func (d *Daemon) driftSummary(ctx context.Context) *hub.AgentDrift {
 	return drift
 }
 
+func (d *Daemon) hostSnapshot() *hub.HostSnapshot {
+	if d == nil {
+		return nil
+	}
+	return d.hosts.snapshot()
+}
+
 func (d *Daemon) registerWithRetry(ctx context.Context, mode hub.AgentMode, hostname string) error {
 	backoff := time.Second
 	for {
@@ -381,18 +390,20 @@ func (d *Daemon) registerWithRetry(ctx context.Context, mode hub.AgentMode, host
 
 func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname string) error {
 	payload := struct {
-		AgentID  string        `json:"agentId"`
-		Hostname string        `json:"hostname"`
-		Mode     hub.AgentMode `json:"mode"`
-		Addr     string        `json:"addr,omitempty"`
-		Version  string        `json:"version,omitempty"`
-		Code     string        `json:"code,omitempty"`
+		AgentID  string            `json:"agentId"`
+		Hostname string            `json:"hostname"`
+		Mode     hub.AgentMode     `json:"mode"`
+		Addr     string            `json:"addr,omitempty"`
+		Version  string            `json:"version,omitempty"`
+		Code     string            `json:"code,omitempty"`
+		Host     *hub.HostSnapshot `json:"host,omitempty"`
 	}{
 		AgentID:  d.cfg.AgentID,
 		Hostname: hostname,
 		Mode:     mode,
 		Version:  web.Version,
 		Code:     d.cfg.EnrollCode,
+		Host:     d.hostSnapshot(),
 	}
 	if mode == hub.AgentModeListen {
 		if strings.TrimSpace(d.cfg.AdvertiseURL) == "" {
@@ -455,10 +466,11 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool, error) {
 	waitSeconds := durationSeconds(d.cfg.PollWait)
 	payload := struct {
-		AgentID     string          `json:"agentId"`
-		WaitSeconds int             `json:"waitSeconds"`
-		Drift       *hub.AgentDrift `json:"drift,omitempty"`
-	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Drift: d.driftSummary(ctx)}
+		AgentID     string            `json:"agentId"`
+		WaitSeconds int               `json:"waitSeconds"`
+		Drift       *hub.AgentDrift   `json:"drift,omitempty"`
+		Host        *hub.HostSnapshot `json:"host,omitempty"`
+	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Drift: d.driftSummary(ctx), Host: d.hostSnapshot()}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return hub.Task{}, false, err

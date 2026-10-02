@@ -40,6 +40,8 @@ type AgentInfo struct {
 	// Drift is the machine's last self-reported status summary (uploaded
 	// with each poll): counts relative to the storage it last synced with.
 	Drift *AgentDrift `json:"drift,omitempty"`
+	// Host is the machine's last self-reported resource snapshot.
+	Host *HostSnapshot `json:"host,omitempty"`
 }
 
 // AgentDrift is the per-machine status summary the console renders.
@@ -48,6 +50,52 @@ type AgentDrift struct {
 	Pull      int    `json:"pull"`
 	Conflicts int    `json:"conflicts"`
 	Error     string `json:"error,omitempty"`
+}
+
+// HostSnapshot is the resource report an agent uploads. Field names match
+// hub.HostSnapshot so the dispatcher can pass the JSON straight through.
+type HostSnapshot struct {
+	OS        string      `json:"os,omitempty"`
+	Arch      string      `json:"arch,omitempty"`
+	Distro    string      `json:"distro,omitempty"`
+	Kernel    string      `json:"kernel,omitempty"`
+	UptimeSec int64       `json:"uptimeSec,omitempty"`
+	CPU       *HostCPU    `json:"cpu,omitempty"`
+	Memory    *HostMemory `json:"memory,omitempty"`
+	Swap      *HostMemory `json:"swap,omitempty"`
+	Load      *HostLoad   `json:"load,omitempty"`
+	Disks     []HostDisk  `json:"disks,omitempty"`
+	Nets      []HostNet   `json:"nets,omitempty"`
+}
+
+type HostCPU struct {
+	Cores int      `json:"cores,omitempty"`
+	Model string   `json:"model,omitempty"`
+	Usage *float64 `json:"usage,omitempty"`
+}
+
+type HostMemory struct {
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+}
+
+type HostLoad struct {
+	One     float64 `json:"one"`
+	Five    float64 `json:"five"`
+	Fifteen float64 `json:"fifteen"`
+}
+
+type HostDisk struct {
+	Mount string `json:"mount"`
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+}
+
+type HostNet struct {
+	Name  string   `json:"name"`
+	MAC   string   `json:"mac,omitempty"`
+	Addrs []string `json:"addrs,omitempty"`
+	Up    bool     `json:"up"`
 }
 
 type DiffParams struct {
