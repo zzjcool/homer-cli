@@ -284,7 +284,11 @@ func resolveConfiguredPath(abs, rootReal, rootRel string, allowEscape []string, 
 
 func scanCategory(adapterID, root, rootReal string, category string, cfg core.CategoryConfig, ignore, allowEscape []string, port manifest.CommandPort, errors *[]ScanError, warnings *[]string) core.CategorySnapshot {
 	if cfg.IsManifest() {
+		cfg.ListCmd = manifest.VersionedListCommand(cfg.ListCmd)
 		snapshot, problems := manifest.ScanCategory(adapterID, category, cfg, port)
+		// pi list prints npm:name only. The installed version lives in
+		// node_modules; pin it so another machine installs the same build.
+		manifest.PinNpmVersions(filepath.Join(root, "npm", "node_modules"), snapshot)
 		for _, problem := range problems {
 			// A tool CLI that is not installed (e.g. `code` missing on a
 			// fresh machine) is a normal machine state, not a scan failure:
@@ -371,7 +375,7 @@ func scanCategory(adapterID, root, rootReal string, category string, cfg core.Ca
 // in lexical order. Status reuses this same ordering for disabled summaries.
 func CategoryOrder(adapterID string, categories map[string]core.CategoryConfig) []string {
 	preferred := map[string][]string{
-		"pi":       {"settings", "skills", "extensions", "agents", "models", "prompts", "themes"},
+		"pi":       {"settings", "skills", "agents", "models", "prompts", "themes"},
 		"herdr":    {"config"},
 		"opencode": {"config", "plugins", "locks"},
 		"vscode":   {"settings", "keybindings", "extensions"},

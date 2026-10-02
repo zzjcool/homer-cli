@@ -36,6 +36,30 @@ func TestBuildCollectChoices(t *testing.T) {
 	}
 }
 
+func TestCollectChoicesCarryPluginOutline(t *testing.T) {
+	got := BuildCollectChoices(choiceReport(commands.StatusAdapterReport{
+		ID: "pi",
+		Categories: []commands.StatusCategoryReport{{
+			Name: "packages",
+			Kind: "manifest",
+			Files: []commands.StatusFileReport{
+				{Path: "npm:pi-lens", Status: "installed"},
+				{Path: "packages.manifest.txt", Status: "push"},
+			},
+		}},
+	}))
+	if len(got) != 1 || len(got[0].Categories) != 1 {
+		t.Fatalf("choices = %#v", got)
+	}
+	cat := got[0].Categories[0]
+	if cat.Label != "插件" || cat.Kind != "manifest" {
+		t.Fatalf("category = %#v", cat)
+	}
+	if len(cat.Files) != 1 || cat.Files[0].Path != "npm:pi-lens" {
+		t.Fatalf("files = %#v", cat.Files)
+	}
+}
+
 func TestBuildDispatchChoices(t *testing.T) {
 	machine := choiceReport(
 		commands.StatusAdapterReport{ID: "vscode", Pull: 2},

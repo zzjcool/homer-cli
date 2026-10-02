@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
+	"github.com/zzjcool/homer-cli/internal/sshkey"
 )
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +126,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSyncChoices(w, r)
+	case path == "/api/ssh-key":
+		// Listen-mode agents only. The hub dials this after fetching the
+		// GitHub user's public keys.
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleLocalSSHKey(w, r)
 	case path == "/api/sync":
 		// Manual sync (MVP): one action, human sentences only.
 		if r.Method != http.MethodPost {
@@ -282,6 +292,9 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	if s.handleLocalResolve(w, r) {
+		return
+	}
 	scope, err := readSyncScope(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
@@ -308,6 +321,9 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
+	if s.handleLocalResolve(w, r) {
+		return
+	}
 	scope, err := readSyncScope(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
@@ -449,6 +465,14 @@ func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
 		writeMutex.Lock()
 		defer writeMutex.Unlock()
 		s.handleAgentPull(w, r, agentID)
+	case "ssh-key":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		writeMutex.Lock()
+		defer writeMutex.Unlock()
+		s.handleAgentSSHKey(w, r, agentID)
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 	}
@@ -509,6 +533,83 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 		}
 	}
 	raw, err := s.opts.Agents.AgentPull(r.Context(), agentID, confirmValue(r), scope)
+	if err != nil {
+		writeErrorValue(w, err)
+		return
+	}
+	writeRemoteWriteReport(w, raw)
+}
+
+// handleLocalResolve runs ?resolve=local|center on a listen-mode agent.
+// It reports whether it handled the request.
+func (s *Server) handleLocalResolve(w http.ResponseWriter, r *http.Request) bool {
+	choice := r.URL.Query().Get("resolve")
+	if choice != "local" && choice != "center" {
+		return false
+	}
+	if s.opts.LocalResolve == nil {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "这台进程不能在本地裁决冲突", nil)
+		return true
+	}
+	raw, err := s.opts.LocalResolve(r.Context(), choice)
+	if err != nil {
+		writeErrorValue(w, err)
+		return true
+	}
+	writeRemoteWriteReport(w, raw)
+	return true
+}
+
+func (s *Server) handleLocalSSHKey(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Identity == nil {
+		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
+		return
+	}
+	var payload struct {
+		GitHubUser string   `json:"githubUser"`
+		SSHKeys    []string `json:"sshKeys"`
+	}
+	if err := readJSONBody(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "无法确定用户主目录", []string{err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sshkey.Install(home, payload.GitHubUser, payload.SSHKeys))
+}
+
+// handleAgentSSHKey fetches a GitHub user's public keys and asks the
+// machine to install them for the user its agent runs as.
+func (s *Server) handleAgentSSHKey(w http.ResponseWriter, r *http.Request, agentID string) {
+	var payload struct {
+		GitHubUser string `json:"githubUser"`
+	}
+	if err := readJSONBody(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	keys, err := sshkey.FetchGitHubKeys(r.Context(), payload.GitHubUser)
+	if err != nil {
+		status := http.StatusBadGateway
+		if strings.Contains(err.Error(), "用户名无效") {
+			status = http.StatusBadRequest
+		} else if strings.Contains(err.Error(), "不存在") || strings.Contains(err.Error(), "没有公钥") {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, "ssh-key", err.Error(), nil)
+		return
+	}
+	installer, ok := s.opts.Agents.(interface {
+		AgentInstallSSHKeys(ctx context.Context, agentID, githubUser string, keys []string) (json.RawMessage, error)
+	})
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "这台 hub 不能下发登录公钥", nil)
+		return
+	}
+	raw, err := installer.AgentInstallSSHKeys(r.Context(), agentID, strings.TrimSpace(payload.GitHubUser), keys)
 	if err != nil {
 		writeErrorValue(w, err)
 		return

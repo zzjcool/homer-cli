@@ -93,12 +93,16 @@ button.danger-btn:hover { background: var(--danger); color: #fff; border-color: 
 .view-body { max-width: 720px; max-height: 65vh; overflow: auto; }
 .view-adapter { margin: 10px 0 4px; font-weight: 650; }
 .view-cat { margin: 4px 0 2px 10px; color: var(--ink-dim); display: flex; gap: 8px; align-items: baseline; }
+.view-folder > .view-cat { margin-left: 0; }
+button.view-toggle { background: none; border: none; color: var(--ink); cursor: pointer; padding: 2px 0; font: inherit; text-align: left; }
+.view-children { margin: 0 0 4px 10px; border-left: 2px solid var(--line); padding-left: 8px; }
 .view-file { margin: 0 0 0 24px; padding: 2px 0; display: flex; gap: 8px; align-items: baseline; }
+.view-children .view-file { margin-left: 0; }
 .view-file button { background: none; border: none; color: var(--ink); text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
 .view-file .size { color: var(--ink-dim); font-size: var(--fs-small); }
 .view-counts { font-size: var(--fs-small); }
 .view-filelist { margin: 2px 0 6px 20px; border-left: 2px solid var(--line); padding-left: 8px; }
-.view-content { margin: 8px 0 8px 24px; padding: 10px; background: var(--bg-sink); border-radius: 4px;
+.view-content { margin: 4px 0 8px 0; padding: 10px; background: var(--bg-sink); border-radius: 4px;
   white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .82rem; max-height: 300px; overflow: auto; }
 /* diff drawer */
 .diff-drawer { margin: 8px 0 8px 20px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
@@ -136,10 +140,23 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
   font-size: var(--fs-small); opacity: 0; transition: opacity .18s; pointer-events: none; z-index: 30; }
 #toast.show { opacity: 1; }
 
+#busy { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,.78); }
+#busy.hidden { display: none; }
+.busy-card { display: flex; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 16px 20px; box-shadow: 0 8px 28px #0002; }
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent);
+  animation: spin .7s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* dialogs */
 dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-width: 460px; width: calc(100% - 32px); }
 #dlg-confirm { max-width: 560px; }
 .choice-list { display: grid; gap: 8px; margin-top: 10px; max-height: 42vh; overflow: auto; }
+.choice-block { border: 1px solid var(--line); border-radius: 4px; }
+.choice-block .choice-item { border: none; }
+.choice-block .view-children { margin: 0 8px 8px 28px; }
+.choice-item .view-cat { margin: 0; color: inherit; }
 .choice-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
 .choice-item input { width: auto; min-height: 0; margin-top: 3px; }
 .choice-item .choice-copy { display: grid; gap: 2px; }
@@ -232,6 +249,9 @@ html { scroll-behavior: smooth; }
 </footer>
 
 <div id="toast" role="status"></div>
+<div id="busy" class="hidden" role="status" aria-live="polite">
+  <div class="busy-card"><span class="spinner" aria-hidden="true"></span><span id="busy-text">正在处理…</span></div>
+</div>
 
 <!-- ============ confirm dialog (push/pull) ============ -->
 <dialog id="dlg-confirm">
@@ -258,10 +278,16 @@ html { scroll-behavior: smooth; }
 <dialog id="dlg-join">
   <form method="dialog" style="margin:0">
     <h2>接入新机器</h2>
-    <p class="muted small">在新机器的终端运行这条命令，接入后会出现在机器列表。</p>
+    <p class="muted small">两种方向。机器在 NAT 后面用「机器上报」；hub 能直接访问这台机器的地址时用「中心直连」，并把命令里的占位地址换成那台机器的 IP。</p>
+    <p class="muted small">机器上报</p>
     <div class="join-cmd">
-      <input id="join-cmd" readonly aria-label="接入命令">
+      <input id="join-cmd" readonly aria-label="机器上报命令">
       <button id="btn-copy" type="button">复制</button>
+    </div>
+    <p class="muted small">中心直连</p>
+    <div class="join-cmd">
+      <input id="join-listen" readonly aria-label="中心直连命令">
+      <button id="btn-copy-listen" type="button">复制</button>
     </div>
     <p class="muted small hidden" id="copy-fallback">当前环境不支持自动复制：已全选文本，请按 Ctrl+C。</p>
     <menu><button value="ok" class="primary">完成</button></menu>
@@ -325,6 +351,11 @@ function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");
   clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 2600);
 }
+function setBusy(text) {
+  $("busy-text").textContent = text || "正在处理…";
+  $("busy").classList.remove("hidden");
+}
+function clearBusy() { $("busy").classList.add("hidden"); }
 function fmtCounts(push, pull, conflicts) {
   const parts = [];
   if (push) parts.push("↑" + push + " 项本机改动");
@@ -466,8 +497,15 @@ function renderAgents(agents, disabledFeature) {
     } else {
       line.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
     }
-    line.append(el("span", "meta",
-      (a.mode === "listen" ? "直连" : "主动连接") + " · " + a.lastSeen + (a.stale ? " · 离线" : "")));
+    const listen = a.mode === "listen";
+    const mode = el("span", "meta",
+      (listen ? "中心直连" : "机器上报") +
+      (listen && a.addr ? " · " + a.addr : "") +
+      " · " + a.lastSeen + (a.stale ? " · 离线" : ""));
+    mode.title = listen
+      ? "hub 主动访问这台机器" + (a.addr ? "：" + a.addr : "")
+      : "这台机器主动连接 hub，适合在 NAT 后面";
+    line.append(mode);
 
     // 查看：这台机器当前的配置实况（适配器/分类/漂移计数）
     const viewBtn = el("button", "small-btn", "查看");
@@ -493,6 +531,13 @@ function renderAgents(agents, disabledFeature) {
     dispatchBtn.addEventListener("click", () => confirmDispatch(a));
     line.append(dispatchBtn);
 
+    const keyBtn = el("button", "small-btn", "登录公钥");
+    keyBtn.type = "button";
+    keyBtn.title = "把指定 GitHub 用户的公钥写到这台机器，之后可以免密登录";
+    keyBtn.disabled = a.stale;
+    keyBtn.addEventListener("click", () => confirmSSHKey(a));
+    line.append(keyBtn);
+
     // 冲突裁决：这台机器有冲突时给出二选一
     if (a.drift && a.drift.conflicts > 0 && !a.stale) {
       const localBtn = el("button", "small-btn danger-btn", "以这台机器为准");
@@ -511,7 +556,7 @@ function renderAgents(agents, disabledFeature) {
     revoke.addEventListener("click", async () => {
       if (!confirm("吊销 " + (a.hostname || a.agentId) + "?\n该机器将立即失去接入权限（重新接入需生成新接入码）。")) return;
       try {
-        await api("/api/agents/revoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.agentId }) });
+        await api("/api/agents/revoke", { method: "POST", body: { agentId: a.agentId } });
         toast("已吊销 " + (a.hostname || a.agentId));
         await refresh();
       } catch (e) { toast("吊销失败：" + e.message); }
@@ -523,7 +568,7 @@ function renderAgents(agents, disabledFeature) {
     removeBtn.addEventListener("click", async () => {
       if (!confirm("移除 " + (a.hostname || a.agentId) + "?\n吊销其接入凭证并从列表删除。")) return;
       try {
-        await api("/api/agents/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.agentId }) });
+        await api("/api/agents/remove", { method: "POST", body: { agentId: a.agentId } });
         toast("已移除 " + (a.hostname || a.agentId));
         await refresh();
       } catch (e) { toast("移除失败：" + e.message); }
@@ -599,6 +644,7 @@ function renderScopeChoices(data) {
   tools.append(all, none);
   const rows = el("div", "choice-list");
   list.forEach(item => {
+    const block = el("div", "choice-block");
     const label = el("label", "choice-item" + (item.enabled ? "" : " disabled"));
     const input = document.createElement("input");
     input.type = "checkbox";
@@ -607,11 +653,21 @@ function renderScopeChoices(data) {
     input.disabled = !item.enabled;
     input.addEventListener("change", updateScopeConfirm);
     const copy = el("span", "choice-copy");
-    copy.append(el("span", "choice-id", item.id));
+    const cats = item.categories || [];
+    if (cats.length) {
+      const node = makeCollapsible(item.id, "", false);
+      node.setFill(kids => renderOutlineCategories(kids, cats, { adapterId: item.id, drift: true }));
+      node.row.classList.add("choice-id");
+      copy.append(node.row);
+      block.append(label, node.kids);
+    } else {
+      copy.append(el("span", "choice-id", item.id));
+    }
     const detail = [item.detail, item.reason].filter(Boolean).join(" · ");
     if (detail) copy.append(el("span", "muted small", detail));
     label.append(input, copy);
-    rows.append(label);
+    if (!cats.length) block.append(label);
+    rows.append(block);
   });
   box.append(tools, rows);
   updateScopeConfirm();
@@ -657,6 +713,25 @@ function confirmDispatch(agent) {
     action: { kind: "dispatch-one", agentId: agent.agentId, name: name },
   });
 }
+function confirmSSHKey(agent) {
+  const name = agent.hostname || agent.agentId;
+  $("confirm-title").textContent = "登录公钥到 " + name;
+  $("confirm-desc").textContent = "读取这个 GitHub 用户公开的公钥，写入 " + name + " 上 agent 运行用户的 ~/.ssh/authorized_keys。之后可以用对应私钥免密登录。同一用户再次下发会更新这段密钥，不会改动文件里的其他密钥。";
+  const label = el("label", null, "GitHub 用户名");
+  const input = el("input");
+  input.id = "ssh-user";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = "例如 octocat";
+  try { input.value = localStorage.getItem("homer-github-user") || ""; } catch (_) { input.value = ""; }
+  label.append(input);
+  $("confirm-choices").replaceChildren(label);
+  $("btn-confirm-ok").textContent = "确认写入";
+  $("btn-confirm-ok").disabled = false;
+  app.pendingAction = { kind: "ssh-key", agentId: agent.agentId, name };
+  $("dlg-confirm").showModal();
+  setTimeout(() => input.focus(), 0);
+}
 function confirmResolveOn(choice, agent) {
   const local = choice === "local";
   const name = agent.hostname || agent.agentId;
@@ -674,9 +749,19 @@ $("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
 $("btn-confirm-ok").addEventListener("click", ev => {
   ev.preventDefault();
   const action = app.pendingAction;
-  const adapters = selectedAdapters();
-  if (!action || !adapters.length) return;
+  if (!action) return;
   const okBtn = $("btn-confirm-ok");
+  if (action.kind === "ssh-key") {
+    const githubUser = ($("ssh-user") && $("ssh-user").value || "").trim();
+    okBtn.disabled = true; okBtn.textContent = "处理中…";
+    $("dlg-confirm").returnValue = "confirm";
+    $("dlg-confirm").close("confirm");
+    app.pendingAction = null;
+    executeSSHKey(action.agentId, action.name, githubUser);
+    return;
+  }
+  const adapters = selectedAdapters();
+  if (!adapters.length) return;
   okBtn.disabled = true; okBtn.textContent = "处理中…";
   // 直接执行（close→事件→fetch 的链路在 headless 环境会丢事件），
   // 然后关对话框；真实浏览器与 headless 行为一致
@@ -693,6 +778,7 @@ $("btn-confirm-cancel").addEventListener("click", ev => {
 });
 async function executeCollect(agentId, name, adapters) {
   const okBtn = $("btn-confirm-ok");
+  setBusy("正在从 " + name + " 收取…");
   try {
     const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast("已从 " + name + " 收取，存入中心");
@@ -707,10 +793,11 @@ async function executeCollect(agentId, name, adapters) {
     } else {
       showAlert("收取没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
     }
-  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
+  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
 async function executeDispatchOne(agentId, name, adapters) {
   const okBtn = $("btn-confirm-ok");
+  setBusy("正在下发到 " + name + "…");
   try {
     const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast("已下发到 " + name);
@@ -721,10 +808,31 @@ async function executeDispatchOne(agentId, name, adapters) {
     await refresh();
   } catch (e) {
     showAlert("下发没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
-  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
+  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
+}
+async function executeSSHKey(agentId, name, githubUser) {
+  const okBtn = $("btn-confirm-ok");
+  try {
+    if (!githubUser) {
+      showAlert("登录公钥没有写入", ["请填写 GitHub 用户名。"], null);
+      return;
+    }
+    setBusy("正在读取 " + githubUser + " 的公钥，并写入 " + name + "…");
+    const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/ssh-key", { method: "POST", body: { githubUser } });
+    if (d.ok) {
+      try { localStorage.setItem("homer-github-user", githubUser); } catch (_) {}
+      toast("已把 " + githubUser + " 的 " + (d.installed || "") + " 个公钥写入 " + name);
+    } else {
+      showAlert("登录公钥没有写入", d.errors && d.errors.length ? d.errors : [name + "没有写入公钥。"], null);
+    }
+    await refresh();
+  } catch (e) {
+    showAlert("登录公钥没有写入", e.errors && e.errors.length ? e.errors : [e.message], null);
+  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
 async function executeResolveOn(choice, agentId, adapters) {
   const okBtn = $("btn-confirm-ok");
+  setBusy(choice === "local" ? "正在按这台机器的内容处理…" : "正在按中心内容更新…");
   try {
     const d = await api("/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
@@ -735,7 +843,7 @@ async function executeResolveOn(choice, agentId, adapters) {
     await refresh();
   } catch (e) {
     showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
-  } finally { okBtn.disabled = false; okBtn.textContent = "确认"; }
+  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
 
 /* ---------- page-level alert ---------- */
@@ -770,38 +878,154 @@ async function openStorageView() {
       body.append(el("div", "muted", "存储是空的（还没有收取过任何机器）"));
       return;
     }
-    const head = el("div", "muted small", "存储 第 " + d.generation + " 代 · " +
-      d.adapters.reduce((n, a) => n + a.categories.reduce((m, c) => m + c.files.length, 0), 0) + " 个文件");
-    body.append(head);
+    const total = d.adapters.reduce((n, a) => n + a.categories.reduce((m, c) => m + (c.files || []).length, 0), 0);
+    body.append(el("div", "muted small", "存储 第 " + d.generation + " 代 · " + total + " 项"));
     d.adapters.forEach(adapter => {
-      body.append(el("div", "view-adapter", adapter.id));
-      adapter.categories.forEach(cat => {
-        const line = el("div", "view-cat");
-        line.append(el("span", null, cat.name), el("span", "muted small", cat.files.length + " 个文件"));
-        body.append(line);
-        cat.files.forEach(file => {
-          const row = el("div", "view-file");
-          const nameBtn = el("button", null, file.path);
-          nameBtn.type = "button";
-          const size = el("span", "size", file.size + " B");
-          nameBtn.addEventListener("click", async () => {
-            const existing = row.nextElementSibling;
-            if (existing && existing.classList.contains("view-content")) { existing.remove(); return; }
-            try {
-              const f = await api("/api/storage/file?adapter=" + encodeURIComponent(adapter.id) + "&path=" + encodeURIComponent(file.path));
-              const box = el("div", "view-content", f.content || "(空文件)");
-              row.after(box);
-            } catch (e) { toast("读取失败：" + e.message); }
-          });
-          row.append(nameBtn, size);
-          body.append(row);
-        });
-      });
+      const n = adapter.categories.reduce((m, c) => m + (c.files || []).length, 0);
+      const node = makeCollapsible(adapter.id, n + " 项", true);
+      node.setFill(kids => renderOutlineCategories(kids, adapter.categories, { adapterId: adapter.id, preview: true }));
+      body.append(node.block);
     });
   } catch (e) {
     clear(body);
     body.append(el("div", "muted", "读取存储失败：" + e.message));
   }
+}
+
+let storagePreviewToken = 0;
+const FILE_STATUS = {
+  conflict: "冲突", push: "↑未收取", pull: "↓待下发",
+  delete: "已删除", "push-delete": "已删除", "pull-delete": "待删除",
+  installed: "已安装", changed: "有改动",
+};
+function categoryTitle(cat) {
+  if (cat.kind === "manifest" || cat.label === "插件") return "插件";
+  return cat.label || cat.name;
+}
+function makeCollapsible(title, meta, top) {
+  const block = el("div", "view-folder");
+  const row = el("div", "view-cat");
+  const toggle = el("button", "view-toggle" + (top ? " view-adapter" : ""), "▸ " + title);
+  toggle.type = "button";
+  const kids = el("div", "view-children hidden");
+  let built = false;
+  let fill = () => {};
+  toggle.addEventListener("click", ev => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const open = !kids.classList.contains("hidden");
+    if (open) {
+      kids.classList.add("hidden");
+      toggle.textContent = "▸ " + title;
+      return;
+    }
+    if (!built) { fill(kids); built = true; }
+    kids.classList.remove("hidden");
+    toggle.textContent = "▾ " + title;
+  });
+  row.append(toggle);
+  if (meta) row.append(el("span", "muted small", meta));
+  block.append(row, kids);
+  return { block, row, kids, setFill(fn) { fill = fn; } };
+}
+function renderOutlineCategories(container, categories, opts) {
+  (categories || []).forEach(cat => {
+    const files = (cat.files || []).filter(f => !String(f.path || "").endsWith(".manifest.txt"));
+    const title = categoryTitle(cat);
+    const unit = title === "插件" ? "个插件" : "个文件";
+    const meta = [files.length + " " + unit];
+    if (opts.drift) {
+      const bits = [];
+      if (cat.push) bits.push("↑" + cat.push + " 未收取");
+      if (cat.pull) bits.push("↓" + cat.pull + " 待下发");
+      if (cat.conflicts) bits.push(cat.conflicts + " 项冲突");
+      if (bits.length) meta.push(bits.join(" · "));
+    }
+    const node = makeCollapsible(title, meta.join(" · "), false);
+    node.setFill(kids => {
+      if (title === "插件") {
+        files.forEach(f => kids.append(outlineLeaf(f.path, f, opts, true)));
+        return;
+      }
+      const rel = files.map(f => ({
+        path: stripCategoryPrefix(f.path, cat.name),
+        fullPath: f.path,
+        status: f.status,
+        size: f.size,
+      }));
+      renderPathLevel(kids, rel, opts);
+    });
+    container.append(node.block);
+  });
+}
+function stripCategoryPrefix(path, category) {
+  const prefix = category + "/";
+  return path && path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+function renderPathLevel(container, files, opts) {
+  const grouped = new Map();
+  const leaves = [];
+  files.forEach(file => {
+    const slash = String(file.path || "").indexOf("/");
+    if (slash < 0) { leaves.push(file); return; }
+    const head = file.path.slice(0, slash);
+    const rest = file.path.slice(slash + 1);
+    if (!grouped.has(head)) grouped.set(head, []);
+    grouped.get(head).push({ path: rest, fullPath: file.fullPath, status: file.status, size: file.size });
+  });
+  [...grouped.keys()].sort().forEach(name => {
+    const nested = grouped.get(name);
+    const node = makeCollapsible(name, nested.length + " 个文件", false);
+    node.setFill(kids => renderPathLevel(kids, nested, opts));
+    container.append(node.block);
+  });
+  leaves.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  leaves.forEach(file => container.append(outlineLeaf(file.path, file, opts, false)));
+}
+function outlineLeaf(name, file, opts, plugin) {
+  const row = el("div", "view-file");
+  const storePath = file.fullPath || file.path;
+  if (opts.preview && !plugin && storePath) {
+    const btn = el("button", null, name);
+    btn.type = "button";
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleStoragePreview(row, opts.adapterId, storePath);
+    });
+    row.append(btn);
+  } else {
+    row.append(el("span", null, name));
+  }
+  if (file.size) row.append(el("span", "size", file.size + " B"));
+  if (opts.drift && file.status && FILE_STATUS[file.status]) {
+    const tone = file.status === "conflict" ? "c-conflict" : (file.status === "push" || file.status === "pull" ? "c-drift" : "muted");
+    row.append(el("span", "view-counts " + tone, FILE_STATUS[file.status]));
+  }
+  return row;
+}
+function toggleStoragePreview(row, adapterId, fullPath) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains("view-content")) {
+    existing.remove();
+    return;
+  }
+  // One preview at a time. The placeholder is inserted before the fetch,
+  // so a second click (or a click on another file) cannot append a duplicate.
+  $("view-body").querySelectorAll(".view-content").forEach(node => node.remove());
+  const token = ++storagePreviewToken;
+  const box = el("div", "view-content", "读取中…");
+  row.after(box);
+  api("/api/storage/file?adapter=" + encodeURIComponent(adapterId) + "&path=" + encodeURIComponent(fullPath))
+    .then(f => {
+      if (token !== storagePreviewToken || !box.isConnected) return;
+      box.textContent = f.binary ? "这个文件不是文本，无法在这里预览。" : (f.content || "(空文件)");
+    })
+    .catch(e => {
+      if (token !== storagePreviewToken || !box.isConnected) return;
+      box.remove();
+      toast("读取失败：" + e.message);
+    });
 }
 
 async function openMachineView(a) {
@@ -831,58 +1055,13 @@ async function openMachineView(a) {
       return;
     }
     adapters.forEach(adapter => {
-      const line = el("div", "view-adapter");
-      line.append(document.createTextNode(adapter.id));
-      body.append(line);
-      (adapter.categories || []).forEach(cat => {
-        const row = el("div", "view-cat");
-        const counts = [];
-        if (cat.push) counts.push("↑" + cat.push + " 未收取");
-        if (cat.pull) counts.push("↓" + cat.pull + " 待下发");
-        if (cat.conflicts) counts.push("✗" + cat.conflicts + " 冲突");
-        const tag = counts.length
-          ? el("span", "view-counts " + (cat.conflicts ? "c-conflict" : "c-drift"), counts.join(" · "))
-          : el("span", "view-counts c-clean", "已对齐");
-        const files = cat.files || [];
-        // manifest 类别（如 pi/packages）：文件列表就是插件清单——
-        // 直接平铺展示插件名，不折叠、无目录嵌套
-        if (cat.kind === "manifest") {
-          row.append(el("span", null, cat.name), tag, el("span", "muted small", files.length ? files.length + " 个插件" : ""));
-          body.append(row);
-          const box = el("div", "view-filelist");
-          files.forEach(f => {
-            const line2 = el("div", "view-file");
-            line2.append(el("span", null, f.path));
-            line2.append(el("span", "view-counts muted", f.status === "installed" ? "已安装" : f.status));
-            box.append(line2);
-          });
-          if (files.length) body.append(box);
-          return;
-        }
-        // 普通类别：分类行可点击展开文件清单
-        const label = el("span", null, (files.length ? "▸ " : "") + cat.name);
-        label.style.cursor = files.length ? "pointer" : "default";
-        row.append(label, tag, el("span", "muted small", files.length ? files.length + " 个文件" : ""));
-        if (files.length) {
-          label.addEventListener("click", () => {
-            const existing = row.nextElementSibling;
-            if (existing && existing.classList.contains("view-filelist")) { existing.remove(); label.textContent = "▸ " + cat.name; return; }
-            label.textContent = "▾ " + cat.name;
-            const box = el("div", "view-filelist");
-            const STATUS_TEXT = { conflict: "冲突", push: "↑未收取", pull: "↓待下发", delete: "已删除" };
-            const statusText = s => STATUS_TEXT[s] || "无变化";
-            files.forEach(f => {
-              const line2 = el("div", "view-file");
-              line2.append(el("span", null, f.path));
-              const st = el("span", "view-counts " + (f.status === "conflict" ? "c-conflict" : (f.status === "push" || f.status === "pull") ? "c-drift" : "muted"), statusText(f.status));
-              line2.append(st);
-              box.append(line2);
-            });
-            row.after(box);
-          });
-        }
-        body.append(row);
-      });
+      const bits = [];
+      if (adapter.push) bits.push("↑" + adapter.push + " 未收取");
+      if (adapter.pull) bits.push("↓" + adapter.pull + " 待下发");
+      if (adapter.conflicts) bits.push(adapter.conflicts + " 项冲突");
+      const node = makeCollapsible(adapter.id, bits.length ? bits.join(" · ") : "已对齐", true);
+      node.setFill(kids => renderOutlineCategories(kids, adapter.categories, { adapterId: adapter.id, drift: true }));
+      body.append(node.block);
     });
     const note = el("div", "muted small", "计数是这台机器相对服务器存储的漂移：↑机器有新内容未收取 · ↓存储有新内容待下发");
     note.style.marginTop = "10px";
@@ -898,28 +1077,32 @@ async function openJoin() {
   $("copy-fallback").classList.add("hidden");
   $("btn-copy").textContent = "复制";
   $("join-cmd").value = "获取中…";
+  $("join-listen").value = "获取中…";
   dlg.showModal();
   try {
     const d = await api("/api/auth/join");
     $("join-cmd").value = d.command;
+    $("join-listen").value = d.listenCommand || "";
   } catch (e) {
     $("join-cmd").value = "";
+    $("join-listen").value = "";
     toast("获取接入命令失败：" + e.message);
     dlg.close();
   }
 }
-$("btn-copy").addEventListener("click", async () => {
-  const input = $("join-cmd");
-  try {
-    await navigator.clipboard.writeText(input.value);
-    $("btn-copy").textContent = "已复制 ✓";
-    setTimeout(() => $("btn-copy").textContent = "复制", 2000);
-  } catch (_) {
-    // http 内网 clipboard 不可用 → 降级为全选手动复制
+function copyJoin(inputId, buttonId) {
+  const input = $(inputId);
+  const button = $(buttonId);
+  navigator.clipboard.writeText(input.value).then(() => {
+    button.textContent = "已复制 ✓";
+    setTimeout(() => { button.textContent = "复制"; }, 2000);
+  }).catch(() => {
     input.focus(); input.select();
     $("copy-fallback").classList.remove("hidden");
-  }
-});
+  });
+}
+$("btn-copy").addEventListener("click", () => copyJoin("join-cmd", "btn-copy"));
+$("btn-copy-listen").addEventListener("click", () => copyJoin("join-listen", "btn-copy-listen"));
 $("btn-join-top").addEventListener("click", openJoin);
 // 「完成」：关闭对话框并立即刷新——新机器此刻应该已经出现在列表里
 // （若 agent 还在安装/启动，几秒后 30s 轮询也会补上）。

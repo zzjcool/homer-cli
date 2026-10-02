@@ -2,9 +2,16 @@ package agentd
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
 )
 
 // A fresh machine (no homer.json yet) must answer status with a LEGAL
@@ -31,5 +38,57 @@ func TestStatusOnFreshMachineIsLegalEmpty(t *testing.T) {
 	}
 	if !marked {
 		t.Fatalf("fresh machine report must carry the marker in Errors: %+v", report.Errors)
+	}
+}
+
+// 收取 on a machine that has tool files but no homer.json must initialize
+// and upload. The console enables that button on "新机器 · 等待下发".
+func TestPushBootstrapsFreshMachine(t *testing.T) {
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	settingsDir := filepath.Join(userHome, ".pi", "agent")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const marker = `{"marker":"from-fresh"}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(marker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var sawMarker bool
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/snapshot" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var payload struct {
+			Store map[string]map[string]string `json:"store"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode upload: %v", err)
+		}
+		if strings.Contains(payload.Store["pi"]["settings/settings.json"], "from-fresh") {
+			sawMarker = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"generation":1}`))
+	}))
+	defer hub.Close()
+
+	homerHome := filepath.Join(userHome, ".homer")
+	executor := NewLocalExecutorWithHub(homerHome, hub.URL, "secret")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	report, err := executor.Push(ctx, true, nil, false)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if !report.OK || report.Status != commands.PushStatusPushed {
+		t.Fatalf("push report = %+v", report)
+	}
+	if _, err := os.Stat(filepath.Join(homerHome, "homer.json")); err != nil {
+		t.Fatalf("homer.json was not created: %v", err)
+	}
+	if !sawMarker {
+		t.Fatal("hub did not receive the fresh machine's settings.json")
 	}
 }

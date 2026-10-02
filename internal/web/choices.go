@@ -28,6 +28,9 @@ type AdapterChoice struct {
 	Reason    string `json:"reason,omitempty"`
 	OnMachine bool   `json:"onMachine"`
 	InCenter  bool   `json:"inCenter"`
+	// Categories is the same outline the storage drawer shows: manifest
+	// categories are a plugin list, never the virtual manifest file.
+	Categories []OutlineCategory `json:"categories,omitempty"`
 }
 
 // BuildCollectChoices lists the adapters a machine can upload. Adapters
@@ -50,6 +53,7 @@ func BuildCollectChoices(adapters []commands.StatusAdapterReport) []AdapterChoic
 		if item.Conflicts > 0 {
 			choice.Reason = reasonConflict
 		}
+		choice.Categories = outlineFromStatus(item.Categories)
 		out = append(out, choice)
 	}
 	return out
@@ -119,6 +123,57 @@ func BuildResolveChoices(adapters []commands.StatusAdapterReport) []AdapterChoic
 		choice.Checked = true
 		choice.Reason = ""
 		out = append(out, choice)
+	}
+	return out
+}
+
+// OutlineFile is one leaf in the console's shared tree. A manifest
+// category lists plugin names here; other categories list store paths.
+type OutlineFile struct {
+	Path   string `json:"path"`
+	Size   int    `json:"size,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+// OutlineCategory is one folder under an adapter. Manifest categories
+// are labeled 插件 so storage, collect, and dispatch never disagree
+// about whether the user is looking at a virtual file or a plugin list.
+type OutlineCategory struct {
+	Name      string        `json:"name"`
+	Label     string        `json:"label,omitempty"`
+	Kind      string        `json:"kind,omitempty"`
+	Push      int           `json:"push,omitempty"`
+	Pull      int           `json:"pull,omitempty"`
+	Conflicts int           `json:"conflicts,omitempty"`
+	Files     []OutlineFile `json:"files"`
+}
+
+func outlineFromStatus(cats []commands.StatusCategoryReport) []OutlineCategory {
+	if len(cats) == 0 {
+		return nil
+	}
+	out := make([]OutlineCategory, 0, len(cats))
+	for _, cat := range cats {
+		item := OutlineCategory{
+			Name:      cat.Name,
+			Kind:      cat.Kind,
+			Push:      cat.Push,
+			Pull:      cat.Pull,
+			Conflicts: cat.Conflicts,
+		}
+		if cat.Kind == "manifest" {
+			item.Label = "插件"
+		}
+		for _, file := range cat.Files {
+			if strings.HasSuffix(file.Path, ".manifest.txt") {
+				continue
+			}
+			item.Files = append(item.Files, OutlineFile{Path: file.Path, Status: file.Status})
+		}
+		if item.Files == nil {
+			item.Files = []OutlineFile{}
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -228,6 +283,9 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 			hint = "中心还没有任何内容。先从一台机器收取。"
 		} else {
 			choices = BuildDispatchChoices(ids, report.Adapters)
+			if _, adapters, outlineErr := s.readStorageOutline(); outlineErr == nil {
+				attachStorageOutline(choices, adapters)
+			}
 			if len(choices) == 0 {
 				hint = "中心还没有可下发的适配器。"
 			} else {

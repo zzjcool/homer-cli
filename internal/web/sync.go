@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -621,33 +623,42 @@ func (s *Server) handleConsole(w http.ResponseWriter, _ *http.Request) {
 	}{true, published, generation, machines})
 }
 
+type storageAdapter struct {
+	ID         string            `json:"id"`
+	Categories []OutlineCategory `json:"categories"`
+}
+
 // handleStorageListing answers "what does the server hold right now":
 // the current generation's adapters/categories/files with sizes, for
-// the console's storage drawer.
-func (s *Server) handleStorageListing(w http.ResponseWriter, r *http.Request) {
-	head, ok := gens.New(s.opts.HomerHome).Read()
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"generation": 0, "adapters": []any{}})
+// the console's storage drawer. Manifest categories are plugin lists.
+func (s *Server) handleStorageListing(w http.ResponseWriter, _ *http.Request) {
+	generation, adapters, err := s.readStorageOutline()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "storage-read", "读取存储内容失败: "+err.Error(), nil)
 		return
 	}
-	type fileEntry struct {
-		Path string `json:"path"`
-		Size int    `json:"size"`
+	if adapters == nil {
+		adapters = []storageAdapter{}
 	}
-	type categoryEntry struct {
-		Name  string      `json:"name"`
-		Files []fileEntry `json:"files"`
+	writeJSON(w, http.StatusOK, map[string]any{"generation": generation, "adapters": adapters})
+}
+
+func (s *Server) readStorageOutline() (int, []storageAdapter, error) {
+	head, ok := gens.New(s.opts.HomerHome).Read()
+	if !ok {
+		return 0, []storageAdapter{}, nil
 	}
-	type adapterEntry struct {
-		ID         string          `json:"id"`
-		Categories []categoryEntry `json:"categories"`
+	type workingCategory struct {
+		entry        OutlineCategory
+		manifestBody string
+		manifest     bool
 	}
-	adapters := map[string]*adapterEntry{}
-	categories := map[string]map[string]*categoryEntry{}
+	adapters := map[string]*storageAdapter{}
+	categories := map[string]map[string]*workingCategory{}
 	// store layout: <adapter>/<category>/<relpath>
 	root := head.StoreDir
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, path)
@@ -659,32 +670,46 @@ func (s *Server) handleStorageListing(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		adapterID, category, fileRel := parts[0], parts[1], parts[2]
+		// Generations published before AppleDouble ignore still contain
+		// macOS sidecar files (._advisor.md). They are not text; showing
+		// them in the drawer is mojibake next to the real file.
+		if isAppleDoublePath(category) || isAppleDoublePath(fileRel) {
+			return nil
+		}
 		if adapters[adapterID] == nil {
-			adapters[adapterID] = &adapterEntry{ID: adapterID}
-			categories[adapterID] = map[string]*categoryEntry{}
+			adapters[adapterID] = &storageAdapter{ID: adapterID}
+			categories[adapterID] = map[string]*workingCategory{}
 		}
 		if categories[adapterID][category] == nil {
-			categories[adapterID][category] = &categoryEntry{Name: category, Files: []fileEntry{}}
+			categories[adapterID][category] = &workingCategory{entry: OutlineCategory{Name: category, Files: []OutlineFile{}}}
+		}
+		cat := categories[adapterID][category]
+		if strings.HasSuffix(filepath.Base(fileRel), ".manifest.txt") {
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			cat.manifest = true
+			cat.manifestBody = string(data)
+			return nil
 		}
 		info, statErr := entry.Info()
 		size := 0
 		if statErr == nil {
 			size = int(info.Size())
 		}
-		categories[adapterID][category].Files = append(categories[adapterID][category].Files, fileEntry{Path: category + "/" + fileRel, Size: size})
+		cat.entry.Files = append(cat.entry.Files, OutlineFile{Path: category + "/" + fileRel, Size: size})
 		return nil
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "storage-read", "读取存储内容失败: "+err.Error(), nil)
-		return
+		return 0, nil, err
 	}
-	// deterministic order
 	ids := make([]string, 0, len(adapters))
 	for id := range adapters {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	out := make([]adapterEntry, 0, len(ids))
+	out := make([]storageAdapter, 0, len(ids))
 	for _, id := range ids {
 		adapter := adapters[id]
 		catNames := make([]string, 0, len(categories[id]))
@@ -692,13 +717,65 @@ func (s *Server) handleStorageListing(w http.ResponseWriter, r *http.Request) {
 			catNames = append(catNames, name)
 		}
 		sort.Strings(catNames)
-		adapter.Categories = make([]categoryEntry, 0, len(catNames))
+		adapter.Categories = make([]OutlineCategory, 0, len(catNames))
 		for _, name := range catNames {
-			adapter.Categories = append(adapter.Categories, *categories[id][name])
+			cat := categories[id][name]
+			if cat.manifest {
+				presentPluginList(&cat.entry, cat.manifestBody)
+			}
+			if len(cat.entry.Files) == 0 {
+				continue
+			}
+			sort.Slice(cat.entry.Files, func(i, j int) bool { return cat.entry.Files[i].Path < cat.entry.Files[j].Path })
+			adapter.Categories = append(adapter.Categories, cat.entry)
+		}
+		if len(adapter.Categories) == 0 {
+			continue
 		}
 		out = append(out, *adapter)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"generation": head.Generation, "adapters": out})
+	return head.Generation, out, nil
+}
+
+func presentPluginList(cat *OutlineCategory, content string) {
+	cat.Kind = "manifest"
+	cat.Label = "插件"
+	names := pluginNames(content)
+	cat.Files = make([]OutlineFile, 0, len(names))
+	for _, name := range names {
+		cat.Files = append(cat.Files, OutlineFile{Path: name})
+	}
+}
+
+func pluginNames(content string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func attachStorageOutline(choices []AdapterChoice, adapters []storageAdapter) {
+	byID := map[string][]OutlineCategory{}
+	for _, adapter := range adapters {
+		byID[adapter.ID] = adapter.Categories
+	}
+	for i := range choices {
+		cats, ok := byID[choices[i].ID]
+		if ok && len(cats) > 0 {
+			choices[i].Categories = cats
+		}
+	}
 }
 
 // handleStorageFile streams one stored file's content for the drawer's
@@ -722,11 +799,36 @@ func (s *Server) handleStorageFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-request", "非法路径", nil)
 		return
 	}
-	full := filepath.Join(head.StoreDir, adapterID, cleaned)
+	if isAppleDoublePath(filePath) {
+		writeJSON(w, http.StatusOK, map[string]any{"binary": true, "content": ""})
+		return
+	}
+	full := filepath.Join(head.StoreDir, adapterID, strings.TrimPrefix(cleaned, string(filepath.Separator)))
 	data, err := os.ReadFile(full)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not-found", "文件不存在: "+filePath, nil)
 		return
 	}
+	if !storageText(data) {
+		writeJSON(w, http.StatusOK, map[string]any{"binary": true, "content": ""})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"content": string(data)})
+}
+
+// isAppleDoublePath reports macOS sidecar names (._foo) at any depth.
+func isAppleDoublePath(rel string) bool {
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+	for _, seg := range strings.Split(rel, "/") {
+		if strings.HasPrefix(seg, "._") {
+			return true
+		}
+	}
+	return false
+}
+
+// storageText is content the drawer can show. NUL and invalid UTF-8 are
+// the AppleDouble / binary case: rendering those bytes looks like mojibake.
+func storageText(data []byte) bool {
+	return utf8.Valid(data) && !bytes.Contains(data, []byte{0})
 }

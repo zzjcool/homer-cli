@@ -86,6 +86,15 @@ func (a *AgentAPI) Authorized(r *http.Request) bool { return a.authorized(r) }
 // authorized accepts either a per-agent enrollment secret (the normal
 // path) or the management hub token (migration window for agents that
 // predate per-agent credentials).
+func bearerToken(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	const prefix = "Bearer "
+	if !strings.HasPrefix(value, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(value, prefix))
+}
+
 func (a *AgentAPI) authorized(r *http.Request) bool {
 	if a.Token == "" && a.Enrollment == nil {
 		return true
@@ -103,23 +112,25 @@ func (a *AgentAPI) authorized(r *http.Request) bool {
 }
 
 type registerRequest struct {
-	AgentID  string    `json:"agentId"`
-	Hostname string    `json:"hostname"`
-	Mode     AgentMode `json:"mode"`
-	Addr     string    `json:"addr"`
-	Version  string    `json:"version"`
+	AgentID  string      `json:"agentId"`
+	Hostname string      `json:"hostname"`
+	Mode     AgentMode   `json:"mode"`
+	Addr     string      `json:"addr"`
+	Version  string      `json:"version"`
+	Drift    *AgentDrift `json:"drift,omitempty"`
 }
 
 // enrollRequest is the Tailscale-style onboarding payload: an agent
 // presents a one-time enrollment code and its identity, and receives a
 // per-agent secret that replaces the shared hub token from then on.
 type enrollRequest struct {
-	Code     string    `json:"code"`
-	AgentID  string    `json:"agentId"`
-	Hostname string    `json:"hostname"`
-	Mode     AgentMode `json:"mode"`
-	Addr     string    `json:"addr"`
-	Version  string    `json:"version"`
+	Code     string      `json:"code"`
+	AgentID  string      `json:"agentId"`
+	Hostname string      `json:"hostname"`
+	Mode     AgentMode   `json:"mode"`
+	Addr     string      `json:"addr"`
+	Version  string      `json:"version"`
+	Drift    *AgentDrift `json:"drift,omitempty"`
 }
 
 func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +168,10 @@ func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.Registry.Touch(request.AgentID)
+	a.Registry.SetDialSecret(request.AgentID, secret)
+	if request.Drift != nil {
+		a.Registry.UpdateDrift(request.AgentID, *request.Drift)
+	}
 	writeAgentJSON(w, http.StatusOK, struct {
 		OK               bool   `json:"ok"`
 		AgentSecret      string `json:"agentSecret"`
@@ -183,6 +198,12 @@ func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Register sets LastSeen for new entries, and Touch makes the heartbeat
 	// semantics explicit for an upsert as well.
 	a.Registry.Touch(request.AgentID)
+	if secret := bearerToken(r); a.Enrollment != nil && a.Enrollment.VerifySecret(request.AgentID, secret) {
+		a.Registry.SetDialSecret(request.AgentID, secret)
+	}
+	if request.Drift != nil {
+		a.Registry.UpdateDrift(request.AgentID, *request.Drift)
+	}
 	writeAgentJSON(w, http.StatusOK, struct {
 		OK               bool `json:"ok"`
 		HeartbeatSeconds int  `json:"heartbeatSeconds"`

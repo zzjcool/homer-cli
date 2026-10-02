@@ -81,16 +81,13 @@ func TestFrozenDefaultAdapters(t *testing.T) {
 		t.Fatal("built-in adapter ids changed")
 	}
 
-	trueValue, falseValue := true, false
+	trueValue := true
 	wantPI := core.AdapterConfig{
 		Root:    "~/.pi/agent",
 		Enabled: &trueValue,
 		Categories: map[string]core.CategoryConfig{
 			"settings": {Paths: []string{"settings.json", "keybindings.json"}, Mode: core.SyncMode("merge")},
 			"skills":   {Paths: []string{"skills/"}, Mode: core.SyncMode("mirror")},
-			// extensions 是 pi 插件二次开发目录（TS 源码），不是配置：
-			// 插件安装由 packages manifest 同步，镜像只会产出文件树噪音。
-			"extensions": {Paths: []string{"extensions/"}, Mode: core.SyncMode("mirror"), Enabled: &falseValue, Exclude: []string{"*cache*"}},
 			// packages 是旗舰类别：按名同步插件（listCmd 盘点，
 			// applyCmd 补装）。新机器不配置也能看到/同步插件。
 			"packages": func() core.CategoryConfig {
@@ -166,9 +163,8 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 	if got := outcome.Snapshot.AdapterID; got != "pi" {
 		t.Fatalf("adapter id = %q", got)
 	}
-	// extensions is disabled by default (plugin dev source dir, not
-	// configuration) — it must not appear in the scan at all. packages
-	// (manifest) appears last.
+	// packages (manifest) is not in the preferred order, so it sorts last.
+	// The extensions/ source tree is not a category: plugins sync by name.
 	wantCategories := []string{"settings", "skills", "agents", "models", "prompts", "themes", "packages"}
 	gotCategories := make([]string, 0, len(outcome.Snapshot.Categories))
 	for _, cat := range outcome.Snapshot.Categories {
@@ -482,6 +478,33 @@ func TestScanManifestWithInjectedPortAndLegacyCall(t *testing.T) {
 	})
 	if len(legacy.Errors) != 0 || len(legacy.Snapshot.Categories) != 1 {
 		t.Fatalf("legacy two-argument scan = %#v", legacy)
+	}
+}
+
+func TestScanPiPackagesPinsInstalledVersion(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "npm/node_modules/pi-lens/package.json", "{\"name\":\"pi-lens\",\"version\":\"4.3.0\"}\n")
+	writeFixture(t, root, "npm/node_modules/@zzjcool/pi-herdr-subagents/package.json", "{\"name\":\"@zzjcool/pi-herdr-subagents\",\"version\":\"0.9.0\"}\n")
+	port := &fakeManifestPort{output: []byte("  npm:pi-lens\n    /tmp/pi-lens\n  npm:@zzjcool/pi-herdr-subagents\n")}
+	outcome := adapter.ScanAdapter("pi", core.AdapterConfig{
+		Root: root,
+		Categories: map[string]core.CategoryConfig{
+			"packages": {
+				Kind:      manifestKind(),
+				Mode:      core.SyncModeMirror,
+				ListCmd:   "pi list",
+				ApplyCmd:  "pi install",
+				IDPattern: `^  (npm:[A-Za-z0-9@/._-]+)$`,
+			},
+		},
+	}, adapter.ScanDeps{Commands: port})
+	if len(outcome.Errors) != 0 {
+		t.Fatalf("errors = %#v", outcome.Errors)
+	}
+	got := category(t, outcome.Snapshot, "packages").Files[manifest.VirtualFileName("packages")].Content
+	want := "npm:@zzjcool/pi-herdr-subagents@0.9.0\nnpm:pi-lens@4.3.0\n"
+	if got != want {
+		t.Fatalf("manifest = %q, want %q", got, want)
 	}
 }
 

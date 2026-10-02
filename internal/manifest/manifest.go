@@ -99,9 +99,21 @@ func ContentOf(ids []string) string {
 	return strings.Join(sorted, "\n") + "\n"
 }
 
-var validIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var (
+	validIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	validVersionedID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*@[0-9A-Za-z][0-9A-Za-z.+-]*$`)
+	validNpmID       = regexp.MustCompile(`^npm:(@?[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?)(?:@[0-9A-Za-z][0-9A-Za-z.+-]*)?$`)
+)
 
-func ValidID(id string) bool { return validIDPattern.MatchString(id) }
+// ValidID reports whether id can be passed as a single installer argument.
+// Plain ids, VS Code publisher.name@version, and npm:name@version are
+// allowed. Anything that could be a path escape or a second flag is not.
+func ValidID(id string) bool {
+	if strings.Contains(id, "..") {
+		return false
+	}
+	return validIDPattern.MatchString(id) || validVersionedID.MatchString(id) || validNpmID.MatchString(id)
+}
 
 // ScanProblem is the manifest-side diagnostic; the adapter package converts
 // it to adapter.ScanError{Path: Command, Message: ...}.

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -517,6 +518,79 @@ func TestStorageListing(t *testing.T) {
 	}
 }
 
+// Plugin lists are one level the user can read. The virtual file
+// packages.manifest.txt must not appear beside the real files.
+func TestStorageListingShowsPlugins(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	store := map[string]map[string]string{
+		"pi": {
+			"packages/packages.manifest.txt": "npm:pi-sop\nnpm:@zzjcool/pi-herdr-subagents\nnpm:pi-lens\n",
+			"agents/advisor.md":              "---\nname: advisor\n",
+		},
+	}
+	body, _ := json.Marshal(snapshotPayload{Store: store, HomerJSON: "{}"})
+	request := httptest.NewRequest(http.MethodPost, "/api/snapshot", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload = %d", recorder.Code)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/storage", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("listing = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	raw := recorder.Body.String()
+	if strings.Contains(raw, "manifest.txt") {
+		t.Fatalf("listing still names the virtual manifest file: %s", raw)
+	}
+	var listing struct {
+		Adapters []struct {
+			ID         string `json:"id"`
+			Categories []struct {
+				Name  string `json:"name"`
+				Label string `json:"label"`
+				Kind  string `json:"kind"`
+				Files []struct {
+					Path string `json:"path"`
+				} `json:"files"`
+			} `json:"categories"`
+		} `json:"adapters"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	var plugins, agents []string
+	for _, cat := range listing.Adapters[0].Categories {
+		switch cat.Name {
+		case "packages":
+			if cat.Kind != "manifest" || cat.Label != "插件" {
+				t.Fatalf("packages category = %+v", cat)
+			}
+			for _, file := range cat.Files {
+				plugins = append(plugins, file.Path)
+			}
+		case "agents":
+			for _, file := range cat.Files {
+				agents = append(agents, file.Path)
+			}
+		}
+	}
+	wantPlugins := []string{"npm:@zzjcool/pi-herdr-subagents", "npm:pi-lens", "npm:pi-sop"}
+	if !reflect.DeepEqual(plugins, wantPlugins) {
+		t.Fatalf("plugins = %#v", plugins)
+	}
+	if !reflect.DeepEqual(agents, []string{"agents/advisor.md"}) {
+		t.Fatalf("agents = %#v", agents)
+	}
+}
+
 // Storage file content: click a file in the drawer → see what the
 // server actually holds.
 func TestStorageFileContent(t *testing.T) {
@@ -551,6 +625,72 @@ func TestStorageFileContent(t *testing.T) {
 	}
 	if payload.Content != "{\"theme\":\"dark\"}" {
 		t.Fatalf("content = %q", payload.Content)
+	}
+}
+
+// AppleDouble sidecars (._foo) from older generations are binary. The
+// storage drawer must not list them or render their bytes as text.
+func TestStorageListingSkipsAppleDouble(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	store := map[string]map[string]string{
+		"pi": {
+			"agents/advisor.md":             "---\nname: advisor\n",
+			"agents/._advisor.md":           "\x00\x05Mac OS X",
+			"extensions/anotify/index.ts":   "export {}\n",
+			"extensions/anotify/._index.ts": "\x00junk",
+		},
+	}
+	body, _ := json.Marshal(snapshotPayload{Store: store, HomerJSON: "{}"})
+	request := httptest.NewRequest(http.MethodPost, "/api/snapshot", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload = %d", recorder.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/storage", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("listing = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	listing := recorder.Body.String()
+	if strings.Contains(listing, "._") {
+		t.Fatalf("listing still contains AppleDouble names: %s", listing)
+	}
+	if !strings.Contains(listing, "agents/advisor.md") || !strings.Contains(listing, "extensions/anotify/index.ts") {
+		t.Fatalf("listing dropped real files: %s", listing)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/storage/file?adapter=pi&path=agents/._advisor.md", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "Mac OS X") {
+		t.Fatalf("binary preview = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var preview struct {
+		Binary  bool   `json:"binary"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Binary || preview.Content != "" {
+		t.Fatalf("preview = %+v", preview)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/storage/file?adapter=pi&path=agents/advisor.md", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "name: advisor") {
+		t.Fatalf("text preview = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

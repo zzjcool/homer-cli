@@ -48,7 +48,7 @@ var DefaultVSCodeAdapter = core.AdapterConfig{
 		"extensions": {
 			Kind:     kindPtr(core.CategoryKindManifest),
 			Mode:     core.SyncModeMirror,
-			ListCmd:  "code --list-extensions",
+			ListCmd:  "code --list-extensions --show-versions",
 			ApplyCmd: "code --install-extension",
 		},
 	},
