@@ -112,6 +112,22 @@ func (e *localExecutor) Diff(ctx context.Context, params web.DiffParams) (string
 	if err := contextError(ctx); err != nil {
 		return "", err
 	}
+	if params.Path != "" {
+		sides, err := commands.ReadLocalFile(commands.DiffOptions{
+			HomerHome: e.homerHome,
+			Adapter:   params.Adapter,
+			Category:  params.Category,
+			Path:      params.Path,
+		})
+		if err != nil {
+			return "", err
+		}
+		raw, err := json.Marshal(sides)
+		if err != nil {
+			return "", err
+		}
+		return string(raw), nil
+	}
 	text, err := commands.RunDiff(commands.DiffOptions{
 		HomerHome: e.homerHome,
 		Adapter:   params.Adapter,

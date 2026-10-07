@@ -123,12 +123,15 @@ func (d *Dispatcher) AgentDiff(ctx context.Context, agentID string, params web.D
 	if err != nil {
 		return "", err
 	}
-	options := TaskOptions{Adapter: params.Adapter, Category: params.Category}
+	options := TaskOptions{Adapter: params.Adapter, Category: params.Category, Path: params.Path}
 	switch info.Mode {
 	case AgentModeListen:
 		query := url.Values{}
 		query.Set("adapter", params.Adapter)
 		query.Set("category", params.Category)
+		if params.Path != "" {
+			query.Set("path", params.Path)
+		}
 		body, err := d.direct(ctx, info, http.MethodGet, "diff", query, nil, false)
 		if err != nil {
 			return "", d.directError(err)

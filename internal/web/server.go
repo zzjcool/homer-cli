@@ -101,6 +101,8 @@ type HostNet struct {
 type DiffParams struct {
 	Adapter  string `json:"adapter,omitempty"`
 	Category string `json:"category,omitempty"`
+	// Path asks for one file's local bytes instead of the category text.
+	Path string `json:"path,omitempty"`
 }
 
 // AgentError is the structured failure seam between a hub dispatcher and the

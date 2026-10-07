@@ -593,7 +593,7 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 		case hub.TaskKindStatus:
 			output, err = d.exec.Status(ctx)
 		case hub.TaskKindDiff:
-			output, err = d.exec.Diff(ctx, web.DiffParams{Adapter: task.Options.Adapter, Category: task.Options.Category})
+			output, err = d.exec.Diff(ctx, web.DiffParams{Adapter: task.Options.Adapter, Category: task.Options.Category, Path: task.Options.Path})
 			if err == nil {
 				output = struct {
 					Text string `json:"text"`

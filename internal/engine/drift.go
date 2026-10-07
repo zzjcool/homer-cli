@@ -244,6 +244,7 @@ func accumulateMergeFile(
 			drift.Conflicts++
 			drift.MergeConflicts = append(drift.MergeConflicts, MergeConflict{
 				KeyPath: relPath,
+				File:    relPath,
 				Reason:  "both-modified",
 			})
 		}
@@ -257,6 +258,7 @@ func accumulateMergeFile(
 			drift.Conflicts++
 			drift.MergeConflicts = append(drift.MergeConflicts, MergeConflict{
 				KeyPath: relPath,
+				File:    relPath,
 				Reason:  "modify-vs-delete",
 			})
 		}
@@ -272,6 +274,7 @@ func accumulateMergeFile(
 			drift.Conflicts++
 			drift.MergeConflicts = append(drift.MergeConflicts, MergeConflict{
 				KeyPath: relPath,
+				File:    relPath,
 				Reason:  "modify-vs-delete",
 			})
 		}
@@ -289,7 +292,10 @@ func accumulateMergeFile(
 
 	result := MergeJSON(baseValue, localValue, remoteValue)
 	drift.Conflicts += len(result.Conflicts)
-	drift.MergeConflicts = append(drift.MergeConflicts, result.Conflicts...)
+	for _, conflict := range result.Conflicts {
+		conflict.File = relPath
+		drift.MergeConflicts = append(drift.MergeConflicts, conflict)
+	}
 
 	// Pull counts only remote keys that local did not also change.  Conflicting
 	// keys are therefore not double-counted as pulls.

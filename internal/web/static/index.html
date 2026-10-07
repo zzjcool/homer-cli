@@ -113,6 +113,22 @@ button.view-toggle { background: none; border: none; color: var(--ink); cursor: 
 .diff-drawer .diff-actions { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); flex-wrap: wrap; }
 pre .ln-add { color: var(--accent); background: #0a7d4f14; display: block; }
 pre .ln-del { color: var(--danger); background: #b3261e14; display: block; }
+.conflict-diff { margin: 4px 0 8px; }
+.conflict-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg-sink); font-family: var(--mono); font-size: 12px; line-height: 1.45;
+}
+.conflict-head {
+  position: sticky; top: 0; z-index: 1; background: var(--bg);
+  font-family: system-ui, sans-serif; font-size: var(--fs-small); font-weight: 650;
+  padding: 6px 8px; border-bottom: 1px solid var(--line);
+}
+.conflict-note { grid-column: 1 / -1; padding: 6px 8px; color: var(--ink-dim); font-family: system-ui, sans-serif; font-size: var(--fs-small); }
+.conflict-line { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); min-width: 0; }
+.conflict-line .no { color: var(--ink-dim); text-align: right; padding: 0 6px; }
+.conflict-line .txt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.conflict-line.mark { background: #b3261e18; }
 pre .ln-hunk { color: #0550ae; display: block; }
 pre .ln-meta { color: var(--ink-dim); display: block; }
 
@@ -871,7 +887,7 @@ function renderScopeChoices(data) {
     const cats = item.categories || [];
     if (cats.length) {
       const node = makeCollapsible(adapterTitle(item.id), "", false);
-      node.setFill(kids => renderOutlineCategories(kids, cats, { adapterId: item.id, drift: true }));
+      node.setFill(kids => renderOutlineCategories(kids, cats, { adapterId: item.id, drift: true, agentId: app.scopeAgent && app.scopeAgent.agentId }));
       node.row.classList.add("choice-id");
       copy.append(node.row);
       block.append(label, node.kids);
@@ -1265,8 +1281,9 @@ function renderOutlineCategories(container, categories, opts) {
       node.row.append(el("span", "view-counts " + tone, bits.join(" · ")));
     }
     node.setFill(kids => {
+      const view = Object.assign({}, opts, { category: cat.name });
       if (title === "插件") {
-        files.forEach(f => kids.append(outlineLeaf(f.path, f, opts, true)));
+        files.forEach(f => kids.append(outlineLeaf(f.path, f, view, true)));
         return;
       }
       const rel = files.map(f => ({
@@ -1276,7 +1293,7 @@ function renderOutlineCategories(container, categories, opts) {
         size: f.size,
         keys: f.keys,
       }));
-      renderPathLevel(kids, rel, opts);
+      renderPathLevel(kids, rel, view);
     });
     container.append(node.block);
     if (opts.drift && (cat.pull || cat.push || cat.conflicts)) node.open();
@@ -1329,7 +1346,17 @@ function renderPathLevel(container, files, opts) {
 function outlineLeaf(name, file, opts, plugin) {
   const row = el("div", "view-file");
   const storePath = file.fullPath || file.path;
-  if (opts.preview && !plugin && storePath) {
+  if (opts.drift && opts.agentId && file.status === "conflict" && !plugin && storePath) {
+    const btn = el("button", null, name);
+    btn.type = "button";
+    btn.title = "对照这台机器和中心，标出不一样的行";
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleConflictDiff(row, opts.agentId, opts.adapterId, opts.category, storePath);
+    });
+    row.append(btn);
+  } else if (opts.preview && !plugin && storePath) {
     const btn = el("button", null, name);
     btn.type = "button";
     btn.addEventListener("click", ev => {
@@ -1373,6 +1400,128 @@ function toggleStoragePreview(row, adapterId, fullPath) {
     });
 }
 
+function conflictFilePath(path, category) {
+  let rel = stripCategoryPrefix(String(path || ""), category || "");
+  const colon = rel.indexOf(":");
+  if (colon > 0) {
+    const head = rel.slice(0, colon);
+    if (head.includes(".") || head.includes("/")) return head;
+  }
+  return rel;
+}
+function toggleConflictDiff(row, agentId, adapterId, category, path) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains("conflict-diff")) {
+    existing.remove();
+    return;
+  }
+  document.querySelectorAll(".conflict-diff").forEach(node => node.remove());
+  const box = el("div", "conflict-diff", "读取两边的内容…");
+  row.after(box);
+  const file = conflictFilePath(path, category);
+  const q = "adapter=" + encodeURIComponent(adapterId || "")
+    + "&category=" + encodeURIComponent(category || "")
+    + "&path=" + encodeURIComponent(file);
+  api("/api/agents/" + encodeURIComponent(agentId) + "/diff?" + q, { method: "POST" })
+    .then(data => {
+      if (!box.isConnected) return;
+      box.replaceChildren(renderConflictSides(data));
+    })
+    .catch(err => {
+      if (!box.isConnected) return;
+      box.textContent = "读取失败：" + (err && err.message ? err.message : err);
+    });
+}
+function renderConflictSides(data) {
+  if (data && data.binary) return el("div", "muted small", "这个文件不是文本，无法对照。");
+  const localOk = !!(data && data.localOk);
+  const remoteOk = !!(data && data.remoteOk);
+  const aligned = alignConflictLines(localOk ? data.local : "", remoteOk ? data.remote : "", localOk, remoteOk);
+  const grid = el("div", "conflict-grid");
+  grid.append(el("div", "conflict-head", "这台机器" + (localOk ? "" : " · 没有这个文件")));
+  grid.append(el("div", "conflict-head", "中心" + (remoteOk ? "" : " · 没有这个文件")));
+  if (aligned.truncated) grid.append(el("div", "conflict-note", "文件较长，只对照前 400 行"));
+  aligned.rows.forEach(line => {
+    grid.append(conflictCell(line.left, line.leftNo, line.kind === "del" || line.kind === "change"));
+    grid.append(conflictCell(line.right, line.rightNo, line.kind === "add" || line.kind === "change"));
+  });
+  if (!aligned.rows.length) grid.append(el("div", "conflict-note", "两边都没有可对照的文本"));
+  return grid;
+}
+function conflictCell(text, no, marked) {
+  const cell = el("div", "conflict-line" + (marked ? " mark" : ""));
+  cell.append(el("span", "no", no === "" || no == null ? "" : String(no)));
+  cell.append(el("span", "txt", text == null ? "" : String(text)));
+  return cell;
+}
+function alignConflictLines(local, remote, localOk, remoteOk) {
+  let left = conflictLines(local, localOk);
+  let right = conflictLines(remote, remoteOk);
+  let truncated = false;
+  if (left.length > 400 || right.length > 400) {
+    truncated = true;
+    left = left.slice(0, 400);
+    right = right.slice(0, 400);
+  }
+  return { rows: pairConflictRuns(lcsConflictRows(left, right)), truncated };
+}
+function conflictLines(text, present) {
+  if (!present) return [];
+  const norm = String(text).replace(/\r\n/g, "\n");
+  if (norm === "") return [];
+  return norm.split("\n");
+}
+function lcsConflictRows(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0, j = 0, ln = 1, rn = 1;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      rows.push({ left: a[i], right: b[j], leftNo: ln++, rightNo: rn++, kind: "same" });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      rows.push({ left: a[i], right: "", leftNo: ln++, rightNo: "", kind: "del" });
+      i++;
+    } else {
+      rows.push({ left: "", right: b[j], leftNo: "", rightNo: rn++, kind: "add" });
+      j++;
+    }
+  }
+  while (i < n) rows.push({ left: a[i++], right: "", leftNo: ln++, rightNo: "", kind: "del" });
+  while (j < m) rows.push({ left: "", right: b[j++], leftNo: "", rightNo: rn++, kind: "add" });
+  return rows;
+}
+function pairConflictRuns(rows) {
+  const out = [];
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].kind !== "del" && rows[i].kind !== "add") {
+      out.push(rows[i++]);
+      continue;
+    }
+    const dels = [], adds = [];
+    while (i < rows.length && (rows[i].kind === "del" || rows[i].kind === "add")) {
+      if (rows[i].kind === "del") dels.push(rows[i]);
+      else adds.push(rows[i]);
+      i++;
+    }
+    const count = Math.max(dels.length, adds.length);
+    for (let k = 0; k < count; k++) {
+      const d = dels[k], a = adds[k];
+      if (d && a) out.push({ left: d.left, right: a.right, leftNo: d.leftNo, rightNo: a.rightNo, kind: "change" });
+      else if (d) out.push(d);
+      else out.push(a);
+    }
+  }
+  return out;
+}
+
 async function openMachineView(a) {
   const dlg = $("dlg-view"); const body = $("view-body"); clear(body);
   $("view-title").textContent = "机器 " + (a.hostname || a.agentId) + " · 当前情况";
@@ -1405,7 +1554,7 @@ async function openMachineView(a) {
       if (adapter.pull) bits.push("↓" + adapter.pull + " 待下发");
       if (adapter.conflicts) bits.push(adapter.conflicts + " 项冲突");
       const node = makeCollapsible(adapter.id, bits.length ? bits.join(" · ") : "已对齐", true);
-      node.setFill(kids => renderOutlineCategories(kids, adapter.categories, { adapterId: adapter.id, drift: true }));
+      node.setFill(kids => renderOutlineCategories(kids, adapter.categories, { adapterId: adapter.id, drift: true, agentId: a.agentId }));
       body.append(node.block);
     });
     const note = el("div", "muted small", "计数是这台机器相对服务器存储的漂移：↑机器有新内容未收取 · ↓存储有新内容待下发");

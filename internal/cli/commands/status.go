@@ -317,6 +317,23 @@ func BuildStatusReport(drifts []engine.CategoryDrift, extra ...[]string) StatusR
 			for _, key := range drift.ChangedKeys {
 				files = append(files, StatusFileReport{Path: key, Status: "changed"})
 			}
+			for _, conflict := range drift.MergeConflicts {
+				path := mergeConflictPath(conflict)
+				if path == "" {
+					continue
+				}
+				upgraded := false
+				for i := range files {
+					if files[i].Path == path {
+						files[i].Status = "conflict"
+						upgraded = true
+						break
+					}
+				}
+				if !upgraded {
+					files = append(files, StatusFileReport{Path: path, Status: "conflict"})
+				}
+			}
 		}
 		index, ok := adapterIndex[drift.AdapterID]
 		if !ok {
@@ -343,6 +360,20 @@ func BuildStatusReport(drifts []engine.CategoryDrift, extra ...[]string) StatusR
 		report.Warnings = append([]string(nil), warnings...)
 	}
 	return report
+}
+
+// mergeConflictPath is the leaf the console can open. A key conflict is
+// settings.json:theme; a whole-file conflict is just the file.
+func mergeConflictPath(conflict engine.MergeConflict) string {
+	file := strings.TrimSpace(conflict.File)
+	key := strings.TrimSpace(conflict.KeyPath)
+	if file == "" {
+		return key
+	}
+	if key == "" || key == file {
+		return file
+	}
+	return file + ":" + key
 }
 
 // applyManifestView rewrites manifest categories' file lists from the

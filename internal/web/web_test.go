@@ -536,6 +536,24 @@ func TestAgentsRouteWithSource(t *testing.T) {
 	if response := request(t, server.Handler(), http.MethodPost, "/api/agents/a/diff?adapter=pi&category=settings"); response.Code != http.StatusOK {
 		t.Fatalf("diff = %d, body=%s", response.Code, response.Body)
 	}
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "base\n"},
+	}, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	joined := &sourceStub{diffText: `{"local":"machine line\n","localOk":true}`}
+	joinedServer := newWebServer(t, fixture, "test-token", joined, nil)
+	response := request(t, joinedServer.Handler(), http.MethodPost, "/api/agents/a/diff?adapter=pi&category=settings&path=settings.json:theme")
+	if response.Code != http.StatusOK {
+		t.Fatalf("file diff = %d, body=%s", response.Code, response.Body)
+	}
+	var sides map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &sides); err != nil {
+		t.Fatal(err)
+	}
+	if sides["local"] != "machine line\n" || sides["localOk"] != true || sides["remote"] != "base\n" || sides["remoteOk"] != true {
+		t.Fatalf("sides = %#v", sides)
+	}
 	if response := request(t, server.Handler(), http.MethodPost, "/api/agents/a/push"); response.Code != http.StatusOK {
 		t.Fatalf("push = %d, body=%s", response.Code, response.Body)
 	}

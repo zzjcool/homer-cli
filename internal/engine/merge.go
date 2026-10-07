@@ -16,10 +16,13 @@ type Value = orderedjson.Value
 // which is the same limitation as the frozen Value interface.
 type MergeConflict struct {
 	KeyPath string
-	Reason  string
-	Base    Value
-	Local   Value
-	Remote  Value
+	// File is the category-relative path that owns this conflict. Key-level
+	// conflicts keep KeyPath as the JSON key; the status view joins the two.
+	File   string
+	Reason string
+	Base   Value
+	Local  Value
+	Remote Value
 }
 
 type MergeResult struct {

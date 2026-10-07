@@ -278,6 +278,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
+	if path := strings.TrimSpace(query.Get("path")); path != "" {
+		sides, err := commands.ReadLocalFile(commands.DiffOptions{
+			HomerHome: s.opts.HomerHome,
+			Adapter:   query.Get("adapter"),
+			Category:  query.Get("category"),
+			Path:      path,
+		})
+		if err != nil {
+			writeCommandError(w, err)
+			return
+		}
+		raw, err := json.Marshal(sides)
+		if err != nil {
+			writeCommandError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, struct {
+			OK    bool   `json:"ok"`
+			Empty bool   `json:"empty"`
+			Text  string `json:"text"`
+		}{true, false, string(raw)})
+		return
+	}
 	text, err := commands.RunDiff(commands.DiffOptions{
 		HomerHome: s.opts.HomerHome,
 		Adapter:   query.Get("adapter"),
@@ -506,9 +529,28 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request, agent
 
 func (s *Server) handleAgentDiff(w http.ResponseWriter, r *http.Request, agentID string) {
 	query := r.URL.Query()
-	text, err := s.opts.Agents.AgentDiff(r.Context(), agentID, DiffParams{Adapter: query.Get("adapter"), Category: query.Get("category")})
+	path := strings.TrimSpace(query.Get("path"))
+	text, err := s.opts.Agents.AgentDiff(r.Context(), agentID, DiffParams{Adapter: query.Get("adapter"), Category: query.Get("category"), Path: path})
 	if err != nil {
 		writeErrorValue(w, err)
+		return
+	}
+	if path != "" {
+		var local commands.FileSides
+		if json.Unmarshal([]byte(text), &local) != nil {
+			writeError(w, http.StatusBadGateway, "agent-unreachable", "机器没有返回文件内容", nil)
+			return
+		}
+		rel, _ := splitDriftPath(strings.TrimPrefix(strings.TrimSpace(path), strings.TrimSpace(query.Get("category"))+"/"))
+		remote, remoteOK, binary := s.storedFileText(query.Get("adapter"), strings.TrimSpace(query.Get("category"))+"/"+rel)
+		if local.Binary || binary {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "binary": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "local": local.Local, "localOk": local.LocalOK,
+			"remote": remote, "remoteOk": remoteOK,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {

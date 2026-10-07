@@ -816,6 +816,33 @@ func (s *Server) handleStorageFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"content": string(data)})
 }
 
+// storedFileText reads one center file. ok is false when the generation
+// or the file is missing; binary is true when the bytes are not text.
+func (s *Server) storedFileText(adapterID, filePath string) (content string, ok bool, binary bool) {
+	adapterID = strings.TrimSpace(adapterID)
+	filePath = strings.TrimSpace(filePath)
+	if adapterID == "" || filePath == "" || strings.Contains(filePath, "..") || isAppleDoublePath(filePath) {
+		return "", false, isAppleDoublePath(filePath)
+	}
+	head, exists := gens.New(s.opts.HomerHome).Read()
+	if !exists {
+		return "", false, false
+	}
+	cleaned := filepath.Clean("/" + filePath)
+	if strings.Contains(cleaned, "..") {
+		return "", false, false
+	}
+	full := filepath.Join(head.StoreDir, adapterID, strings.TrimPrefix(cleaned, string(filepath.Separator)))
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return "", false, false
+	}
+	if !storageText(data) {
+		return "", true, true
+	}
+	return string(data), true, false
+}
+
 // isAppleDoublePath reports macOS sidecar names (._foo) at any depth.
 func isAppleDoublePath(rel string) bool {
 	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")

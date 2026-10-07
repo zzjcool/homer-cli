@@ -1,12 +1,14 @@
 package commands
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/engine"
@@ -20,6 +22,9 @@ type DiffOptions struct {
 	Home     string
 	Adapter  string
 	Category string
+	// Path is one file inside the category. Set by the console when it
+	// wants the two sides of a conflict, not the whole category text.
+	Path string
 }
 
 const DIFF_USAGE = "用法: homer diff [options]\n\n显示漂移的详细差异：\n  - merge 文件：按键行输出 `key: old → new`\n  - mirror 文件：按行输出 `+` / `-`（LCS diff）\n\n选项:\n  --home <dir>       homer 工作区（默认 $HOMER_HOME 或 ~/.homer）\n  --adapter <id>     只看某个 adapter\n  --category <name>  只看某个分类\n  -h, --help         显示本帮助\n\n无漂移时输出为空（exit 0）。"
@@ -533,4 +538,77 @@ func RunDiff(opts DiffOptions, injected ...DriftSources) (string, error) {
 
 func runDiff(opts DiffOptions, injected ...DriftSources) (string, error) {
 	return RunDiff(opts, injected...)
+}
+
+// FileSides is the machine copy and is safe to show. The hub adds the
+// center copy from its own storage; this side is only what the machine has.
+type FileSides struct {
+	Local   string `json:"local"`
+	LocalOK bool   `json:"localOk"`
+	Binary  bool   `json:"binary"`
+}
+
+// ReadLocalFile returns one live file inside a category. Missing is not an
+// error: the other side of a conflict may have deleted it.
+func ReadLocalFile(opts DiffOptions, injected ...DriftSources) (FileSides, error) {
+	opts.Path = fileRel(opts.Category, opts.Path)
+	if opts.Adapter == "" || opts.Category == "" || opts.Path == "" || strings.Contains(opts.Path, "..") {
+		return FileSides{}, errors.New("缺少文件位置")
+	}
+	var sources DriftSources
+	if provided, ok := sourceFromArgs(injected); ok {
+		sources = provided
+	} else {
+		homerHome := opts.HomerHome
+		if homerHome == "" {
+			homerHome = opts.Home
+		}
+		paths := core.GetHomerPaths(func(key string) string {
+			if key == "HOMER_HOME" && homerHome != "" {
+				return homerHome
+			}
+			return os.Getenv(key)
+		})
+		config, err := core.LoadConfig(paths)
+		if err != nil {
+			return FileSides{}, err
+		}
+		sources, err = CollectSnapshotSources(paths, config)
+		if err != nil {
+			return FileSides{}, err
+		}
+	}
+	entry := entryPointer(findFiles(sources.Local, opts.Adapter, opts.Category), opts.Path)
+	if entry == nil {
+		return FileSides{}, nil
+	}
+	if fileBytesBinary(entry.Content) {
+		return FileSides{LocalOK: true, Binary: true}, nil
+	}
+	return FileSides{Local: entry.Content, LocalOK: true}, nil
+}
+
+func filepathToSlash(path string) string {
+	return strings.ReplaceAll(path, "\\", "/")
+}
+
+// fileRel is the category-relative file. Status names a merge conflict as
+// settings.json:theme; the bytes live in settings.json. A colon inside a
+// name such as npm:pi-lens stays, because that head has no dot or slash.
+func fileRel(category, path string) string {
+	path = strings.TrimPrefix(filepathToSlash(strings.TrimSpace(path)), strings.TrimSpace(category)+"/")
+	path = strings.TrimPrefix(path, "/")
+	colon := strings.Index(path, ":")
+	if colon <= 0 {
+		return path
+	}
+	head := path[:colon]
+	if !strings.ContainsAny(head, "./") {
+		return path
+	}
+	return head
+}
+
+func fileBytesBinary(content string) bool {
+	return !utf8.ValidString(content) || bytes.Contains([]byte(content), []byte{0})
 }
