@@ -22,6 +22,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/adapter/keys"
 	"github.com/zzjcool/homer-cli/internal/agecrypto"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gens"
 )
 
 const (
@@ -98,10 +99,32 @@ func Apply(homerHome string, cmd Command) Result {
 }
 
 func list(paths core.HomerPaths) Result {
-	keys, err := readAll(paths)
-	if err != nil {
-		return fail("error", err.Error())
+	// The console's main list is the center. A machine's 收取 publishes
+	// the keyring into the current generation; that copy is what other
+	// nodes sync. The hub's own ~/.homer/keyring is only the keys created
+	// on this process, so it is merged in and does not hide the center.
+	merged := map[string]Summary{}
+	order := []string{}
+	add := func(items []Summary) {
+		for _, item := range items {
+			if _, ok := merged[item.ID]; !ok {
+				order = append(order, item.ID)
+			}
+			merged[item.ID] = item
+		}
 	}
+	if local, ok := readAll(localItems(paths)); ok {
+		add(local)
+	}
+	// Center is applied second so a collected key replaces a stale local copy.
+	if center, ok := readAll(centerItems(paths)); ok {
+		add(center)
+	}
+	keys := make([]Summary, 0, len(order))
+	for _, id := range order {
+		keys = append(keys, merged[id])
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].ID < keys[j].ID })
 	return Result{OK: true, Status: "listed", Keys: keys}
 }
 
@@ -117,7 +140,7 @@ func create(paths core.HomerPaths, cmd Command) Result {
 	if err := checkPassword(cmd.Password); err != nil {
 		return fail("invalid", err.Error())
 	}
-	if _, err := os.Stat(keyDir(paths, id)); err == nil {
+	if _, err := findKeyDir(paths, id); err == nil {
 		return fail("exists", "密钥已存在: "+id)
 	}
 	if err := ensureAdapter(paths); err != nil {
@@ -263,35 +286,40 @@ func ensureAdapter(paths core.HomerPaths) error {
 	return core.SaveConfig(paths, *config)
 }
 
-func readAll(paths core.HomerPaths) ([]Summary, error) {
-	root := itemsDir(paths)
-	entries, err := os.ReadDir(root)
+func readAll(items string) ([]Summary, bool) {
+	entries, err := os.ReadDir(items)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []Summary{}, nil
-		}
-		return nil, err
+		return nil, false
 	}
 	out := make([]Summary, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
 		}
-		doc, _, _, err := readKey(paths, entry.Name())
+		raw, err := os.ReadFile(filepath.Join(items, entry.Name(), "manifest.json"))
 		if err != nil {
 			continue
 		}
+		var doc manifest
+		if json.Unmarshal(raw, &doc) != nil || doc.ID == "" {
+			continue
+		}
+		if doc.Files == nil {
+			doc.Files = []FileInfo{}
+		}
 		out = append(out, summaryOf(doc))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	return out, true
 }
 
 func readKey(paths core.HomerPaths, id string) (manifest, []byte, map[string][]byte, error) {
 	if !validID(id) {
 		return manifest{}, nil, nil, errors.New("密钥不存在")
 	}
-	dir := keyDir(paths, id)
+	dir, err := findKeyDir(paths, id)
+	if err != nil {
+		return manifest{}, nil, nil, err
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
 		return manifest{}, nil, nil, errors.New("密钥不存在: " + id)
@@ -319,7 +347,7 @@ func writeKey(paths core.HomerPaths, doc manifest, envelope []byte, blobs map[st
 	if !validID(doc.ID) {
 		return errors.New("非法的密钥 id")
 	}
-	dir := keyDir(paths, doc.ID)
+	dir := localKeyDir(paths, doc.ID)
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
 		return err
 	}
@@ -466,12 +494,41 @@ func summaryOf(doc manifest) Summary {
 	return Summary{ID: doc.ID, Name: doc.Name, Files: files}
 }
 
-func itemsDir(paths core.HomerPaths) string {
+func localItems(paths core.HomerPaths) string {
 	return filepath.Join(directory(paths), "items")
 }
 
-func keyDir(paths core.HomerPaths, id string) string {
-	return filepath.Join(itemsDir(paths), id)
+func localKeyDir(paths core.HomerPaths, id string) string {
+	return filepath.Join(localItems(paths), id)
+}
+
+// centerItems is the keyring inside the published generation. 收取 writes
+// a machine's keyring there; the console list reads it back.
+func centerItems(paths core.HomerPaths) string {
+	head, ok := gens.New(paths.Home).Read()
+	if !ok {
+		return ""
+	}
+	return filepath.Join(head.StoreDir, keys.AdapterID, "items")
+}
+
+func findKeyDir(paths core.HomerPaths, id string) (string, error) {
+	local := localKeyDir(paths, id)
+	if fileExists(filepath.Join(local, "manifest.json")) {
+		return local, nil
+	}
+	if center := centerItems(paths); center != "" {
+		alt := filepath.Join(center, id)
+		if fileExists(filepath.Join(alt, "manifest.json")) {
+			return alt, nil
+		}
+	}
+	return "", errors.New("密钥不存在: " + id)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func directory(paths core.HomerPaths) string {
