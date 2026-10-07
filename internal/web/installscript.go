@@ -53,16 +53,46 @@ chmod 700 "$HOMER_HOME/keys"
 printf '%s' "$TOKEN" > "$HOMER_HOME/keys/hub-token"
 chmod 600 "$HOMER_HOME/keys/hub-token"
 
-# 2. 安装二进制：平台匹配 → 直接下载 hub 自身的二进制（/dl/homer
-#    需要 Bearer 鉴权，token 同携带）
+# 2. 安装二进制。hub 在慢速隧道后面时，一次连接往往传不完，
+#    所以优先下载 gzip（大约少一半），并用断点续传把多次连接拼起来。
+#    /dl/homer 与 /dl/homer.gz 都要 Bearer 鉴权，token 同携带。
+download() {
+  url="$1"
+  dest="$2"
+  attempt=0
+  while [ "$attempt" -lt 12 ]; do
+    status=0
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL --connect-timeout 20 --speed-time 30 --speed-limit 1024 -C - \
+        -H "Authorization: Bearer $TOKEN" "$url" -o "$dest" || status=$?
+      if [ "$status" -eq 22 ]; then
+        echo "!! 下载被拒绝（凭证无效或已过期）" >&2
+        return 1
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -c --timeout=20 --header="Authorization: Bearer $TOKEN" -O "$dest" "$url" || status=$?
+    else
+      echo "!! 需要 curl 或 wget" >&2
+      return 1
+    fi
+    if [ "$status" -eq 0 ]; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    echo ">> 下载中断，从已收到的部分继续（第 ${attempt} 次）…"
+    sleep 2
+  done
+  echo "!! 下载 homer 二进制失败" >&2
+  return 1
+}
 if [ "$GOOS_ACTUAL" = "$GOOS_EXPECT" ] && [ "$GOARCH_ACTUAL" = "$GOARCH_EXPECT" ]; then
   echo ">> 平台匹配（$GOOS_ACTUAL/$GOARCH_ACTUAL），下载 homer 二进制…"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -H "Authorization: Bearer $TOKEN" "$HUB/dl/homer" -o "$BIN_DIR/homer.tmp"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO- --header="Authorization: Bearer $TOKEN" "$HUB/dl/homer" > "$BIN_DIR/homer.tmp"
+  if command -v gzip >/dev/null 2>&1; then
+    download "$HUB/dl/homer.gz" "$BIN_DIR/homer.gz"
+    gzip -dc "$BIN_DIR/homer.gz" > "$BIN_DIR/homer.tmp"
+    rm -f "$BIN_DIR/homer.gz"
   else
-    echo "!! 需要 curl 或 wget" >&2; exit 1
+    download "$HUB/dl/homer" "$BIN_DIR/homer.tmp"
   fi
   chmod 755 "$BIN_DIR/homer.tmp"
   mv "$BIN_DIR/homer.tmp" "$BIN_DIR/homer"

@@ -1,6 +1,8 @@
 package web
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -17,6 +19,9 @@ func TestRenderInstallScript(t *testing.T) {
 		"GOOS_EXPECT=linux",
 		"GOARCH_EXPECT=amd64",
 		"dl/homer",
+		"dl/homer.gz",
+		"-C -",
+		"--connect-timeout 20",
 		"keys/hub-token",
 		"homer agent --connect",
 		"chmod 600",
@@ -28,6 +33,19 @@ func TestRenderInstallScript(t *testing.T) {
 	}
 	if strings.Contains(script, "HOMER_HUB_TOKEN=") {
 		t.Fatal("install script must not embed the token")
+	}
+	file, err := os.CreateTemp(t.TempDir(), "install-*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-n", file.Name()).CombinedOutput(); err != nil {
+		t.Fatalf("sh -n install script: %v\n%s", err, out)
 	}
 }
 

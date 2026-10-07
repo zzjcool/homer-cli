@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,7 +61,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveInstallScript(w, r)
 		return
 	}
-	if path == "/dl/homer" {
+	if path == "/dl/homer" || path == "/dl/homer.gz" {
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
 			return
@@ -68,7 +69,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.requireAuth(w, r) {
 			return
 		}
-		s.serveSelfBinary(w, r)
+		s.serveSelfBinary(w, r, path == "/dl/homer.gz")
 		return
 	}
 	if strings.HasPrefix(path, "/api/") || path == "/api" {
@@ -780,8 +781,10 @@ func (s *Server) serveInstallScript(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveSelfBinary streams the hub's own executable for same-platform
-// agents (already token-authenticated by the router).
-func (s *Server) serveSelfBinary(w http.ResponseWriter, r *http.Request) {
+// agents (already token-authenticated by the router). compressed serves
+// the gzip form at /dl/homer.gz so a slow tunnel moves fewer bytes;
+// Range applies to that gzip body, which is what a resumed download needs.
+func (s *Server) serveSelfBinary(w http.ResponseWriter, r *http.Request, compressed bool) {
 	self, err := os.Executable()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "no-binary", "定位 homer 二进制失败: "+err.Error(), nil)
@@ -800,9 +803,19 @@ func (s *Server) serveSelfBinary(w http.ResponseWriter, r *http.Request) {
 	}
 	// The executable may have been replaced since boot (deploy); stream
 	// what is on disk now, not a boot-time snapshot.
+	w.Header().Set("Cache-Control", "no-store")
+	if compressed {
+		payload, gzErr := cachedSelfGzip(self, info)
+		if gzErr != nil {
+			writeError(w, http.StatusInternalServerError, "no-binary", "压缩 homer 二进制失败: "+gzErr.Error(), nil)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		http.ServeContent(w, r, "homer.gz", info.ModTime(), bytes.NewReader(payload))
+		return
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, "homer", info.ModTime(), file)
 }
 

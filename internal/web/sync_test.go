@@ -2,8 +2,10 @@ package web
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -719,5 +721,57 @@ func TestAgentSecretDownloadsBinary(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("agent-secret download = %d body=%s", recorder.Code, recorder.Body)
+	}
+}
+
+// /dl/homer.gz is the same executable, small enough to finish on a slow
+// tunnel, and it honors Range so a dropped connection can resume.
+func TestSelfBinaryGzipRoundTripAndRange(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	server, err := NewServer(ServeOptions{Addr: "127.0.0.1:0", HomerHome: fixture.home, Token: "hub-token-value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	rawReq := httptest.NewRequest(http.MethodGet, "/dl/homer", nil)
+	rawReq.Header.Set("Authorization", "Bearer hub-token-value")
+	rawRec := httptest.NewRecorder()
+	handler.ServeHTTP(rawRec, rawReq)
+	if rawRec.Code != http.StatusOK || len(rawRec.Body.Bytes()) < 1024 {
+		t.Fatalf("raw = %d size=%d", rawRec.Code, rawRec.Body.Len())
+	}
+	gzReq := httptest.NewRequest(http.MethodGet, "/dl/homer.gz", nil)
+	gzReq.Header.Set("Authorization", "Bearer hub-token-value")
+	gzRec := httptest.NewRecorder()
+	handler.ServeHTTP(gzRec, gzReq)
+	if gzRec.Code != http.StatusOK {
+		t.Fatalf("gzip = %d body=%s", gzRec.Code, gzRec.Body.String())
+	}
+	if gzRec.Body.Len() >= rawRec.Body.Len() {
+		t.Fatalf("gzip %d is not smaller than raw %d", gzRec.Body.Len(), rawRec.Body.Len())
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(gzRec.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, rawRec.Body.Bytes()) {
+		t.Fatal("gunzip did not restore the executable")
+	}
+	rangeReq := httptest.NewRequest(http.MethodGet, "/dl/homer.gz", nil)
+	rangeReq.Header.Set("Authorization", "Bearer hub-token-value")
+	rangeReq.Header.Set("Range", "bytes=0-3")
+	rangeRec := httptest.NewRecorder()
+	handler.ServeHTTP(rangeRec, rangeReq)
+	if rangeRec.Code != http.StatusPartialContent || rangeRec.Body.Len() != 4 {
+		t.Fatalf("range = %d size=%d", rangeRec.Code, rangeRec.Body.Len())
+	}
+	if !bytes.Equal(rangeRec.Body.Bytes(), gzRec.Body.Bytes()[:4]) {
+		t.Fatal("range bytes are not the start of the gzip body")
 	}
 }
