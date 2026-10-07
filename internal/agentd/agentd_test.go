@@ -705,6 +705,18 @@ func TestDriftSummaryPreservesDegradedError(t *testing.T) {
 	if !strings.Contains(drift.Error, "未找到 homer 配置") {
 		t.Fatalf("drift error should explain the fresh-machine state, got %q", drift.Error)
 	}
+	daemon.driftMu.Lock()
+	daemon.lastDrift = &hub.AgentDrift{Error: "stale"}
+	daemon.lastDriftAt = time.Now()
+	daemon.driftMu.Unlock()
+	if got := daemon.driftSummary(context.Background()); got == nil || got.Error != "stale" {
+		t.Fatalf("cached drift = %+v", got)
+	}
+	daemon.forgetDrift()
+	again := daemon.driftSummary(context.Background())
+	if again == nil || !strings.Contains(again.Error, "未找到 homer 配置") {
+		t.Fatalf("forgetDrift did not drop the cache, got %+v", again)
+	}
 }
 
 // The console's fresh-machine badge keys on drift.Error containing BOTH

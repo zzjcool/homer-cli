@@ -210,6 +210,7 @@ func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKi
 	if err != nil {
 		return nil, err
 	}
+	var raw json.RawMessage
 	switch info.Mode {
 	case AgentModeListen:
 		query := url.Values{}
@@ -231,12 +232,33 @@ func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKi
 		if err != nil {
 			return nil, d.directError(err)
 		}
-		return body, nil
+		raw = body
 	case AgentModeConnect:
-		return d.enqueueAndWait(ctx, info.AgentID, kind, options)
+		body, err := d.enqueueAndWait(ctx, info.AgentID, kind, options)
+		if err != nil {
+			return nil, err
+		}
+		raw = body
 	default:
 		return nil, newAgentError("agent-unreachable", http.StatusBadGateway, fmt.Errorf("agent %q has invalid mode %q", agentID, info.Mode))
 	}
+	d.noteWriteOutcome(agentID, raw)
+	return raw, nil
+}
+
+func (d *Dispatcher) noteWriteOutcome(agentID string, raw json.RawMessage) {
+	if d == nil || d.Registry == nil || len(raw) == 0 {
+		return
+	}
+	var report struct {
+		OK        bool              `json:"ok"`
+		Status    string            `json:"status"`
+		Conflicts []json.RawMessage `json:"conflicts"`
+	}
+	if json.Unmarshal(raw, &report) != nil {
+		return
+	}
+	d.Registry.NoteWriteOutcome(agentID, report.Status, report.OK, len(report.Conflicts))
 }
 
 func (d *Dispatcher) agentInfo(agentID string) (AgentInfo, error) {

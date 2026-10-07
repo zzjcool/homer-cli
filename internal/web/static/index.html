@@ -151,6 +151,7 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 .inline-banner h3 { margin: 0 0 4px; font-size: var(--fs-body); }
 .inline-banner ul { margin: 6px 0 0; padding-left: 1.2em; font-size: var(--fs-small); }
 .inline-banner .close-x { float: right; }
+.inline-banner .alert-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
 /* toast */
 #toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
@@ -349,9 +350,10 @@ async function api(path, opts = {}) {
     const err = data.error || {};
     const e = new Error(err.message || ("请求失败（" + res.status + "）"));
     e.status = res.status; e.code = err.code; e.errors = err.details || [];
-    // 写操作失败信封（ok:false + status + errors，HTTP 409/422）
-    if (!err.message && data.errors) {
-      e.message = (data.errors || []).join("；") || "操作未完成";
+    // 写操作失败信封（ok:false + status + errors，HTTP 409/422）。
+    // errors 可能缺省，status 仍然说明这是冲突而不是请求本身失败。
+    if (!err.message && (data.errors || data.status)) {
+      e.message = (data.errors || []).join("；") || data.status || "操作未完成";
       e.code = data.status; e.errors = data.errors || []; e.report = data;
     }
     throw e;
@@ -919,39 +921,103 @@ $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
   $("dlg-confirm").close("cancel");
 });
+function finishConfirmButton(okBtn) {
+  clearBusy();
+  if ($("dlg-confirm").open) return;
+  okBtn.disabled = false;
+  okBtn.textContent = "确认";
+}
+function collectErrorLines(data) {
+  const lines = [];
+  const source = data || {};
+  (source.errors || []).forEach(line => { if (line) lines.push(String(line)); });
+  (source.agents || []).forEach(agent => { if (agent && agent.error) lines.push(String(agent.error)); });
+  if (!lines.length && source.message) lines.push(String(source.message));
+  return lines;
+}
+// 下发/收取的失败正文里夹着扫描诊断和命令行裁决提示。控制台只留人话，
+// 冲突则当场给出和机器卡片相同的两个选择，不等下一轮心跳。
+function writeFailureView(data) {
+  const source = data || {};
+  const lines = collectErrorLines(source);
+  const missing = [];
+  const rest = [];
+  lines.forEach(line => {
+    const root = /^adapter root 不可读:\s*(\S+)/.exec(line);
+    if (root) { missing.push(root[1]); return; }
+    if (/检测到 \d+ 个冲突/.test(line) || line.indexOf("两边都改过") >= 0) return;
+    rest.push(line);
+  });
+  let count = Array.isArray(source.conflicts) ? source.conflicts.length : 0;
+  lines.forEach(line => {
+    const found = /检测到 (\d+) 个冲突/.exec(line);
+    if (found) count = Number(found[1]);
+  });
+  const status = source.status || source.code || "";
+  const conflict = status === "conflicts" || status === "conflicts-remain" || count > 0
+    || lines.some(line => line.indexOf("两边都改过") >= 0 || /检测到 \d+ 个冲突/.test(line));
+  const notes = [];
+  if (missing.length) {
+    notes.push("这台机器上还没有 " + missing.join("、") + " 的配置目录，扫描时读不到。");
+  }
+  return { conflict, count, rest, notes };
+}
+function presentWriteFailure(kind, agentId, name, data) {
+  const view = writeFailureView(data);
+  if (view.conflict) {
+    const n = view.count > 0 ? view.count : 1;
+    const lines = [];
+    if (kind === "下发") {
+      lines.push("没有冲突的内容已经写到「" + name + "」。还有 " + n + " 项冲突留在这台机器上，需要现在选择保留哪一边。");
+    } else {
+      lines.push("「" + name + "」有 " + n + " 项冲突，这次没有写入中心。需要现在选择保留哪一边。");
+    }
+    view.notes.forEach(note => lines.push(note));
+    view.rest.forEach(line => lines.push(line));
+    const agent = { agentId: agentId, hostname: name };
+    showAlert("有冲突，需要选择保留哪一边", lines, "选一边之后，只裁决勾选的适配器。", [
+      { label: "以这台机器为准", primary: kind === "收取", onClick: () => confirmResolveOn("local", agent) },
+      { label: "以中心为准", primary: kind !== "收取", onClick: () => confirmResolveOn("center", agent) },
+    ]);
+    return;
+  }
+  const lines = view.rest.concat(view.notes);
+  showAlert(kind + "没有完成", lines.length ? lines : [name + "没有完成这次" + kind + "。"], null);
+}
+async function settleWriteFailure(kind, agentId, name, data) {
+  presentWriteFailure(kind, agentId, name, data);
+  try { await refresh(); } catch (_) {}
+}
 async function executeCollect(agentId, name, adapters) {
   const okBtn = $("btn-confirm-ok");
+  clearAlert();
   setBusy("正在从 " + name + " 收取…");
   try {
     const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast("已从 " + name + " 收取，存入中心");
-    else {
-      const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
-      showAlert("收取没有完成", lines.length ? lines : ["收取没有完成。"], null);
-    }
+    else presentWriteFailure("收取", agentId, name, d);
     await refresh();
   } catch (e) {
     if (e.code === "secrets-rejected") {
       showAlert("已停止：检测到疑似密钥", e.errors, null);
+      try { await refresh(); } catch (_) {}
     } else {
-      showAlert("收取没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+      await settleWriteFailure("收取", agentId, name, e.report || { status: e.code, errors: e.errors && e.errors.length ? e.errors : [e.message] });
     }
-  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
+  } finally { finishConfirmButton(okBtn); }
 }
 async function executeDispatchOne(agentId, name, adapters) {
   const okBtn = $("btn-confirm-ok");
+  clearAlert();
   setBusy("正在下发到 " + name + "…");
   try {
     const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: { adapters: adapters } });
     if (d.ok) toast("已下发到 " + name);
-    else {
-      const lines = (d.errors || []);
-      showAlert("下发没有完成", lines.length ? lines : [name + "没有应用这次下发。"], null);
-    }
+    else presentWriteFailure("下发", agentId, name, d);
     await refresh();
   } catch (e) {
-    showAlert("下发没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
-  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
+    await settleWriteFailure("下发", agentId, name, e.report || { status: e.code, errors: e.errors && e.errors.length ? e.errors : [e.message] });
+  } finally { finishConfirmButton(okBtn); }
 }
 async function executeSSHKey(agentId, name, githubUser) {
   const okBtn = $("btn-confirm-ok");
@@ -978,7 +1044,10 @@ async function executeResolveOn(choice, agentId, adapters) {
   setBusy(choice === "local" ? "正在按这台机器的内容处理…" : "正在按中心内容更新…");
   try {
     const d = await api("/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
-    if (d.ok) toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
+    if (d.ok) {
+      clearAlert();
+      toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
+    }
     else {
       const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
       showAlert("裁决没有完成", lines.length ? lines : ["裁决没有完成。"], null);
@@ -986,11 +1055,11 @@ async function executeResolveOn(choice, agentId, adapters) {
     await refresh();
   } catch (e) {
     showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
-  } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
+  } finally { finishConfirmButton(okBtn); }
 }
 
 /* ---------- page-level alert ---------- */
-function showAlert(title, lines, hint) {
+function showAlert(title, lines, hint, actions) {
   clearAlert();
   const box = el("div", "inline-banner");
   box.setAttribute("role", "alert");
@@ -1003,7 +1072,18 @@ function showAlert(title, lines, hint) {
     box.append(ul);
   }
   if (hint) box.append(el("p", "small muted", hint));
+  if (actions && actions.length) {
+    const row = el("div", "alert-actions");
+    actions.forEach(action => {
+      const btn = el("button", "small-btn" + (action.primary ? " primary" : ""), action.label);
+      btn.type = "button";
+      btn.addEventListener("click", () => action.onClick());
+      row.append(btn);
+    });
+    box.append(row);
+  }
   $("alert-slot").append(box);
+  box.scrollIntoView({ block: "nearest" });
 }
 function clearAlert() { clear($("alert-slot")); }
 

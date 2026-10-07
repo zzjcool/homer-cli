@@ -352,3 +352,29 @@ func TestRegistryRemove(t *testing.T) {
 		t.Fatal("second remove should report nothing")
 	}
 }
+
+func TestNoteWriteOutcomeReplacesFreshMachineMarker(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(AgentInfo{
+		AgentID: "box",
+		Mode:    AgentModeConnect,
+		Drift:   &AgentDrift{Error: "未找到 homer 配置: /root/.homer/homer.json；请先运行 `homer init`"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.NoteWriteOutcome("box", "conflicts-remain", false, 1)
+	info, ok := r.Get("box")
+	if !ok || info.Drift == nil || info.Drift.Conflicts != 1 || info.Drift.Error != "" {
+		t.Fatalf("conflict outcome = %+v", info.Drift)
+	}
+	r.NoteWriteOutcome("box", "resolved", true, 0)
+	info, ok = r.Get("box")
+	if !ok || info.Drift == nil || info.Drift.Conflicts != 0 || info.Drift.Error != "" {
+		t.Fatalf("resolved outcome = %+v", info.Drift)
+	}
+	r.NoteWriteOutcome("box", "aborted", false, 0)
+	info, _ = r.Get("box")
+	if info.Drift == nil || info.Drift.Conflicts != 0 {
+		t.Fatalf("aborted outcome changed drift: %+v", info.Drift)
+	}
+}

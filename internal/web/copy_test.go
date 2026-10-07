@@ -32,6 +32,9 @@ func TestConsoleUserCopy(t *testing.T) {
 		"/api/sync/choices", "勾选要动的适配器", "body: { adapters: adapters }",
 		"全选", "清除",
 		"以这台机器为准", "以中心为准", "/api/resolve?",
+		"需要现在选择保留哪一边",
+		"没有冲突的内容已经写到",
+		"配置目录，扫描时读不到",
 		"/api/console",
 		// 配置查看（存储视角 / 机器视角）
 		"查看存储内容", "服务器存储 · 当前内容", "/api/storage",

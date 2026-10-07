@@ -138,6 +138,41 @@ func (r *Registry) UpdateDrift(agentID string, drift AgentDrift) {
 	agent.info.Drift = &drift
 }
 
+// NoteWriteOutcome updates the cached summary from a push/pull report.
+// Heartbeats are throttled, so without this the console keeps showing
+// "新机器 · 等待下发" until the next drift sample, even though the write
+// already left conflicts the user has to resolve.
+func (r *Registry) NoteWriteOutcome(agentID, status string, ok bool, conflicts int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, exists := r.agents[agentID]
+	if !exists {
+		return
+	}
+	switch status {
+	case "conflicts", "conflicts-remain":
+		if conflicts < 1 {
+			conflicts = 1
+		}
+		agent.info.Drift = &AgentDrift{Conflicts: conflicts}
+	case "applied", "no-drift", "resolved", "no-conflicts":
+		if !ok {
+			return
+		}
+		// A finished write retires the fresh-machine marker and any
+		// conflict count left by the previous report. The next heartbeat
+		// fills in real push/pull numbers.
+		fresh := agent.info.Drift != nil && strings.Contains(agent.info.Drift.Error, "未找到 homer 配置")
+		hadConflicts := agent.info.Drift != nil && agent.info.Drift.Conflicts > 0
+		if agent.info.Drift == nil || fresh || hadConflicts {
+			agent.info.Drift = &AgentDrift{}
+		}
+	}
+}
+
 // UpdateHost caches a machine's self-reported resource snapshot.
 func (r *Registry) UpdateHost(agentID string, host HostSnapshot) {
 	r.mu.Lock()

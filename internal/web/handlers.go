@@ -317,6 +317,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		Adapters:  adapters,
 		Overwrite: scope.Overwrite,
 	}, deps)
+	s.afterLocalWrite()
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 
@@ -351,7 +352,14 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		Adapters:     adapters,
 		PreferRemote: scope.Overwrite,
 	}, deps)
+	s.afterLocalWrite()
 	writeWriteReport(w, report.OK, string(report.Status), report)
+}
+
+func (s *Server) afterLocalWrite() {
+	if s != nil && s.opts.AfterLocalWrite != nil {
+		s.opts.AfterLocalWrite()
+	}
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
@@ -552,6 +560,7 @@ func (s *Server) handleLocalResolve(w http.ResponseWriter, r *http.Request) bool
 		return true
 	}
 	raw, err := s.opts.LocalResolve(r.Context(), choice)
+	s.afterLocalWrite()
 	if err != nil {
 		writeErrorValue(w, err)
 		return true

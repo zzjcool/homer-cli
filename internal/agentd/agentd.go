@@ -175,6 +175,7 @@ func (d *Daemon) runListen(ctx context.Context) error {
 		// which does not exist yet when the listener starts.
 		AgentEndpointAuthorized: d.listenAuthorized,
 		LocalResolve:            d.resolveLocal,
+		AfterLocalWrite:         d.forgetDrift,
 	})
 	if err != nil {
 		return err
@@ -370,6 +371,19 @@ func (d *Daemon) driftSummary(ctx context.Context) *hub.AgentDrift {
 	d.lastDriftAt = now
 	d.driftMu.Unlock()
 	return drift
+}
+
+// forgetDrift drops the throttled summary. Call it after a local push,
+// pull, or conflict choice so the next heartbeat describes the machine
+// as it is now.
+func (d *Daemon) forgetDrift() {
+	if d == nil {
+		return
+	}
+	d.driftMu.Lock()
+	d.lastDrift = nil
+	d.lastDriftAt = time.Time{}
+	d.driftMu.Unlock()
 }
 
 func (d *Daemon) hostSnapshot() *hub.HostSnapshot {
@@ -602,6 +616,11 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 	}()
 	select {
 	case output := <-completed:
+		if task.Kind == hub.TaskKindPush || task.Kind == hub.TaskKindPull {
+			// The write changed this machine. Drop the throttled summary
+			// so the next poll does not put the pre-write badge back.
+			d.forgetDrift()
+		}
 		if output.err != nil {
 			result.Error = output.err.Error()
 			return result

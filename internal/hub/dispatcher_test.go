@@ -275,9 +275,16 @@ func TestDispatcherListenWriteStatusPassthrough(t *testing.T) {
 	if err != nil || string(raw) != `{"ok":false,"status":"aborted"}` {
 		t.Fatalf("push 409 passthrough = %q err=%v", raw, err)
 	}
+	if info, ok := registry.Get("write-a"); !ok || info.Drift != nil {
+		t.Fatalf("aborted push changed drift: %+v", info.Drift)
+	}
 	raw, err = dispatcher.AgentPull(context.Background(), "write-a", true, web.SyncScope{})
 	if err != nil || string(raw) != `{"ok":false,"status":"conflicts"}` {
 		t.Fatalf("pull 422 passthrough = %q err=%v", raw, err)
+	}
+	info, ok := registry.Get("write-a")
+	if !ok || info.Drift == nil || info.Drift.Conflicts != 1 {
+		t.Fatalf("conflict pull drift = %+v", info.Drift)
 	}
 }
 

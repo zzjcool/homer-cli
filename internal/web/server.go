@@ -165,6 +165,10 @@ type ServeOptions struct {
 	// listen-mode agent, where the hub dials /api/push or /api/pull with
 	// ?resolve=local|center.
 	LocalResolve func(ctx context.Context, choice string) (json.RawMessage, error)
+	// AfterLocalWrite runs after this process applies a push, pull, or
+	// conflict choice. The agent uses it to drop a throttled drift cache
+	// so the next heartbeat matches what the write just did.
+	AfterLocalWrite func()
 }
 
 // SyncDepsSource builds command deps per request. The snapshot/secret
