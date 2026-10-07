@@ -129,10 +129,13 @@ func BuildResolveChoices(adapters []commands.StatusAdapterReport) []AdapterChoic
 
 // OutlineFile is one leaf in the console's shared tree. A manifest
 // category lists plugin names here; other categories list store paths.
+// Keys names the JSON fields inside a merge file that make up a drift
+// count (two pending keys in one settings.json are still two items).
 type OutlineFile struct {
-	Path   string `json:"path"`
-	Size   int    `json:"size,omitempty"`
-	Status string `json:"status,omitempty"`
+	Path   string   `json:"path"`
+	Size   int      `json:"size,omitempty"`
+	Status string   `json:"status,omitempty"`
+	Keys   []string `json:"keys,omitempty"`
 }
 
 // OutlineCategory is one folder under an adapter. Manifest categories
@@ -176,6 +179,187 @@ func outlineFromStatus(cats []commands.StatusCategoryReport) []OutlineCategory {
 		out = append(out, item)
 	}
 	return out
+}
+
+// stampChoiceDrift copies the machine's per-category and per-file drift
+// onto a storage outline. Storage lists every file and knows nothing
+// about which of them this machine still needs.
+func stampChoiceDrift(choices []AdapterChoice, machine []commands.StatusAdapterReport) {
+	byID := map[string][]commands.StatusCategoryReport{}
+	for _, adapter := range machine {
+		if _, ok := byID[adapter.ID]; ok {
+			continue
+		}
+		byID[adapter.ID] = adapter.Categories
+	}
+	for i := range choices {
+		status, ok := byID[choices[i].ID]
+		if !ok {
+			continue
+		}
+		choices[i].Categories = mergeDriftIntoOutline(choices[i].Categories, status)
+	}
+}
+
+func mergeDriftIntoOutline(outline []OutlineCategory, status []commands.StatusCategoryReport) []OutlineCategory {
+	if len(status) == 0 {
+		return outline
+	}
+	out := append([]OutlineCategory(nil), outline...)
+	index := map[string]int{}
+	for i := range out {
+		index[out[i].Name] = i
+	}
+	for _, src := range status {
+		i, ok := index[src.Name]
+		if !ok {
+			if src.Push == 0 && src.Pull == 0 && src.Conflicts == 0 {
+				continue
+			}
+			item := OutlineCategory{Name: src.Name, Kind: src.Kind, Files: []OutlineFile{}}
+			if src.Kind == "manifest" {
+				item.Label = "插件"
+			}
+			out = append(out, item)
+			i = len(out) - 1
+			index[src.Name] = i
+		}
+		cat := &out[i]
+		cat.Push = src.Push
+		cat.Pull = src.Pull
+		cat.Conflicts = src.Conflicts
+		if src.Kind == "manifest" {
+			cat.Kind = "manifest"
+			cat.Label = "插件"
+		}
+		cat.Files = applyDriftToFiles(cat.Name, cat.Kind, cat.Files, src.Files)
+	}
+	return out
+}
+
+func applyDriftToFiles(category, kind string, files []OutlineFile, reports []commands.StatusFileReport) []OutlineFile {
+	hits := map[string]*driftHit{}
+	for _, report := range reports {
+		if !notableDriftStatus(report.Status) {
+			continue
+		}
+		rel, key := splitDriftPath(report.Path)
+		hit := hits[rel]
+		if hit == nil {
+			hit = &driftHit{}
+			hits[rel] = hit
+		}
+		hit.status = strongerDriftStatus(hit.status, report.Status)
+		if key != "" {
+			hit.keys = appendKey(hit.keys, key)
+		}
+	}
+	matched := map[string]struct{}{}
+	for i := range files {
+		rel := outlineRel(category, kind, files[i].Path)
+		matched[rel] = struct{}{}
+		hit := hits[rel]
+		if hit == nil {
+			continue
+		}
+		files[i].Status = hit.status
+		files[i].Keys = append([]string(nil), hit.keys...)
+	}
+	extras := make([]string, 0)
+	for rel := range hits {
+		if _, ok := matched[rel]; ok {
+			continue
+		}
+		extras = append(extras, rel)
+	}
+	sort.Strings(extras)
+	for _, rel := range extras {
+		hit := hits[rel]
+		files = append(files, OutlineFile{
+			Path:   outlineStorePath(category, kind, rel),
+			Status: hit.status,
+			Keys:   append([]string(nil), hit.keys...),
+		})
+	}
+	return files
+}
+
+type driftHit struct {
+	status string
+	keys   []string
+}
+
+func notableDriftStatus(status string) bool {
+	switch status {
+	case "push", "pull", "conflict", "delete", "push-delete", "pull-delete", "changed":
+		return true
+	default:
+		return false
+	}
+}
+
+func strongerDriftStatus(current, next string) string {
+	if driftStatusRank(next) > driftStatusRank(current) {
+		return next
+	}
+	return current
+}
+
+func driftStatusRank(status string) int {
+	switch status {
+	case "conflict":
+		return 4
+	case "pull", "pull-delete":
+		return 3
+	case "push", "push-delete", "changed":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// splitDriftPath separates a merge key (settings.json:theme) from a file
+// path. Package ids such as npm:pi-lens also contain a colon; those stay
+// whole because the part before the colon is not a file name.
+func splitDriftPath(path string) (rel, key string) {
+	colon := strings.Index(path, ":")
+	if colon <= 0 {
+		return path, ""
+	}
+	head := path[:colon]
+	if !strings.ContainsAny(head, "./") {
+		return path, ""
+	}
+	return head, path[colon+1:]
+}
+
+func appendKey(keys []string, key string) []string {
+	for _, existing := range keys {
+		if existing == key {
+			return keys
+		}
+	}
+	keys = append(keys, key)
+	sort.Strings(keys)
+	return keys
+}
+
+func outlineRel(category, kind, path string) string {
+	if kind == "manifest" {
+		return path
+	}
+	prefix := category + "/"
+	if strings.HasPrefix(path, prefix) {
+		return strings.TrimPrefix(path, prefix)
+	}
+	return path
+}
+
+func outlineStorePath(category, kind, rel string) string {
+	if kind == "manifest" || category == "" || strings.HasPrefix(rel, category+"/") {
+		return rel
+	}
+	return category + "/" + rel
 }
 
 func choiceDetail(push, pull, conflicts int) string {
@@ -286,6 +470,10 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 			if _, adapters, outlineErr := s.readStorageOutline(); outlineErr == nil {
 				attachStorageOutline(choices, adapters)
 			}
+			// The storage tree is the full inventory and has no drift.
+			// Stamp the machine's status onto it so "↓2 待下发" names the
+			// two files instead of sitting only on the adapter row.
+			stampChoiceDrift(choices, report.Adapters)
 			if len(choices) == 0 {
 				hint = "中心还没有可下发的适配器。"
 			} else {

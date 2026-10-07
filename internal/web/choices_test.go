@@ -60,6 +60,73 @@ func TestCollectChoicesCarryPluginOutline(t *testing.T) {
 	}
 }
 
+func TestStampChoiceDriftMarksPendingFiles(t *testing.T) {
+	choices := []AdapterChoice{{
+		ID:   "pi",
+		Pull: 3,
+		Categories: []OutlineCategory{
+			{Name: "agents", Files: []OutlineFile{
+				{Path: "agents/keep.md"},
+				{Path: "agents/sub/send.md"},
+				{Path: "agents/other.md"},
+			}},
+			{Name: "settings", Files: []OutlineFile{
+				{Path: "settings/settings.json"},
+			}},
+			{Name: "packages", Kind: "manifest", Label: "插件", Files: []OutlineFile{
+				{Path: "npm:pi-lens"},
+				{Path: "npm:other"},
+			}},
+		},
+	}}
+	stampChoiceDrift(choices, []commands.StatusAdapterReport{{
+		ID:   "pi",
+		Pull: 3,
+		Categories: []commands.StatusCategoryReport{
+			{Name: "agents", Pull: 1, Files: []commands.StatusFileReport{
+				{Path: "keep.md", Status: "noop"},
+				{Path: "sub/send.md", Status: "pull"},
+				{Path: "other.md", Status: "noop"},
+				{Path: "gone.md", Status: "pull-delete"},
+			}},
+			{Name: "settings", Pull: 2, Files: []commands.StatusFileReport{
+				{Path: "settings.json:theme", Status: "pull"},
+				{Path: "settings.json:font", Status: "pull"},
+			}},
+			{Name: "packages", Kind: "manifest", Pull: 0, Files: []commands.StatusFileReport{
+				{Path: "npm:pi-lens", Status: "installed"},
+				{Path: "npm:other", Status: "pull"},
+			}},
+		},
+	}})
+	byName := map[string]OutlineCategory{}
+	for _, cat := range choices[0].Categories {
+		byName[cat.Name] = cat
+	}
+	agents := byName["agents"]
+	if agents.Pull != 1 {
+		t.Fatalf("agents = %#v", agents)
+	}
+	byPath := map[string]OutlineFile{}
+	for _, file := range agents.Files {
+		byPath[file.Path] = file
+	}
+	if byPath["agents/keep.md"].Status != "" || byPath["agents/sub/send.md"].Status != "pull" || byPath["agents/gone.md"].Status != "pull-delete" {
+		t.Fatalf("agent files = %#v", agents.Files)
+	}
+	settings := byName["settings"].Files
+	if byName["settings"].Pull != 2 || len(settings) != 1 || settings[0].Status != "pull" || !reflect.DeepEqual(settings[0].Keys, []string{"font", "theme"}) {
+		t.Fatalf("settings = %#v", byName["settings"])
+	}
+	plugins := map[string]string{}
+	for _, file := range byName["packages"].Files {
+		plugins[file.Path] = file.Status
+	}
+	if plugins["npm:pi-lens"] != "" || plugins["npm:other"] != "pull" {
+		t.Fatalf("plugins = %#v", byName["packages"].Files)
+	}
+}
+
 func TestBuildDispatchChoices(t *testing.T) {
 	machine := choiceReport(
 		commands.StatusAdapterReport{ID: "vscode", Pull: 2},
@@ -134,6 +201,45 @@ func TestSyncChoicesEndpoint(t *testing.T) {
 	empty := request(t, freshServer.Handler(), http.MethodGet, "/api/sync/choices?direction=collect&agent=box")
 	if !strings.Contains(empty.Body.String(), "还没有配置，无法收取") {
 		t.Fatalf("fresh hint = %s", empty.Body)
+	}
+
+	marked := &sourceStub{statusRaw: []byte(`{"adapters":[{"id":"pi","pull":1,"categories":[{"name":"agents","pull":1,"files":[{"path":"keep.md","status":"noop"},{"path":"send.md","status":"pull"}]}]}],"errors":[]}`)}
+	if _, err := gens.New(home).Publish(map[string]map[string]string{
+		"pi": {"agents/keep.md": "a", "agents/send.md": "b"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	markedServer := newWebServer(t, fixture, "test-token", marked, nil)
+	pending := request(t, markedServer.Handler(), http.MethodGet, "/api/sync/choices?direction=dispatch&agent=box")
+	if pending.Code != http.StatusOK {
+		t.Fatalf("marked dispatch = %d %s", pending.Code, pending.Body)
+	}
+	var payload struct {
+		Adapters []AdapterChoice `json:"adapters"`
+	}
+	if err := json.Unmarshal(pending.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	var agents *OutlineCategory
+	for i := range payload.Adapters {
+		if payload.Adapters[i].ID != "pi" {
+			continue
+		}
+		for j := range payload.Adapters[i].Categories {
+			if payload.Adapters[i].Categories[j].Name == "agents" {
+				agents = &payload.Adapters[i].Categories[j]
+			}
+		}
+	}
+	if agents == nil || agents.Pull != 1 {
+		t.Fatalf("agents missing from %s", pending.Body)
+	}
+	got := map[string]string{}
+	for _, file := range agents.Files {
+		got[file.Path] = file.Status
+	}
+	if got["agents/send.md"] != "pull" || got["agents/keep.md"] != "" {
+		t.Fatalf("files = %#v", agents.Files)
 	}
 
 	bad := request(t, server.Handler(), http.MethodGet, "/api/sync/choices?direction=sideways&agent=box")

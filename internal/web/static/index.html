@@ -101,6 +101,8 @@ button.view-toggle { background: none; border: none; color: var(--ink); cursor: 
 .view-file button { background: none; border: none; color: var(--ink); text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
 .view-file .size { color: var(--ink-dim); font-size: var(--fs-small); }
 .view-counts { font-size: var(--fs-small); }
+.view-counts.c-drift { color: var(--accent); font-weight: 650; }
+.view-counts.c-conflict { color: var(--danger); font-weight: 700; }
 .view-filelist { margin: 2px 0 6px 20px; border-left: 2px solid var(--line); padding-left: 8px; }
 .view-content { margin: 4px 0 8px 0; padding: 10px; background: var(--bg-sink); border-radius: 4px;
   white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .82rem; max-height: 300px; overflow: auto; }
@@ -125,6 +127,8 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 .agent-head .aid, .agent-head .ip { font-family: var(--mono); font-size: var(--fs-small); color: var(--ink-dim); }
 .agent-head .ip { color: var(--ink); }
 .agent-facts { margin: 8px 0 0 22px; display: grid; gap: 4px; }
+.view-body .agent-facts { margin-left: 0; }
+.agent-summary { margin: 4px 0 0 22px; font-size: var(--fs-small); color: var(--ink-dim); }
 .meters { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .meter { display: flex; align-items: center; gap: 6px; font-size: var(--fs-small); min-width: 210px; flex: 1 1 220px; max-width: 340px; }
 .meter .label { width: 2.75em; color: var(--ink-dim); flex: none; }
@@ -174,6 +178,7 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 /* dialogs */
 dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-width: 460px; width: calc(100% - 32px); }
 #dlg-confirm { max-width: 560px; }
+#dlg-view { max-width: 640px; }
 .choice-list { display: grid; gap: 8px; margin-top: 10px; max-height: 42vh; overflow: auto; }
 .choice-block { border: 1px solid var(--line); border-radius: 4px; }
 .choice-block .choice-item { border: none; }
@@ -622,6 +627,27 @@ function renderHostFacts(a) {
   facts.append(el("div", "agent-sys", machineMeta(a)));
   return facts;
 }
+function hostSummary(a) {
+  const host = a.host;
+  if (!hostUseful(host)) return "等待机器上报系统信息";
+  const parts = [];
+  if (host.cpu && host.cpu.usage != null) parts.push("CPU " + Math.round(host.cpu.usage) + "%");
+  if (host.memory && host.memory.total) parts.push("内存 " + Math.round(host.memory.used / host.memory.total * 100) + "%");
+  if (host.disks && host.disks[0] && host.disks[0].total) {
+    parts.push("磁盘 " + Math.round(host.disks[0].used / host.disks[0].total * 100) + "%");
+  }
+  if (parts.length) return parts.join(" · ");
+  if (host.distro) return host.distro;
+  return "已上报系统信息";
+}
+function openHostDetail(a) {
+  const dlg = $("dlg-view");
+  const body = $("view-body");
+  clear(body);
+  $("view-title").textContent = (a.hostname || a.agentId) + " · 机器详情";
+  body.append(renderHostFacts(a));
+  dlg.showModal();
+}
 function machineMeta(a) {
   const parts = [];
   const host = a.host || {};
@@ -676,7 +702,14 @@ function renderAgents(agents, disabledFeature) {
     } else {
       head.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
     }
+    const summary = el("div", "agent-summary", hostSummary(a));
     const actions = el("div", "agent-actions");
+
+    const detailBtn = el("button", "small-btn", "详情");
+    detailBtn.type = "button";
+    detailBtn.title = "系统、资源、网卡";
+    detailBtn.addEventListener("click", () => openHostDetail(a));
+    actions.append(detailBtn);
 
     // 查看：这台机器当前的配置实况（适配器/分类/漂移计数）
     const viewBtn = el("button", "small-btn", "查看");
@@ -752,7 +785,7 @@ function renderAgents(agents, disabledFeature) {
       } catch (e) { toast("移除失败：" + e.message); }
     });
     actions.append(revoke, removeBtn);
-    card.append(head, renderHostFacts(a), actions);
+    card.append(head, summary, actions);
     list.append(card);
   });
   const joinBtn = el("button", "small-btn", "＋ 接入新机器");
@@ -1169,11 +1202,8 @@ function makeCollapsible(title, meta, top) {
   const kids = el("div", "view-children hidden");
   let built = false;
   let fill = () => {};
-  toggle.addEventListener("click", ev => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    const open = !kids.classList.contains("hidden");
-    if (open) {
+  function setOpen(open) {
+    if (!open) {
       kids.classList.add("hidden");
       toggle.textContent = "▸ " + title;
       return;
@@ -1181,26 +1211,33 @@ function makeCollapsible(title, meta, top) {
     if (!built) { fill(kids); built = true; }
     kids.classList.remove("hidden");
     toggle.textContent = "▾ " + title;
+  }
+  toggle.addEventListener("click", ev => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setOpen(kids.classList.contains("hidden"));
   });
   row.append(toggle);
   if (meta) row.append(el("span", "muted small", meta));
   block.append(row, kids);
-  return { block, row, kids, setFill(fn) { fill = fn; } };
+  return { block, row, kids, setFill(fn) { fill = fn; }, open() { setOpen(true); } };
 }
 function renderOutlineCategories(container, categories, opts) {
   (categories || []).forEach(cat => {
     const files = (cat.files || []).filter(f => !String(f.path || "").endsWith(".manifest.txt"));
     const title = categoryTitle(cat);
     const unit = title === "插件" ? "个插件" : "个文件";
-    const meta = [files.length + " " + unit];
+    const bits = [];
     if (opts.drift) {
-      const bits = [];
       if (cat.push) bits.push("↑" + cat.push + " 未收取");
       if (cat.pull) bits.push("↓" + cat.pull + " 待下发");
       if (cat.conflicts) bits.push(cat.conflicts + " 项冲突");
-      if (bits.length) meta.push(bits.join(" · "));
     }
-    const node = makeCollapsible(title, meta.join(" · "), false);
+    const node = makeCollapsible(title, files.length + " " + unit, false);
+    if (bits.length) {
+      const tone = cat.conflicts ? "c-conflict" : "c-drift";
+      node.row.append(el("span", "view-counts " + tone, bits.join(" · ")));
+    }
     node.setFill(kids => {
       if (title === "插件") {
         files.forEach(f => kids.append(outlineLeaf(f.path, f, opts, true)));
@@ -1211,11 +1248,27 @@ function renderOutlineCategories(container, categories, opts) {
         fullPath: f.path,
         status: f.status,
         size: f.size,
+        keys: f.keys,
       }));
       renderPathLevel(kids, rel, opts);
     });
     container.append(node.block);
+    if (opts.drift && (cat.pull || cat.push || cat.conflicts)) node.open();
   });
+}
+function driftBits(files) {
+  let push = 0, pull = 0, conflicts = 0;
+  (files || []).forEach(file => {
+    const status = file.status;
+    if (status === "push" || status === "push-delete" || status === "changed") push++;
+    else if (status === "pull" || status === "pull-delete") pull++;
+    else if (status === "conflict") conflicts++;
+  });
+  const bits = [];
+  if (push) bits.push("↑" + push + " 未收取");
+  if (pull) bits.push("↓" + pull + " 待下发");
+  if (conflicts) bits.push(conflicts + " 项冲突");
+  return bits;
 }
 function stripCategoryPrefix(path, category) {
   const prefix = category + "/";
@@ -1230,13 +1283,19 @@ function renderPathLevel(container, files, opts) {
     const head = file.path.slice(0, slash);
     const rest = file.path.slice(slash + 1);
     if (!grouped.has(head)) grouped.set(head, []);
-    grouped.get(head).push({ path: rest, fullPath: file.fullPath, status: file.status, size: file.size });
+    grouped.get(head).push({ path: rest, fullPath: file.fullPath, status: file.status, size: file.size, keys: file.keys });
   });
   [...grouped.keys()].sort().forEach(name => {
     const nested = grouped.get(name);
+    const drift = opts.drift ? driftBits(nested) : [];
     const node = makeCollapsible(name, nested.length + " 个文件", false);
+    if (drift.length) {
+      const tone = drift.some(bit => bit.indexOf("冲突") >= 0) ? "c-conflict" : "c-drift";
+      node.row.append(el("span", "view-counts " + tone, drift.join(" · ")));
+    }
     node.setFill(kids => renderPathLevel(kids, nested, opts));
     container.append(node.block);
+    if (drift.length) node.open();
   });
   leaves.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   leaves.forEach(file => container.append(outlineLeaf(file.path, file, opts, false)));
@@ -1256,6 +1315,7 @@ function outlineLeaf(name, file, opts, plugin) {
   } else {
     row.append(el("span", null, name));
   }
+  if (file.keys && file.keys.length) row.append(el("span", "muted small", file.keys.join("、")));
   if (file.size) row.append(el("span", "size", file.size + " B"));
   if (opts.drift && file.status && FILE_STATUS[file.status]) {
     const tone = file.status === "conflict" ? "c-conflict" : (file.status === "push" || file.status === "pull" ? "c-drift" : "muted");

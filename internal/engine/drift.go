@@ -234,7 +234,7 @@ func accumulateMergeFile(
 	// not a modify-vs-delete conflict.
 	if baseEntry == nil {
 		if localEntry == nil {
-			drift.Pull++
+			notePull(drift, "pull", relPath)
 			return
 		}
 		if remoteEntry == nil {
@@ -267,7 +267,7 @@ func accumulateMergeFile(
 	// at file level and leaves local content as the safe candidate.
 	if remoteEntry == nil {
 		if len(localDiff.Keys) == 0 {
-			drift.Pull++
+			notePull(drift, "pull-delete", relPath)
 		} else {
 			drift.Conflicts++
 			drift.MergeConflicts = append(drift.MergeConflicts, MergeConflict{
@@ -300,9 +300,18 @@ func accumulateMergeFile(
 	remoteDiff := DiffJSON(baseValue, remoteValue)
 	for _, key := range remoteDiff.Keys {
 		if _, changedLocally := localChanged[key]; !changedLocally {
-			drift.Pull++
+			notePull(drift, "pull", relPath+":"+key)
 		}
 	}
+}
+
+// notePull counts one remote change and keeps the path that caused it.
+// Merge pulls are key-sized (settings.json:theme); a whole-file pull or
+// remote deletion uses the file path. Status needs those paths so a count
+// of "2 待下发" can name the two items.
+func notePull(drift *CategoryDrift, status, path string) {
+	drift.Pull++
+	drift.Ops = append(drift.Ops, MirrorOp{Type: status, Path: path})
 }
 
 func isDegraded(entry *SnapshotEntry) bool {

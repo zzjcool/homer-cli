@@ -308,6 +308,12 @@ func BuildStatusReport(drifts []engine.CategoryDrift, extra ...[]string) StatusR
 				files = append(files, StatusFileReport{Path: op.Path, Status: op.Type})
 			}
 		} else {
+			for _, op := range drift.Ops {
+				if op.Type == "" || op.Type == "noop" {
+					continue
+				}
+				files = append(files, StatusFileReport{Path: op.Path, Status: op.Type})
+			}
 			for _, key := range drift.ChangedKeys {
 				files = append(files, StatusFileReport{Path: key, Status: "changed"})
 			}

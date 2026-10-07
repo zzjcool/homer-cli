@@ -83,6 +83,35 @@ func TestStatusReportManifestListsPackages(t *testing.T) {
 	}
 }
 
+// Merge pulls are per JSON key. The count is useless in the console
+// unless those keys are named in the file list.
+func TestStatusReportListsMergePullKeys(t *testing.T) {
+	entry := func(content string) core.SnapshotEntry {
+		return core.SnapshotEntry{Kind: "json", Content: content}
+	}
+	base := core.SnapshotFiles{"settings.json": entry(`{"a":1,"b":2}`)}
+	local := core.SnapshotFiles{"settings.json": entry(`{"a":1,"b":2}`)}
+	remote := core.SnapshotFiles{"settings.json": entry(`{"a":1,"b":4,"c":5}`)}
+	drifts := engine.ComputeDrift([]core.AdapterSnapshot{
+		{AdapterID: "pi", Categories: []core.CategorySnapshot{{Category: "settings", Mode: core.SyncModeMerge, Files: base}}},
+	}, []core.AdapterSnapshot{
+		{AdapterID: "pi", Categories: []core.CategorySnapshot{{Category: "settings", Mode: core.SyncModeMerge, Files: local}}},
+	}, []core.AdapterSnapshot{
+		{AdapterID: "pi", Categories: []core.CategorySnapshot{{Category: "settings", Mode: core.SyncModeMerge, Files: remote}}},
+	})
+	report := BuildStatusReport(drifts)
+	if len(report.Adapters) != 1 || report.Adapters[0].Pull != 2 {
+		t.Fatalf("report = %+v", report.Adapters)
+	}
+	got := map[string]string{}
+	for _, file := range report.Adapters[0].Categories[0].Files {
+		got[file.Path] = file.Status
+	}
+	if got["settings.json:b"] != "pull" || got["settings.json:c"] != "pull" || len(got) != 2 {
+		t.Fatalf("files = %+v", report.Adapters[0].Categories[0].Files)
+	}
+}
+
 // applyManifestView expands a manifest category's virtual file into one
 // StatusFileReport per package.
 func TestApplyManifestViewExpandsPackages(t *testing.T) {
