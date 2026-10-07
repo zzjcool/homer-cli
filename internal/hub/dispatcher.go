@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/keyring"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -192,6 +193,34 @@ func (d *Dispatcher) AgentInstallSSHKeys(ctx context.Context, agentID, githubUse
 		return body, nil
 	}
 	return d.enqueueAndWait(ctx, info.AgentID, TaskKindSSHKey, options)
+}
+
+// AgentKey runs a keyring command on one machine. The password stays inside
+// the request payload and is not copied into the result.
+func (d *Dispatcher) AgentKey(ctx context.Context, agentID string, cmd keyring.Command) (json.RawMessage, error) {
+	if err := d.requireOnline(agentID); err != nil {
+		return nil, err
+	}
+	info, err := d.agentInfo(agentID)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, err
+	}
+	switch info.Mode {
+	case AgentModeListen:
+		raw, err := d.direct(ctx, info, http.MethodPost, "keys/op", nil, payload, true)
+		if err != nil {
+			return nil, d.directError(err)
+		}
+		return raw, nil
+	case AgentModeConnect:
+		return d.enqueueAndWait(ctx, info.AgentID, TaskKindSecret, TaskOptions{SecretPayload: payload})
+	default:
+		return nil, newAgentError("agent-unreachable", http.StatusBadGateway, fmt.Errorf("agent %q has invalid mode %q", agentID, info.Mode))
+	}
 }
 
 // AgentResolve asks one machine to apply a conflict choice through merge.

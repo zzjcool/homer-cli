@@ -20,6 +20,7 @@ const (
 	TaskKindPush   TaskKind = "push"
 	TaskKindPull   TaskKind = "pull"
 	TaskKindSSHKey TaskKind = "ssh-key"
+	TaskKindSecret TaskKind = "secret"
 )
 
 type Task struct {
@@ -44,6 +45,10 @@ type TaskOptions struct {
 	// them into authorized_keys.
 	GitHubUser string   `json:"githubUser,omitempty"`
 	SSHKeys    []string `json:"sshKeys,omitempty"`
+	// SecretAction is status, keygen, save, push, or pull. SecretPayload is
+	// the save body (recipients + files). The private key is never carried.
+	SecretAction  string          `json:"secretAction,omitempty"`
+	SecretPayload json.RawMessage `json:"secretPayload,omitempty"`
 }
 
 type TaskResult struct {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/keyring"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -42,6 +43,53 @@ func TestDispatcherListenDirect(t *testing.T) {
 
 	if _, err := dispatcher.AgentStatus(context.Background(), "missing"); err == nil || !hasAgentCode(err, "agent-not-found", http.StatusNotFound) {
 		t.Fatalf("missing error = %v", err)
+	}
+}
+
+func TestDispatcherSecretListenAndConnect(t *testing.T) {
+	const token = "dispatcher-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/keys/op" || r.Method != http.MethodPost {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"status":"listed","keys":[]}`))
+	}))
+	defer server.Close()
+
+	registry := NewRegistry()
+	if err := registry.Register(AgentInfo{AgentID: "listen-secret", Mode: AgentModeListen, Addr: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(registry, token)
+	got, err := dispatcher.AgentKey(context.Background(), "listen-secret", keyring.Command{Action: "list"})
+	if err != nil || !strings.Contains(string(got), `"listed"`) {
+		t.Fatalf("listen key = %s err=%v", got, err)
+	}
+
+	if err := registry.Register(AgentInfo{AgentID: "connect-secret", Mode: AgentModeConnect}); err != nil {
+		t.Fatal(err)
+	}
+	resultCh := make(chan json.RawMessage, 1)
+	go func() {
+		report, waitErr := dispatcher.AgentKey(context.Background(), "connect-secret", keyring.Command{Action: "unlock", ID: "codebuddy"})
+		if waitErr != nil {
+			t.Errorf("connect key: %v", waitErr)
+		}
+		resultCh <- report
+	}()
+	task, ok := registry.Poll("connect-secret", time.Second, context.Background())
+	if !ok || task.Kind != TaskKindSecret || !strings.Contains(string(task.Options.SecretPayload), `"unlock"`) {
+		t.Fatalf("task = %+v ok=%v", task, ok)
+	}
+	if err := registry.Submit(TaskResult{
+		TaskID: task.TaskID, AgentID: "connect-secret", Kind: task.Kind, OK: true,
+		Report: json.RawMessage(`{"ok":true,"status":"applied"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if report := <-resultCh; string(report) != `{"ok":true,"status":"applied"}` {
+		t.Fatalf("connect report = %s", report)
 	}
 }
 

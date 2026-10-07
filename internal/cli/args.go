@@ -22,6 +22,7 @@ const (
 	CommandHome    Command = "home"
 	CommandDoctor  Command = "doctor"
 	CommandSecret  Command = "secret"
+	CommandKey     Command = "key"
 	CommandPair    Command = "pair"
 	CommandServe   Command = "serve"
 	CommandAgent   Command = "agent"
@@ -42,6 +43,7 @@ var COMMANDS = []Command{
 	CommandHome,
 	CommandDoctor,
 	CommandSecret,
+	CommandKey,
 	CommandPair,
 	CommandServe,
 	CommandAgent,
@@ -97,6 +99,7 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   home      新机器一键归位：clone 配置仓库 → 应用配置 → 解密密钥 → doctor
   doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
   secret    密钥投递：keygen | push | pull | list
+  key       口令密钥：list | create | encrypt | unlock | passwd
   pair      在线配对另一台机器（tailcat 快车道，传输全程 age 密文）
   serve     启动本地 hub：HTTP API + 网页控制台（默认 127.0.0.1:7760）
   agent     把本机接入 hub：--listen 被中心直连 / --connect 主动拨出
@@ -392,6 +395,8 @@ func commandUsage(command Command) string {
 		return "用法: homer doctor [options]\n\n八项体检。\n\n选项: --home <dir> --offline --json -h, --help"
 	case CommandSecret:
 		return "用法: homer secret <keygen|push|pull|list> [options]\n\n选项: --home <dir> --yes --no-push --json -h, --help"
+	case CommandKey:
+		return commands.KEY_USAGE
 	case CommandPair:
 		lines := strings.Split(commands.PAIR_USAGE, "\n")
 		if len(lines) >= 2 {
