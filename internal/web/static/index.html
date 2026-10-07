@@ -139,6 +139,9 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 .agent-net .mac { color: var(--ink-dim); }
 .agent-net .addr { color: var(--ink); }
 .agent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.secret-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+.secret-row input { flex: 1; min-width: 140px; }
+.secret-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .agent-empty { padding: 14px 4px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 
 /* auth screens */
@@ -250,6 +253,12 @@ html { scroll-behavior: smooth; }
     <!-- page-level alert (secrets rejected / failures) -->
     <div id="alert-slot"></div>
 
+    <section id="sec-keys" aria-label="密钥">
+      <h2>密钥</h2>
+      <p class="muted small">一项密钥用口令包住一把数据密钥，文件用这把数据密钥加密。密钥项随配置一起下发。新节点输入同一个口令即可解开，不必再找原来的机器。</p>
+      <div id="key-body"></div>
+    </section>
+
     <!-- ③ machines -->
     <section id="sec-agents" aria-label="机器">
       <h2>机器</h2>
@@ -278,7 +287,7 @@ html { scroll-behavior: smooth; }
     <h2 id="confirm-title">确认</h2>
     <p id="confirm-desc"></p>
     <div id="confirm-choices"></div>
-    <p class="muted small">受影响文件会先备份。</p>
+    <p class="muted small" id="confirm-note">受影响文件会先备份。</p>
     <menu>
       <button value="cancel" id="btn-confirm-cancel">取消</button>
       <button value="confirm" class="primary" id="btn-confirm-ok">确认</button>
@@ -292,6 +301,17 @@ html { scroll-behavior: smooth; }
     <h2 id="view-title">查看</h2>
     <div id="view-body" class="view-body"></div>
     <menu><button value="ok" class="primary">关闭</button></menu>
+  </form>
+</dialog>
+<dialog id="dlg-key">
+  <form id="form-key" style="margin:0">
+    <h2 id="key-dlg-title">密钥</h2>
+    <div id="key-dlg-body"></div>
+    <div class="field-error" id="key-dlg-err" role="alert"></div>
+    <menu>
+      <button type="button" id="key-dlg-cancel">取消</button>
+      <button type="submit" class="primary" id="key-dlg-ok">确定</button>
+    </menu>
   </form>
 </dialog>
 <dialog id="dlg-join">
@@ -332,11 +352,18 @@ const $ = id => document.getElementById(id);
  * POST /api/agents/<id>/pull?confirm=true                    body {adapters}
  * POST /api/resolve?choice=local|center&agent=<id>&confirm=true  在某台机器上裁决
  * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,version,drift,host}]}
+ * GET  /api/keys
+ * POST /api/keys                 {id, name, password}
+ * POST /api/keys/encrypt         {id, file, path, password}
+ * POST /api/keys/unlock          {id, password}
+ * POST /api/keys/password        {id, password, newPassword}
+ * POST /api/agents/<id>/keys     同上，在那台机器上执行
  * 错误: 401 / 409(code=not-initialized|aborted|conflicts) / 422(secrets-rejected)
  * =================================================================== */
 const app = {
   console: null,          // 最近一次 /api/console 的存储视角
-  pendingAction: null,    // 收取/下发/裁决 待确认
+  pendingAction: null,    // 收取/下发/裁决/密钥 待确认
+  keys: [],
   openDiffs: new Set(),   // 展开的 diff 抽屉，key = adapter/category（轮询不重置）
 };
 
@@ -675,6 +702,13 @@ function renderAgents(agents, disabledFeature) {
     dispatchBtn.addEventListener("click", () => confirmDispatch(a));
     actions.append(dispatchBtn);
 
+    const secretBtn = el("button", "small-btn", "密钥");
+    secretBtn.type = "button";
+    secretBtn.title = "在这台机器上生成公钥、写入密钥配置、加密提交或归位";
+    secretBtn.disabled = a.stale;
+    secretBtn.addEventListener("click", () => openMachineKeys(a));
+    actions.append(secretBtn);
+
     const keyBtn = el("button", "small-btn", "登录公钥");
     keyBtn.type = "button";
     keyBtn.title = "把指定 GitHub 用户的公钥写到这台机器，之后可以免密登录";
@@ -820,6 +854,7 @@ function renderScopeChoices(data) {
 function openScopeDialog(opts) {
   $("confirm-title").textContent = opts.title;
   $("confirm-desc").textContent = "正在读取可选项…";
+  $("confirm-note").textContent = "受影响文件会先备份。";
   $("confirm-choices").replaceChildren();
   const okBtn = $("btn-confirm-ok");
   okBtn.disabled = true;
@@ -861,6 +896,7 @@ function confirmDispatch(agent) {
 function confirmSSHKey(agent) {
   const name = agent.hostname || agent.agentId;
   $("confirm-title").textContent = "登录公钥到 " + name;
+  $("confirm-note").textContent = "只更新这个 GitHub 用户对应的一段公钥。";
   $("confirm-desc").textContent = "读取这个 GitHub 用户公开的公钥，写入 " + name + " 上 agent 运行用户的 ~/.ssh/authorized_keys。之后可以用对应私钥免密登录。同一用户再次下发会更新这段密钥，不会改动文件里的其他密钥。";
   const label = el("label", null, "GitHub 用户名");
   const input = el("input");
@@ -1331,6 +1367,162 @@ $("btn-join-top").addEventListener("click", openJoin);
 // （若 agent 还在安装/启动，几秒后 30s 轮询也会补上）。
 $("dlg-join").addEventListener("close", () => { refresh(); });
 
+/* ---------- keys ---------- */
+function keyLines(e) {
+  const report = e.report || {};
+  return [].concat(e.errors || [], report.errors || []).filter(Boolean);
+}
+function keyEndpoint(agent) {
+  return agent ? "/api/agents/" + encodeURIComponent(agent.agentId) + "/keys" : "";
+}
+async function keyApi(agent, body) {
+  if (!agent) {
+    const action = body.action;
+    const path = action === "list" ? "/api/keys"
+      : action === "create" ? "/api/keys"
+      : action === "encrypt" ? "/api/keys/encrypt"
+      : action === "unlock" ? "/api/keys/unlock"
+      : "/api/keys/password";
+    const opts = action === "list" ? {} : { method: "POST", body: body };
+    return api(path, opts);
+  }
+  return api(keyEndpoint(agent), { method: "POST", body: body });
+}
+async function loadKeys() {
+  try {
+    const view = await keyApi(null, { action: "list" });
+    app.keys = view.keys || [];
+    renderKeys(null, app.keys);
+  } catch (e) {
+    if (e.status === 401) return;
+    const box = $("key-body");
+    clear(box);
+    box.append(el("p", "small", "密钥加载失败：" + e.message));
+  }
+}
+function renderKeys(agent, keys) {
+  const box = agent ? $("key-dlg-body") : $("key-body");
+  clear(box);
+  if (agent) $("key-dlg-ok").classList.add("hidden");
+  if (!keys.length) box.append(el("p", "small muted", "还没有密钥。"));
+  keys.forEach(key => {
+    const row = el("div", "adapter-row");
+    const line = el("div", "adapter-line");
+    line.append(el("span", "name", key.name || key.id));
+    line.append(el("span", "small muted mono", key.id));
+    const actions = el("div", "row-actions");
+    const enc = el("button", "small-btn", "加密文件");
+    enc.type = "button";
+    enc.addEventListener("click", () => openKeyForm(agent, "encrypt", key));
+    const unlock = el("button", "small-btn", "解开");
+    unlock.type = "button";
+    unlock.addEventListener("click", () => openKeyForm(agent, "unlock", key));
+    const pass = el("button", "small-btn", "更换口令");
+    pass.type = "button";
+    pass.addEventListener("click", () => openKeyForm(agent, "passwd", key));
+    actions.append(enc, unlock, pass);
+    line.append(actions);
+    row.append(line);
+    (key.files || []).forEach(file => {
+      row.append(el("div", "cat-line", file.id + "  →  " + file.destination));
+    });
+    box.append(row);
+  });
+  const add = el("button", "small-btn", "新建密钥");
+  add.type = "button";
+  add.addEventListener("click", () => openKeyForm(agent, "create", null));
+  const foot = el("div", "secret-actions");
+  foot.append(add);
+  box.append(foot);
+}
+function field(labelText, id, type, value) {
+  const label = el("label", null, labelText);
+  const input = el("input");
+  input.id = id;
+  input.type = type || "text";
+  input.value = value || "";
+  input.autocomplete = "off";
+  label.append(input);
+  return label;
+}
+function openKeyForm(agent, action, key) {
+  const titles = { create: "新建密钥", encrypt: "加密文件", unlock: "解开密钥", passwd: "更换口令" };
+  $("key-dlg-title").textContent = (agent ? (agent.hostname || agent.agentId) + " · " : "") + titles[action];
+  const body = $("key-dlg-body");
+  clear(body);
+  $("key-dlg-err").textContent = "";
+  $("key-dlg-ok").classList.remove("hidden");
+  if (action === "create") {
+    body.append(field("id", "key-id", "text", ""), field("名称", "key-name", "text", ""), field("口令", "key-pw", "password", ""), field("再输入一次口令", "key-pw2", "password", ""));
+  } else if (action === "encrypt") {
+    body.append(el("p", "small", key.name || key.id));
+    body.append(field("文件 id", "key-file", "text", ""), field("路径", "key-path", "text", "~/"), field("口令", "key-pw", "password", ""));
+  } else if (action === "unlock") {
+    body.append(el("p", "small", "用口令解开「" + (key.name || key.id) + "」，写回原来的路径。"));
+    body.append(field("口令", "key-pw", "password", ""));
+  } else {
+    body.append(el("p", "small", key.name || key.id));
+    body.append(field("当前口令", "key-pw", "password", ""), field("新口令", "key-pw2", "password", ""));
+  }
+  $("form-key")._keyAction = { agent: agent, action: action, key: key };
+  $("dlg-key").showModal();
+  const first = body.querySelector("input");
+  if (first) setTimeout(() => first.focus(), 0);
+}
+async function submitKeyForm(ev) {
+  ev.preventDefault();
+  const spec = $("form-key")._keyAction;
+  if (!spec) return;
+  const pw = ($("key-pw") && $("key-pw").value) || "";
+  const pw2 = ($("key-pw2") && $("key-pw2").value) || "";
+  const body = { action: spec.action, password: pw };
+  if (spec.key) body.id = spec.key.id;
+  if (spec.action === "create") {
+    body.id = ($("key-id").value || "").trim();
+    body.name = ($("key-name").value || "").trim();
+    if (pw !== pw2) { $("key-dlg-err").textContent = "两次口令不一致"; return; }
+  }
+  if (spec.action === "encrypt") {
+    body.file = ($("key-file").value || "").trim();
+    body.path = ($("key-path").value || "").trim();
+  }
+  if (spec.action === "passwd") {
+    body.newPassword = pw2;
+  }
+  $("key-dlg-ok").disabled = true;
+  try {
+    const view = await keyApi(spec.agent, body);
+    $("dlg-key").close();
+    toast(spec.action === "unlock" ? "已写回文件" : "已完成");
+    if (spec.agent) renderKeys(spec.agent, view.keys || []);
+    else await loadKeys();
+  } catch (e) {
+    $("key-dlg-err").textContent = keyLines(e).join("；") || e.message;
+  } finally {
+    $("key-dlg-ok").disabled = false;
+  }
+}
+async function openMachineKeys(agent) {
+  $("key-dlg-title").textContent = (agent.hostname || agent.agentId) + " 的密钥";
+  const body = $("key-dlg-body");
+  clear(body);
+  $("key-dlg-err").textContent = "";
+  body.append(el("p", "muted small", "读取中…"));
+  $("form-key")._keyAction = null;
+  $("dlg-key").showModal();
+  try {
+    const view = await keyApi(agent, { action: "list" });
+    if (!$("dlg-key").open) return;
+    renderKeys(agent, view.keys || []);
+  } catch (e) {
+    if (!$("dlg-key").open) return;
+    clear(body);
+    body.append(el("p", "small", e.message));
+  }
+}
+$("form-key").addEventListener("submit", submitKeyForm);
+$("key-dlg-cancel").addEventListener("click", () => $("dlg-key").close());
+
 /* ---------- refresh orchestration ---------- */
 function stampRefresh(failed) {
   const t = new Date();
@@ -1351,6 +1543,7 @@ async function refresh() {
     app.console = consoleView;
     renderHero();
     loadAgentsRender(agents.agents || [], false);
+    loadKeys();
     stampRefresh(false);
   } catch (e) {
     if (e.status === 401) {

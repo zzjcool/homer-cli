@@ -159,6 +159,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleResolve(w, r)
+	case path == "/api/keys" || strings.HasPrefix(path, "/api/keys/"):
+		s.handleKeys(w, r)
 	case path == "/api/config":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
@@ -481,6 +483,12 @@ func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
 		writeMutex.Lock()
 		defer writeMutex.Unlock()
 		s.handleAgentSSHKey(w, r, agentID)
+	case "keys":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleAgentKeys(w, r, agentID)
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 	}
@@ -646,6 +654,10 @@ func reportErrors(report any) []string {
 	case commands.PushReport:
 		return typed.Errors
 	case commands.PullReport:
+		return typed.Errors
+	case commands.SecretPushReport:
+		return typed.Errors
+	case commands.SecretPullReport:
 		return typed.Errors
 	default:
 		return nil

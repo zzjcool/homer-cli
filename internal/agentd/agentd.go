@@ -20,6 +20,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/hub"
+	"github.com/zzjcool/homer-cli/internal/keyring"
 	"github.com/zzjcool/homer-cli/internal/sshkey"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
@@ -609,6 +610,13 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 				break
 			}
 			output = sshkey.Install(home, task.Options.GitHubUser, task.Options.SSHKeys)
+		case hub.TaskKindSecret:
+			var command keyring.Command
+			if err := json.Unmarshal(task.Options.SecretPayload, &command); err != nil {
+				output = keyring.Result{Status: "bad-action", Errors: []string{"密钥请求不是合法 JSON"}}
+				break
+			}
+			output = keyring.Apply(d.cfg.HomerHome, command)
 		default:
 			err = fmt.Errorf("unsupported task kind %q", task.Kind)
 		}
@@ -628,6 +636,15 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 		encoded, err := json.Marshal(output.report)
 		if err != nil {
 			result.Error = err.Error()
+			return result
+		}
+		if task.Kind == hub.TaskKindSecret {
+			var probe struct {
+				OK bool `json:"ok"`
+			}
+			_ = json.Unmarshal(encoded, &probe)
+			result.OK = probe.OK
+			result.Report = encoded
 			return result
 		}
 		switch report := output.report.(type) {

@@ -56,6 +56,9 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 	if parsed.Command == CommandSecret {
 		return runSecret(parsed.Rest, out, errOut)
 	}
+	if parsed.Command == CommandKey {
+		return commands.RunKeyArgs(parsed.Rest, out, errOut)
+	}
 
 	allowPositionals := parsed.Command == CommandHome || parsed.Command == CommandRemote || parsed.Command == CommandPair
 	options, parseErr := parseOptions(parsed.Command, parsed.Rest, allowPositionals)
