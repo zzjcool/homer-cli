@@ -260,7 +260,7 @@ html { scroll-behavior: smooth; }
 
     <section id="sec-keys" aria-label="密钥">
       <h2>密钥</h2>
-      <p class="muted small">一项密钥用口令包住一把数据密钥，文件用这把数据密钥加密。密钥项随配置一起下发。新节点输入同一个口令即可解开，不必再找原来的机器。</p>
+      <p class="muted small">这里显示中心已经收下的密钥。在某台机器上新建之后，收取时勾选「密钥」，收完就会出现在这里。</p>
       <div id="key-body"></div>
     </section>
 
@@ -820,6 +820,9 @@ async function loadAgents() {
 }
 
 /* ---------- write actions: collect / dispatch / resolve ---------- */
+function adapterTitle(id) {
+  return id === "keyring" ? "密钥" : id;
+}
 function selectedAdapters() {
   const picked = [];
   $("confirm-choices").querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => {
@@ -867,18 +870,39 @@ function renderScopeChoices(data) {
     const copy = el("span", "choice-copy");
     const cats = item.categories || [];
     if (cats.length) {
-      const node = makeCollapsible(item.id, "", false);
+      const node = makeCollapsible(adapterTitle(item.id), "", false);
       node.setFill(kids => renderOutlineCategories(kids, cats, { adapterId: item.id, drift: true }));
       node.row.classList.add("choice-id");
       copy.append(node.row);
       block.append(label, node.kids);
     } else {
-      copy.append(el("span", "choice-id", item.id));
+      copy.append(el("span", "choice-id", adapterTitle(item.id)));
     }
     const detail = [item.detail, item.reason].filter(Boolean).join(" · ");
     if (detail) copy.append(el("span", "muted small", detail));
     label.append(input, copy);
     if (!cats.length) block.append(label);
+    if (item.conflicts > 0 && app.scopeAgent && app.scopeDirection !== "resolve") {
+      const resolveRow = el("div", "secret-actions");
+      const localBtn = el("button", "small-btn danger-btn", "以这台机器为准");
+      localBtn.type = "button";
+      localBtn.addEventListener("click", ev => {
+        ev.preventDefault();
+        const agentId = app.scopeAgent.agentId;
+        $("dlg-confirm").close("cancel");
+        executeResolveOn("local", agentId, [item.id]);
+      });
+      const centerBtn = el("button", "small-btn", "以中心为准");
+      centerBtn.type = "button";
+      centerBtn.addEventListener("click", ev => {
+        ev.preventDefault();
+        const agentId = app.scopeAgent.agentId;
+        $("dlg-confirm").close("cancel");
+        executeResolveOn("center", agentId, [item.id]);
+      });
+      resolveRow.append(localBtn, centerBtn);
+      block.append(resolveRow);
+    }
     rows.append(block);
   });
   box.append(tools, rows);
@@ -893,6 +917,8 @@ function openScopeDialog(opts) {
   okBtn.disabled = true;
   okBtn.textContent = opts.okLabel;
   app.pendingAction = null;
+  app.scopeAgent = opts.agent || null;
+  app.scopeDirection = opts.direction || "";
   $("dlg-confirm").showModal();
   api("/api/sync/choices?direction=" + encodeURIComponent(opts.direction) + "&agent=" + encodeURIComponent(opts.agent.agentId))
     .then(data => {

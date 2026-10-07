@@ -8,6 +8,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/adapter/pi"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gens"
 )
 
 func TestEnvelopeRoundTripAndSyncShape(t *testing.T) {
@@ -117,6 +118,34 @@ func TestEnvelopeRoundTripAndSyncShape(t *testing.T) {
 	}
 	if string(mustRead(t, destination)) != plaintext {
 		t.Fatal("password change rewrote the file body")
+	}
+}
+
+func TestListIncludesKeyCollectedIntoCenter(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	homer := filepath.Join(root, ".homer")
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return homer
+		}
+		return ""
+	})
+	if err := core.SaveConfig(paths, core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{}}); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "{\n  \"id\": \"codebuddy\",\n  \"name\": \"CodeBuddy\",\n  \"files\": [{\"id\": \"providers\", \"destination\": \"~/providers.json\"}]\n}\n"
+	if _, err := gens.New(homer).Publish(map[string]map[string]string{
+		"keyring": {"items/codebuddy/manifest.json": manifest},
+	}, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	listed := Apply(homer, Command{Action: "list"})
+	if !listed.OK || len(listed.Keys) != 1 || listed.Keys[0].ID != "codebuddy" {
+		t.Fatalf("center list = %#v", listed)
+	}
+	if len(listed.Keys[0].Files) != 1 || listed.Keys[0].Files[0].Destination != "~/providers.json" {
+		t.Fatalf("files = %#v", listed.Keys[0].Files)
 	}
 }
 
