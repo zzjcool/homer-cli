@@ -332,6 +332,31 @@ func TestSyncCollectFromMachine(t *testing.T) {
 	}
 }
 
+func TestSyncCollectSecretsAskBeforeWriting(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	source := &sourceStub{
+		list:    []AgentInfo{{AgentID: "box-a", Hostname: "box-a", Mode: "listen"}},
+		pushRaw: json.RawMessage(`{"ok":false,"status":"secrets-rejected","secrets":[{"path":"pi/models/models.json","patternId":"generic-secret-assignment"}]}`),
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/sync?direction=collect&agent=box-a&confirm=true", `{"adapters":["pi"]}`)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("collect = %d body=%s", response.Code, response.Body)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"status":"secrets-rejected"`) || !strings.Contains(body, "pi/models/models.json") || !strings.Contains(body, "仍然写入") {
+		t.Fatalf("body = %s", body)
+	}
+	confirmed := request(t, server.Handler(), http.MethodPost, "/api/sync?direction=collect&agent=box-a&confirm=true", `{"adapters":["pi"],"allowSecrets":true}`)
+	if confirmed.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("confirmed collect = %d body=%s", confirmed.Code, confirmed.Body)
+	}
+	if len(source.pushScopes) != 2 || source.pushScopes[0].AllowSecrets || !source.pushScopes[1].AllowSecrets {
+		t.Fatalf("scopes = %#v", source.pushScopes)
+	}
+}
+
 // dispatchToMachines: the hub asks every ONLINE machine to pull from the
 // storage. Offline machines are skipped, not failed.
 func TestSyncDispatchSkipsOffline(t *testing.T) {

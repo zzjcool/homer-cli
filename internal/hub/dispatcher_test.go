@@ -252,11 +252,12 @@ func TestDispatcherListenNonOKMapping(t *testing.T) {
 }
 
 func TestDispatcherForwardsAdapterScope(t *testing.T) {
-	var adapters, overwrite, confirm string
+	var adapters, overwrite, confirm, allowSecrets string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		adapters = r.URL.Query().Get("adapters")
 		overwrite = r.URL.Query().Get("overwrite")
 		confirm = r.URL.Query().Get("confirm")
+		allowSecrets = r.URL.Query().Get("allowSecrets")
 		_, _ = w.Write([]byte(`{"ok":true,"status":"pushed"}`))
 	}))
 	defer server.Close()
@@ -266,12 +267,12 @@ func TestDispatcherForwardsAdapterScope(t *testing.T) {
 	}
 	dispatcher := NewDispatcher(registry, "")
 	if _, err := dispatcher.AgentPush(context.Background(), "listen-scope", true, web.SyncScope{
-		Explicit: true, Adapters: []string{"vscode", "pad"}, Overwrite: true,
+		Explicit: true, Adapters: []string{"vscode", "pad"}, Overwrite: true, AllowSecrets: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if adapters != "vscode,pad" || overwrite != "true" || confirm != "true" {
-		t.Fatalf("query adapters=%q overwrite=%q confirm=%q", adapters, overwrite, confirm)
+	if adapters != "vscode,pad" || overwrite != "true" || confirm != "true" || allowSecrets != "true" {
+		t.Fatalf("query adapters=%q overwrite=%q confirm=%q allowSecrets=%q", adapters, overwrite, confirm, allowSecrets)
 	}
 
 	registry = NewRegistry()

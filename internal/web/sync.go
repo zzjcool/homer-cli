@@ -149,9 +149,26 @@ func (s *Server) syncCollectFromMachine(w http.ResponseWriter, r *http.Request, 
 	}
 	result := agentApplyResult{AgentID: agentID, Hostname: name, OK: true}
 	var payload struct {
-		OK     bool     `json:"ok"`
-		Status string   `json:"status"`
-		Errors []string `json:"errors"`
+		OK      bool     `json:"ok"`
+		Status  string   `json:"status"`
+		Errors  []string `json:"errors"`
+		Secrets []struct {
+			Path string `json:"path"`
+		} `json:"secrets"`
+	}
+	if json.Unmarshal(raw, &payload) == nil && payload.Status == "secrets-rejected" {
+		paths := make([]string, 0, len(payload.Secrets))
+		for _, item := range payload.Secrets {
+			paths = append(paths, item.Path)
+		}
+		writeJSON(w, http.StatusUnprocessableEntity, syncReport{
+			OK: false, Status: "secrets-rejected", Direction: string(syncCollect),
+			Agents: []agentApplyResult{{
+				AgentID: agentID, Hostname: name, Status: "secrets-rejected",
+			}},
+			Errors: secretConfirmLines(paths),
+		})
+		return
 	}
 	if json.Unmarshal(raw, &payload) != nil || !payload.OK {
 		result.OK = false
@@ -361,6 +378,27 @@ func fanoutPullOnlineAgents(ctx context.Context, agents AgentsSource, scope Sync
 		results = append(results, result)
 	}
 	return results
+}
+
+// secretConfirmLines is the console warning for a scanner hit. Paths only;
+// the matched text stays on the agent.
+func secretConfirmLines(paths []string) []string {
+	lines := []string{"这些文件里有像密钥的内容。可以去掉后再收取，也可以确认后仍然写入。"}
+	seen := map[string]struct{}{}
+	ordered := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+	return append(lines, ordered...)
 }
 
 // humanStatusSentence maps an internal status to its user sentence. The

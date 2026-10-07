@@ -84,6 +84,69 @@ func newWebServer(t *testing.T, fixture webFixture, token string, source AgentsS
 	return server
 }
 
+func TestAgentListMarksOlderVersion(t *testing.T) {
+	old := Version
+	Version = "v1.4.0"
+	t.Cleanup(func() { Version = old })
+	fixture := makeFixture(t, "base\n", "base\n")
+	source := &sourceStub{list: []AgentInfo{
+		{AgentID: "old", Hostname: "old", Version: "v1.3.0"},
+		{AgentID: "same", Hostname: "same", Version: "v1.4.0"},
+		{AgentID: "newer", Hostname: "newer", Version: "v1.5.0"},
+		{AgentID: "unknown", Hostname: "unknown"},
+	}}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodGet, "/api/agents")
+	if response.Code != http.StatusOK {
+		t.Fatalf("list = %d %s", response.Code, response.Body)
+	}
+	var body struct {
+		Agents []AgentInfo `json:"agents"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, agent := range body.Agents {
+		got[agent.AgentID] = agent.Outdated
+	}
+	if !got["old"] || got["same"] || got["newer"] || got["unknown"] {
+		t.Fatalf("outdated = %#v", got)
+	}
+}
+
+func TestAgentUpgradeRoute(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	plain := newWebServer(t, fixture, "test-token", &sourceStub{}, nil)
+	missing := request(t, plain.Handler(), http.MethodPost, "/api/agents/box/upgrade", `{}`)
+	if missing.Code != http.StatusNotImplemented {
+		t.Fatalf("missing upgrader = %d %s", missing.Code, missing.Body)
+	}
+	stub := &upgradeRouteStub{raw: []byte(`{"ok":true,"status":"upgraded"}`)}
+	server := newWebServer(t, fixture, "test-token", stub, nil)
+	ok := request(t, server.Handler(), http.MethodPost, "/api/agents/box/upgrade", `{}`)
+	if ok.Code != http.StatusOK || !stub.called {
+		t.Fatalf("upgrade = %d called=%v body=%s", ok.Code, stub.called, ok.Body)
+	}
+	stub.raw = []byte(`{"ok":false,"status":"error","note":"下载失败"}`)
+	stub.called = false
+	failed := request(t, server.Handler(), http.MethodPost, "/api/agents/box/upgrade", `{}`)
+	if failed.Code != http.StatusUnprocessableEntity || !strings.Contains(failed.Body.String(), "下载失败") {
+		t.Fatalf("failed upgrade = %d %s", failed.Code, failed.Body)
+	}
+}
+
+type upgradeRouteStub struct {
+	sourceStub
+	called bool
+	raw    json.RawMessage
+}
+
+func (s *upgradeRouteStub) AgentUpgrade(context.Context, string) (json.RawMessage, error) {
+	s.called = true
+	return append(json.RawMessage(nil), s.raw...), nil
+}
+
 func request(t *testing.T, handler http.Handler, method, path string, body ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader

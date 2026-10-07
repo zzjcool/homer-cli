@@ -384,6 +384,7 @@ func planMergeFile(ctx adapterContext, category, relPath string, judged fileTrip
 			if judged.remote != nil {
 				content = judged.remote.Content
 			}
+			content = OmitPlaceholderContent(content, excludedKeysFor(ctx.config, ctx.adapterID, category))
 			return PullAction{Type: PullActionWrite, AdapterID: ctx.adapterID, Category: category, RelPath: relPath, Content: content}, true
 		}
 		if judged.remote == nil || judged.local.Content == judged.remote.Content {
@@ -441,7 +442,8 @@ func planMergeFile(ctx adapterContext, category, relPath string, judged fileTrip
 	if localRaw != nil {
 		localRawValue, _ = parseEntry(localRaw)
 	}
-	planted := plantExcludedKeys(merged.Merged, localRawValue, excludedKeysFor(ctx.config, ctx.adapterID, category))
+	keys := excludedKeysFor(ctx.config, ctx.adapterID, category)
+	planted := DropUnresolvedPlaceholders(plantExcludedKeys(merged.Merged, localRawValue, keys), keys)
 	if !orderedjson.DeepEqual(planted, localRawValue) {
 		return PullAction{Type: PullActionWrite, AdapterID: ctx.adapterID, Category: category, RelPath: relPath, Content: string(orderedjson.SerializeFile(planted))}, true
 	}

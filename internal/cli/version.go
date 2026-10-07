@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/upgrade"
+	"github.com/zzjcool/homer-cli/internal/web"
 )
 
 // version is populated by cmd/homer from the GoReleaser ldflag. Keeping the
@@ -17,9 +18,13 @@ var version = "dev"
 // SetVersion is called once by the thin binary entry point. It is additive so
 // callers embedding the cli package can still use the default dev version.
 func SetVersion(value string) {
-	if strings.TrimSpace(value) != "" {
-		version = value
+	if strings.TrimSpace(value) == "" {
+		return
 	}
+	version = value
+	// The hub health check and the agent heartbeat both read this. One
+	// build stamp has to feed every place that says which program is running.
+	web.Version = value
 }
 
 func currentVersion() string {
@@ -91,7 +96,7 @@ func runUpgrade(force bool, connect, home string, out, errOut io.Writer) int {
 		ErrOut:    errOut,
 	})
 	if report.OK {
-		return 0
+		return finishUpgrade(out, errOut, report.Binary, home)
 	}
 	if report.Status != "no-credential" {
 		// An enrolled machine (credential exists) must NOT silently fall
@@ -128,5 +133,20 @@ func runUpgrade(force bool, connect, home string, out, errOut io.Writer) int {
 	}
 	writeLine(out, "✓ homer 升级完成（"+latest.TagName+"）")
 	writeLine(out, "验证: homer version")
+	return finishUpgrade(out, errOut, target, home)
+}
+
+// finishUpgrade restarts an agent that is already running so it loads the
+// binary just written. The upgrade process is not the agent; the agent
+// daemon restarts itself after a remote upgrade.
+func finishUpgrade(out, errOut io.Writer, binary, home string) int {
+	note, err := commands.RestartRunningAgents(binary, home)
+	if note != "" {
+		writeLine(out, note)
+	}
+	if err != nil {
+		writeLine(errOut, "homer upgrade: "+err.Error())
+		return 1
+	}
 	return 0
 }

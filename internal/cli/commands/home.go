@@ -632,6 +632,7 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 	manifestWarnings := []string{}
 	if mode != syncx.FirstContactSkip {
 		remainingPlan, manifestTasks, manifestWarnings = syncx.SplitManifestActions(*config, remainingPlan, local)
+		manifestTasks = syncx.SupplementManifestInstalls(*config, local, remote, manifestTasks)
 	}
 	warnings = append(warnings, manifestWarnings...)
 	plan.Actions = remainingPlan.Actions
@@ -680,6 +681,7 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		manifestWarnings = []string{}
 		if mode != syncx.FirstContactSkip {
 			remainingPlan, manifestTasks, manifestWarnings = syncx.SplitManifestActions(*config, remainingPlan, local)
+			manifestTasks = syncx.SupplementManifestInstalls(*config, local, remote, manifestTasks)
 		}
 		warnings = append(warnings, manifestWarnings...)
 		plan.Actions = remainingPlan.Actions

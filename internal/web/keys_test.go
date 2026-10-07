@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/keyring"
 )
 
@@ -50,6 +52,70 @@ func TestKeyConsoleRoundTrip(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Fatalf("console missing %q", want)
 		}
+	}
+}
+
+func TestDispatchRequiresUnlockBeforeSend(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	homer := filepath.Join(root, ".homer")
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return homer
+		}
+		return ""
+	})
+	if err := core.SaveConfig(paths, core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "models.json")
+	if err := os.WriteFile(destination, []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created := keyring.Apply(homer, keyring.Command{Action: "create", ID: "pi", Name: "pi", Password: "long-password", WorkFactor: 14})
+	if !created.OK {
+		t.Fatalf("create = %#v", created)
+	}
+	encrypted := keyring.Apply(homer, keyring.Command{Action: "encrypt", ID: "pi", Path: destination, Adapter: "pi", Password: "long-password", WorkFactor: 14})
+	if !encrypted.OK {
+		t.Fatalf("encrypt = %#v", encrypted)
+	}
+	if _, err := gens.New(homer).Publish(map[string]map[string]string{
+		"pi":      {"settings/settings.json": "x"},
+		"keyring": {"marker.txt": "x"},
+	}, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	stub := &recordingKeySource{raw: []byte(`{"ok":true,"status":"unlocked"}`)}
+	stub.pullRaw = []byte(`{"ok":true,"status":"applied"}`)
+	server := newWebServer(t, webFixture{home: homer, paths: paths}, "test-token", stub, nil)
+	pull := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true", body)
+	}
+	missing := pull(`{"adapters":["pi","keyring"]}`)
+	if missing.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+		t.Fatalf("missing password = %d pulls=%d body=%s", missing.Code, len(stub.pullValues), missing.Body)
+	}
+	if !strings.Contains(missing.Body.String(), "口令") || strings.Contains(missing.Body.String(), "long-password") {
+		t.Fatalf("missing body = %s", missing.Body)
+	}
+	wrong := pull(`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"wrong-password"}]}`)
+	if wrong.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+		t.Fatalf("wrong password = %d pulls=%d body=%s", wrong.Code, len(stub.pullValues), wrong.Body)
+	}
+	if strings.Contains(wrong.Body.String(), "wrong-password") {
+		t.Fatal("response echoed the password")
+	}
+	sent := pull(`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if sent.Code != http.StatusOK || len(stub.pullValues) != 1 {
+		t.Fatalf("dispatch = %d pulls=%d body=%s", sent.Code, len(stub.pullValues), sent.Body)
+	}
+	if stub.cmd.Action != "unlock" || stub.cmd.ID != "pi" || stub.cmd.Password != "long-password" {
+		t.Fatalf("unlock = %+v", stub.cmd)
+	}
+	if strings.Contains(sent.Body.String(), "long-password") {
+		t.Fatal("success response echoed the password")
 	}
 }
 

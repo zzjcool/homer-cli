@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -88,5 +90,43 @@ func TestEnrollmentRebind(t *testing.T) {
 	}
 	if !mgr.VerifySecret("agent-1", secret2) {
 		t.Fatal("new secret invalid after rebind")
+	}
+}
+
+func TestEnrollmentBindingSurvivesRestart(t *testing.T) {
+	home := t.TempDir()
+	const secret = "machine-secret-not-for-disk"
+	first, err := OpenEnrollment(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.BindAgent("box", secret)
+	second, err := OpenEnrollment(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.VerifySecret("box", secret) || second.AuthorizedAgent(secret) != "box" {
+		t.Fatal("restart forgot the enrolled machine")
+	}
+	body, err := os.ReadFile(filepath.Join(home, "keys", agentSecretsFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("secret stored in clear: %s", body)
+	}
+	info, err := os.Stat(filepath.Join(home, "keys", agentSecretsFilename))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v err=%v", info, err)
+	}
+	if !second.Revoke("box") {
+		t.Fatal("revoke")
+	}
+	third, err := OpenEnrollment(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.VerifySecret("box", secret) {
+		t.Fatal("revocation did not survive restart")
 	}
 }

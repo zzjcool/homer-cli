@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -415,6 +416,9 @@ type PushOptions struct {
 	// Overwrite publishes the selection even when it conflicts with the
 	// center. Conflict resolution ("以这台机器为准") sets it.
 	Overwrite bool
+	// AllowSecrets continues after the scanner reports a hit. The console
+	// asks first; an unconfirmed push still stops.
+	AllowSecrets bool
 }
 
 type PushStatus string
@@ -533,15 +537,10 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 
 	prepared := syncx.PrepareStoreSnapshot(sources.Local, *config)
 	findings := secretscan.FilterIgnored(secretscan.ScanSnapshots(prepared), secretIgnorePaths(config))
-	if len(findings) > 0 {
-		report = newPushCommandReport(PushStatusSecretsRejected)
-		report.Secrets = findings
-		report.Warnings = warnings
-		report.Errors = []string{
-			fmt.Sprintf("检测到 %d 处疑似密钥，已拒绝推送（store 未写入，未产生 commit）", len(findings)),
-			"请移除密钥，或在 homer.json 的 secrets.ignorePaths 中显式豁免该路径。",
-		}
-		return report
+	if blocked, next, stop := applySecretGate(findings, options.AllowSecrets, warnings); stop {
+		return blocked
+	} else {
+		warnings = next
 	}
 
 	check := syncx.CheckPushSafety(*config, sources.Base, sources.Local, sources.Remote)
@@ -726,6 +725,47 @@ func RunPush(options PushOptions, deps *PushDeps) (report PushReport) {
 		report.Warnings = append(report.Warnings, "未配置 git remote，仅本地 commit（local-only 模式；如需推送请先运行 `homer remote <url>`）")
 	}
 	return report
+}
+
+// applySecretGate stops a push that still looks like it contains a secret,
+// unless the caller already confirmed. A confirmation records the paths
+// as a warning and lets the write continue. Returned paths never include
+// the matched text.
+func applySecretGate(findings []SecretFinding, allow bool, warnings []string) (PushReport, []string, bool) {
+	if len(findings) == 0 {
+		return PushReport{}, warnings, false
+	}
+	paths := uniqueSecretPaths(findings)
+	if allow {
+		note := "已确认仍写入，这些文件像是带有密钥"
+		if len(paths) > 0 {
+			note += "：" + strings.Join(paths, "、")
+		}
+		return PushReport{}, append(warnings, note), false
+	}
+	report := newPushCommandReport(PushStatusSecretsRejected)
+	report.Secrets = findings
+	report.Warnings = warnings
+	report.Errors = append([]string{"这些文件里有像密钥的内容，需要确认后才会写入。"}, paths...)
+	return report, warnings, true
+}
+
+func uniqueSecretPaths(findings []SecretFinding) []string {
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		path := strings.TrimSpace(finding.Path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func secretIgnorePaths(config *core.HomerConfig) []string {
@@ -933,15 +973,10 @@ func runScopedHubPush(options PushOptions, deps *PushDeps, paths core.HomerPaths
 	}
 	prepared := syncx.PrepareStoreSnapshot(local, config)
 	findings := secretscan.FilterIgnored(secretscan.ScanSnapshots(prepared), secretIgnorePaths(&config))
-	if len(findings) > 0 {
-		report := newPushCommandReport(PushStatusSecretsRejected)
-		report.Secrets = findings
-		report.Warnings = warnings
-		report.Errors = []string{
-			fmt.Sprintf("检测到 %d 处疑似密钥，已拒绝推送（store 未写入，未产生 commit）", len(findings)),
-			"请移除密钥，或在 homer.json 的 secrets.ignorePaths 中显式豁免该路径。",
-		}
-		return report
+	if blocked, next, stop := applySecretGate(findings, options.AllowSecrets, warnings); stop {
+		return blocked
+	} else {
+		warnings = next
 	}
 
 	publish, conflicts := syncx.DecideScopedPublish(config, base, local, remote, ids)

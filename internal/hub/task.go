@@ -15,12 +15,13 @@ const (
 type TaskKind string
 
 const (
-	TaskKindStatus TaskKind = "status"
-	TaskKindDiff   TaskKind = "diff"
-	TaskKindPush   TaskKind = "push"
-	TaskKindPull   TaskKind = "pull"
-	TaskKindSSHKey TaskKind = "ssh-key"
-	TaskKindSecret TaskKind = "secret"
+	TaskKindStatus  TaskKind = "status"
+	TaskKindDiff    TaskKind = "diff"
+	TaskKindPush    TaskKind = "push"
+	TaskKindPull    TaskKind = "pull"
+	TaskKindSSHKey  TaskKind = "ssh-key"
+	TaskKindSecret  TaskKind = "secret"
+	TaskKindUpgrade TaskKind = "upgrade"
 )
 
 type Task struct {
@@ -31,12 +32,13 @@ type Task struct {
 }
 
 type TaskOptions struct {
-	Adapter   string   `json:"adapter,omitempty"`
-	Category  string   `json:"category,omitempty"`
-	Path      string   `json:"path,omitempty"`
-	Confirm   bool     `json:"confirm,omitempty"`
-	Adapters  []string `json:"adapters,omitempty"`
-	Overwrite bool     `json:"overwrite,omitempty"`
+	Adapter      string   `json:"adapter,omitempty"`
+	Category     string   `json:"category,omitempty"`
+	Path         string   `json:"path,omitempty"`
+	Confirm      bool     `json:"confirm,omitempty"`
+	Adapters     []string `json:"adapters,omitempty"`
+	Overwrite    bool     `json:"overwrite,omitempty"`
+	AllowSecrets bool     `json:"allowSecrets,omitempty"`
 	// Resolve is set by the console's conflict buttons: "local" keeps this
 	// machine, "center" applies the hub generation. Empty for ordinary
 	// push/pull.

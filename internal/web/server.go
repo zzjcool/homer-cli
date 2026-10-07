@@ -34,6 +34,9 @@ type AgentInfo struct {
 	Addr     string    `json:"addr,omitempty"`
 	LastSeen time.Time `json:"lastSeen"`
 	Version  string    `json:"version,omitempty"`
+	// Outdated is true when this machine reported a version older than the
+	// hub's own build. The console shows "更新程序" only in that case.
+	Outdated bool `json:"outdated,omitempty"`
 	// Stale is true when the hub has not heard from the agent for longer
 	// than hub.AgentStaleAfter; the UI renders it as an offline status dot.
 	Stale bool `json:"stale"`
@@ -167,6 +170,10 @@ type ServeOptions struct {
 	// listen-mode agent, where the hub dials /api/push or /api/pull with
 	// ?resolve=local|center.
 	LocalResolve func(ctx context.Context, choice string) (json.RawMessage, error)
+	// LocalUpgrade replaces this process's homer binary with the hub's.
+	// Set only on a listen-mode agent. The console reaches connect-mode
+	// machines through an upgrade task instead.
+	LocalUpgrade func() (json.RawMessage, error)
 	// AfterLocalWrite runs after this process applies a push, pull, or
 	// conflict choice. The agent uses it to drop a throttled drift cache
 	// so the next heartbeat matches what the write just did.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/shellenv"
 )
 
 type fakePort struct {
@@ -129,6 +130,9 @@ func writeExecutable(t *testing.T, content string) string {
 }
 
 func TestDefaultPortUsesMinimalEnvironment(t *testing.T) {
+	previous := shellenv.ReadLoginPATH
+	shellenv.ReadLoginPATH = func() string { return "" }
+	t.Cleanup(func() { shellenv.ReadLoginPATH = previous })
 	t.Setenv("HOMER_TEST_SECRET", "must-not-cross-boundary")
 	t.Setenv("HOME", "/tmp/homer-manifest-home")
 	t.Setenv("PATH", "/bin")
@@ -295,6 +299,21 @@ func TestParseIDsWithPattern(t *testing.T) {
 	all := ParseIDsWithPattern(stdout, "")
 	if len(all) != 4 {
 		t.Fatalf("legacy ids = %v", all)
+	}
+}
+
+func TestCommandEnvReadsLoginPATHEveryCall(t *testing.T) {
+	previous := shellenv.ReadLoginPATH
+	calls := 0
+	shellenv.ReadLoginPATH = func() string {
+		calls++
+		return "/usr/bin:/bin"
+	}
+	t.Cleanup(func() { shellenv.ReadLoginPATH = previous })
+	_ = minimalCommandEnv()
+	_ = minimalCommandEnv()
+	if calls != 2 {
+		t.Fatalf("login PATH reads = %d, want 2", calls)
 	}
 }
 

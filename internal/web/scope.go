@@ -19,9 +19,20 @@ import (
 // SyncScope is an explicit adapter selection for collect or dispatch.
 // Explicit is false when the caller left the operation unrestricted.
 type SyncScope struct {
-	Explicit  bool
-	Adapters  []string
-	Overwrite bool
+	Explicit     bool
+	Adapters     []string
+	Overwrite    bool
+	AllowSecrets bool
+	// Unlocks are passwords for keys that ride with this dispatch.
+	// They stay on the hub request and are not copied into an agent task.
+	Unlocks []KeyUnlock
+}
+
+// KeyUnlock is one key the operator can open. The password is an input
+// only and must not be written into logs or a sync report.
+type KeyUnlock struct {
+	ID       string
+	Password string
 }
 
 var errNoCenterSnapshot = errors.New("中心还没有任何快照（先从一台机器收取）")
@@ -66,12 +77,51 @@ func readSyncScope(r *http.Request) (SyncScope, error) {
 				}
 				scope = SyncScope{Explicit: true, Adapters: parsed}
 			}
+			if raw, ok := generic["allowSecrets"]; ok {
+				var allow bool
+				if err := json.Unmarshal(raw, &allow); err != nil {
+					return SyncScope{}, fmt.Errorf("allowSecrets 必须是布尔值")
+				}
+				scope.AllowSecrets = allow
+			}
+			if raw, ok := generic["unlocks"]; ok {
+				unlocks, err := parseUnlocks(raw)
+				if err != nil {
+					return SyncScope{}, err
+				}
+				scope.Unlocks = unlocks
+			}
 		}
 	}
 	if r.URL.Query().Get("overwrite") == "true" {
 		scope.Overwrite = true
 	}
+	if r.URL.Query().Get("allowSecrets") == "true" {
+		scope.AllowSecrets = true
+	}
 	return scope, nil
+}
+
+func parseUnlocks(raw json.RawMessage) ([]KeyUnlock, error) {
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var rows []struct {
+		ID       string `json:"id"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("unlocks 必须是数组")
+	}
+	out := make([]KeyUnlock, 0, len(rows))
+	for _, row := range rows {
+		id := strings.TrimSpace(row.ID)
+		if id == "" {
+			return nil, fmt.Errorf("unlocks 缺少密钥 id")
+		}
+		out = append(out, KeyUnlock{ID: id, Password: row.Password})
+	}
+	return out, nil
 }
 
 func (s *Server) requireCenterAdapters(ids []string) error {

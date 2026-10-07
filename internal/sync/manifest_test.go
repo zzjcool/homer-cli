@@ -77,6 +77,37 @@ func TestSplitManifestActionsUsesEmptyLocalAndKeepsNonManifestDeletes(t *testing
 	}
 }
 
+func TestSupplementManifestInstallsWhenLiveListIsEmpty(t *testing.T) {
+	kind := core.CategoryKindManifest
+	config := core.HomerConfig{Adapters: map[string]core.AdapterConfig{
+		"pi": {Categories: map[string]core.CategoryConfig{
+			"packages": {Kind: &kind, Mode: core.SyncModeMirror, ListCmd: "pi list", ApplyCmd: "pi install"},
+		}},
+	}}
+	remote := []core.AdapterSnapshot{{AdapterID: "pi", Categories: []core.CategorySnapshot{{
+		AdapterID: "pi", Category: "packages",
+		Files: core.SnapshotFiles{manifest.VirtualFileName("packages"): {Kind: "file", Content: "npm:pi-lens@4.3.0\nnpm:pi-sop@0.3.0\n"}},
+	}}}}
+	tasks := SupplementManifestInstalls(config, nil, remote, nil)
+	if len(tasks) != 1 || tasks[0].ApplyCmd != "pi install" || !reflect.DeepEqual(tasks[0].IDs, []string{"npm:pi-lens@4.3.0", "npm:pi-sop@0.3.0"}) {
+		t.Fatalf("tasks = %#v", tasks)
+	}
+	local := []core.AdapterSnapshot{{AdapterID: "pi", Categories: []core.CategorySnapshot{{
+		AdapterID: "pi", Category: "packages",
+		Files: core.SnapshotFiles{manifest.VirtualFileName("packages"): {Kind: "file", Content: "npm:pi-lens@4.3.0\n"}},
+	}}}}
+	again := SupplementManifestInstalls(config, local, remote, nil)
+	if len(again) != 1 || !reflect.DeepEqual(again[0].IDs, []string{"npm:pi-sop@0.3.0"}) {
+		t.Fatalf("missing only = %#v", again)
+	}
+	already := SupplementManifestInstalls(config, local, remote, []manifest.Task{{
+		AdapterID: "pi", Category: "packages", IDs: []string{"npm:pi-sop@0.3.0"}, ApplyCmd: "pi install",
+	}})
+	if len(already) != 1 || !reflect.DeepEqual(already[0].IDs, []string{"npm:pi-sop@0.3.0"}) {
+		t.Fatalf("duplicate = %#v", already)
+	}
+}
+
 func TestBuildManifestPreviewAndCap(t *testing.T) {
 	task := manifest.Task{AdapterID: "vscode", Category: "extensions", IDs: []string{"pub.two", "pub.one", "pub.two"}}
 	want := "  安装扩展 2 个（vscode/extensions）\n    + pub.one\n    + pub.two"

@@ -176,6 +176,7 @@ func (d *Daemon) runListen(ctx context.Context) error {
 		// which does not exist yet when the listener starts.
 		AgentEndpointAuthorized: d.listenAuthorized,
 		LocalResolve:            d.resolveLocal,
+		LocalUpgrade:            d.upgradeLocal,
 		AfterLocalWrite:         d.forgetDrift,
 	})
 	if err != nil {
@@ -306,6 +307,11 @@ func (d *Daemon) runConnect(ctx context.Context) error {
 		}
 		if err := d.report(ctx, client, task, result); err != nil && ctx.Err() != nil {
 			return nil
+		}
+		if task.Kind == hub.TaskKindUpgrade && result.OK {
+			// The report is already on the hub. Replace this process with
+			// the binary just written so the new program starts serving.
+			reexecAgent()
 		}
 		if !sleepContext(ctx, d.cfg.PollInterval) {
 			return nil
@@ -540,9 +546,10 @@ func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool,
 	payload := struct {
 		AgentID     string            `json:"agentId"`
 		WaitSeconds int               `json:"waitSeconds"`
+		Version     string            `json:"version,omitempty"`
 		Drift       *hub.AgentDrift   `json:"drift,omitempty"`
 		Host        *hub.HostSnapshot `json:"host,omitempty"`
-	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Drift: d.driftSummary(ctx), Host: d.hostSnapshot()}
+	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Version: web.Version, Drift: d.driftSummary(ctx), Host: d.hostSnapshot()}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return hub.Task{}, false, err
@@ -569,7 +576,16 @@ func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool,
 }
 
 func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
-	ctx, cancel := context.WithTimeout(parent, d.cfg.ReportTimeout)
+	limit := d.cfg.ReportTimeout
+	if task.Kind == hub.TaskKindUpgrade && limit < 3*time.Minute {
+		limit = 3 * time.Minute
+	}
+	// Plugin installs run one `pi install` per package. Eight of them do
+	// not fit in the normal 50s report budget.
+	if task.Kind == hub.TaskKindPull && limit < 12*time.Minute {
+		limit = 12 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
 	// Note: exceeding the timeout reports an error but does NOT abort the
 	// underlying execution — the command layer is not context-aware yet, so
@@ -600,7 +616,7 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 				}{output.(string)}
 			}
 		case hub.TaskKindPush:
-			output, err = d.exec.Push(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite)
+			output, err = d.exec.Push(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite, task.Options.AllowSecrets)
 		case hub.TaskKindPull:
 			output, err = d.exec.Pull(ctx, task.Options.Confirm, task.Options.Adapters, task.Options.Overwrite)
 		case hub.TaskKindSSHKey:
@@ -617,6 +633,8 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 				break
 			}
 			output = keyring.Apply(d.cfg.HomerHome, command)
+		case hub.TaskKindUpgrade:
+			output = d.runUpgrade()
 		default:
 			err = fmt.Errorf("unsupported task kind %q", task.Kind)
 		}
@@ -656,6 +674,8 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 			}
 		case sshkey.Report:
 			result.OK = report.OK
+		case commands.UpgradeReport:
+			result.OK = report.OK
 		default:
 			result.OK = taskResultOK(task.Kind, output.report)
 		}
@@ -665,6 +685,29 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 		result.Error = fmt.Sprintf("task execution timeout: %v", ctx.Err())
 		return result
 	}
+}
+
+func (d *Daemon) runUpgrade() commands.UpgradeReport {
+	return commands.RunUpgrade(commands.UpgradeOptions{
+		HomerHome: d.cfg.HomerHome,
+		Out:       io.Discard,
+		ErrOut:    io.Discard,
+	})
+}
+
+func (d *Daemon) upgradeLocal() (json.RawMessage, error) {
+	report := d.runUpgrade()
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return nil, err
+	}
+	if report.OK {
+		go func() {
+			time.Sleep(400 * time.Millisecond)
+			reexecAgent()
+		}()
+	}
+	return raw, nil
 }
 
 func (d *Daemon) report(ctx context.Context, client *http.Client, task hub.Task, result hub.TaskResult) error {

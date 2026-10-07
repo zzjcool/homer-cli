@@ -454,6 +454,7 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		plan = preferRemotePlan(plan, sources.Remote)
 	}
 	remainingPlan, manifestTasks, manifestWarnings := syncx.SplitManifestActions(*config, plan, sources.Local)
+	manifestTasks = syncx.SupplementManifestInstalls(*config, sources.Local, sources.Remote, manifestTasks)
 	warnings = append(warnings, manifestWarnings...)
 	if len(remainingPlan.Actions) == 0 && len(manifestTasks) == 0 && len(manifestCommandWarnings) == 0 {
 		report = newPullCommandReport(PullStatusNoDrift)

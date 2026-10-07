@@ -2,6 +2,7 @@ package sync
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/engine"
@@ -171,6 +172,55 @@ func PlantExcludedKeys(merged, localValue orderedjson.Value, keys []string) orde
 
 func plantExcludedKeys(merged, localValue orderedjson.Value, keys []string) orderedjson.Value {
 	return PlantExcludedKeys(merged, localValue, keys)
+}
+
+// DropUnresolvedPlaceholders removes excluded keys that are still the
+// store placeholder. The placeholder belongs in the center snapshot, not
+// in the tool file: pi treats a string packages value as a list of
+// characters and then shows each letter as a plugin.
+func DropUnresolvedPlaceholders(value orderedjson.Value, keys []string) orderedjson.Value {
+	object, ok := value.(*orderedjson.Object)
+	if !ok || object == nil || len(keys) == 0 {
+		return value
+	}
+	keySet := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keySet[key] = struct{}{}
+	}
+	out := &orderedjson.Object{Keys: make([]string, 0, len(object.Keys)), M: make(map[string]orderedjson.Value, len(object.M))}
+	changed := false
+	for _, key := range objectKeys(object) {
+		item := object.M[key]
+		if _, excluded := keySet[key]; excluded {
+			if text, ok := item.(string); ok && text == RequiredPlaceholder {
+				changed = true
+				continue
+			}
+		}
+		out.Keys = append(out.Keys, key)
+		out.M[key] = item
+	}
+	if !changed {
+		return value
+	}
+	return out
+}
+
+// OmitPlaceholderContent drops excluded placeholder keys from a JSON object
+// that is about to be written into a tool directory. Non-objects are unchanged.
+func OmitPlaceholderContent(content string, keys []string) string {
+	if len(keys) == 0 || !strings.Contains(content, RequiredPlaceholder) {
+		return content
+	}
+	value, ok := ParseJSONContent(content)
+	if !ok {
+		return content
+	}
+	dropped := DropUnresolvedPlaceholders(value, keys)
+	if dropped == value {
+		return content
+	}
+	return SerializeJSONContent(dropped)
 }
 
 func cloneSnapshot(snapshot core.AdapterSnapshot) core.AdapterSnapshot {

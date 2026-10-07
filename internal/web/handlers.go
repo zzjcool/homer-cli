@@ -17,6 +17,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 	"github.com/zzjcool/homer-cli/internal/sshkey"
+	"github.com/zzjcool/homer-cli/internal/upgrade"
 )
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -121,6 +122,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handlePull(w, r)
+	case path == "/api/upgrade":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleLocalUpgrade(w, r)
 	case path == "/api/sync/choices":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
@@ -338,10 +345,11 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		deps.UI = commands.HeadlessUI{}
 	}
 	report := commands.RunPush(commands.PushOptions{
-		HomerHome: s.opts.HomerHome,
-		Yes:       confirmValue(r),
-		Adapters:  adapters,
-		Overwrite: scope.Overwrite,
+		HomerHome:    s.opts.HomerHome,
+		Yes:          confirmValue(r),
+		Adapters:     adapters,
+		Overwrite:    scope.Overwrite,
+		AllowSecrets: scope.AllowSecrets,
 	}, deps)
 	s.afterLocalWrite()
 	writeWriteReport(w, report.OK, string(report.Status), report)
@@ -423,6 +431,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, _ *http.Request) {
 	agents := []AgentInfo{}
 	if s.opts.Agents != nil {
 		agents = append(agents, s.opts.Agents.ListAgents()...)
+	}
+	for i := range agents {
+		agents[i].Outdated = upgrade.IsNewer(Version, agents[i].Version)
 	}
 	writeJSON(w, http.StatusOK, struct {
 		OK     bool        `json:"ok"`
@@ -513,6 +524,12 @@ func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAgentKeys(w, r, agentID)
+	case "upgrade":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleAgentUpgrade(w, r, agentID)
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 	}
@@ -591,10 +608,28 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 			return
 		}
 	}
+	if confirmValue(r) {
+		if messages := s.dispatchUnlockErrors(scope); len(messages) > 0 {
+			code := "unlock-required"
+			status := http.StatusUnprocessableEntity
+			if len(messages) == 1 && messages[0] == "这台 hub 不能在机器上解开密钥" {
+				code = "agents-disabled"
+				status = http.StatusNotImplemented
+			}
+			writeError(w, status, code, "下发带了密钥，要先解开。", messages)
+			return
+		}
+	}
 	raw, err := s.opts.Agents.AgentPull(r.Context(), agentID, confirmValue(r), scope)
 	if err != nil {
 		writeErrorValue(w, err)
 		return
+	}
+	if confirmValue(r) && remoteReportOK(raw) {
+		if messages := s.unlockDispatched(r.Context(), agentID, scope); len(messages) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", "内容已经下发，但没有解开。", messages)
+			return
+		}
 	}
 	writeRemoteWriteReport(w, raw)
 }
@@ -639,6 +674,55 @@ func (s *Server) handleLocalSSHKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sshkey.Install(home, payload.GitHubUser, payload.SSHKeys))
+}
+
+func (s *Server) handleLocalUpgrade(w http.ResponseWriter, r *http.Request) {
+	if s.opts.LocalUpgrade == nil {
+		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
+		return
+	}
+	raw, err := s.opts.LocalUpgrade()
+	if err != nil {
+		writeErrorValue(w, err)
+		return
+	}
+	writeUpgradeReport(w, raw)
+}
+
+func (s *Server) handleAgentUpgrade(w http.ResponseWriter, r *http.Request, agentID string) {
+	upgrader, ok := s.opts.Agents.(interface {
+		AgentUpgrade(ctx context.Context, agentID string) (json.RawMessage, error)
+	})
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "这台 hub 不能更新机器上的程序", nil)
+		return
+	}
+	raw, err := upgrader.AgentUpgrade(r.Context(), agentID)
+	if err != nil {
+		writeErrorValue(w, err)
+		return
+	}
+	writeUpgradeReport(w, raw)
+}
+
+func writeUpgradeReport(w http.ResponseWriter, raw json.RawMessage) {
+	var report struct {
+		OK   bool   `json:"ok"`
+		Note string `json:"note"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &report) != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "机器没有返回更新结果", nil)
+		return
+	}
+	if !report.OK {
+		message := report.Note
+		if message == "" {
+			message = "更新没有完成"
+		}
+		writeError(w, http.StatusUnprocessableEntity, "upgrade-failed", message, nil)
+		return
+	}
+	writeJSONBytes(w, http.StatusOK, raw)
 }
 
 // handleAgentSSHKey fetches a GitHub user's public keys and asks the

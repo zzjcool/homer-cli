@@ -136,6 +136,15 @@ func TestScopedCollectIgnoresSecretsOutsideTheSelection(t *testing.T) {
 	if report.Status != PushStatusSecretsRejected || uploaded != nil {
 		t.Fatalf("secret collect status=%s uploaded=%v errors=%v", report.Status, uploaded, report.Errors)
 	}
+	if len(report.Errors) < 2 || !strings.Contains(report.Errors[1], "pi/") {
+		t.Fatalf("secret warning should name the file, errors=%v", report.Errors)
+	}
+
+	uploaded = nil
+	report = RunPush(PushOptions{HomerHome: paths.Home, Yes: true, Adapters: []string{"pi"}, AllowSecrets: true}, deps)
+	if !report.OK || report.Status != PushStatusPushed || len(uploaded) != 1 || uploaded[0].AdapterID != "pi" {
+		t.Fatalf("confirmed secret collect status=%s uploaded=%v errors=%v", report.Status, uploaded, report.Errors)
+	}
 }
 
 func TestScopedCollectRejectsBadSelections(t *testing.T) {

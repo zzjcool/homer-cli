@@ -104,7 +104,7 @@ const USAGE = `homer — dotfiles for humans and their AI agents
   serve     启动本地 hub：HTTP API + 网页控制台（默认 127.0.0.1:7760）
   agent     把本机接入 hub：--listen 被中心直连 / --connect 主动拨出
   version   打印 homer 版本（开发构建显示 dev；联网时提示新版本）
-  upgrade   自更新到最新 release（校验 SHA-256 后原子替换二进制）
+  upgrade   换成新版本，并重启正在运行的 agent
 
 全局选项:
   --home <dir>  homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
@@ -406,7 +406,7 @@ func commandUsage(command Command) string {
 	case CommandVersion:
 		return "用法: homer version\n\n打印版本；联网时顺带检查新版本并在有更新时提示 homer upgrade"
 	case CommandUpgrade:
-		return "用法: homer upgrade [options]\n\n检查最新 release 并自更新（下载 → SHA-256 校验 → 原子替换当前二进制）。\n\n选项: --force 即使无新版本也重装 -h, --help"
+		return "用法: homer upgrade [options]\n\n下载并替换当前程序。正在运行的 agent 会一起重启；没在跑的不会被拉起来。\n\n选项: --force 即使无新版本也重装 -h, --help"
 	default:
 		return fmt.Sprintf("用法: homer %s [options]", command)
 	}

@@ -161,11 +161,11 @@ func (d *Dispatcher) AgentPush(ctx context.Context, agentID string, confirm bool
 }
 
 func (d *Dispatcher) AgentPull(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
-	return d.writeAgent(ctx, agentID, TaskKindPull, taskOptionsForScope(confirm, scope))
+	return d.writeAgentFor(ctx, agentID, TaskKindPull, taskOptionsForScope(confirm, scope), 12*time.Minute)
 }
 
 func taskOptionsForScope(confirm bool, scope web.SyncScope) TaskOptions {
-	options := TaskOptions{Confirm: confirm, Overwrite: scope.Overwrite}
+	options := TaskOptions{Confirm: confirm, Overwrite: scope.Overwrite, AllowSecrets: scope.AllowSecrets}
 	if scope.Explicit {
 		options.Adapters = append([]string(nil), scope.Adapters...)
 	}
@@ -196,6 +196,27 @@ func (d *Dispatcher) AgentInstallSSHKeys(ctx context.Context, agentID, githubUse
 		return body, nil
 	}
 	return d.enqueueAndWait(ctx, info.AgentID, TaskKindSSHKey, options)
+}
+
+// AgentUpgrade asks one machine to replace its homer binary with the hub's
+// and restart its agent. Connect-mode machines receive a task; listen-mode
+// machines are dialed directly.
+func (d *Dispatcher) AgentUpgrade(ctx context.Context, agentID string) (json.RawMessage, error) {
+	info, err := d.agentInfo(agentID)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.requireOnline(agentID); err != nil {
+		return nil, err
+	}
+	if info.Mode == AgentModeListen {
+		body, err := d.direct(ctx, info, http.MethodPost, "upgrade", nil, []byte(`{}`), true)
+		if err != nil {
+			return nil, d.directError(err)
+		}
+		return body, nil
+	}
+	return d.enqueueAndWaitFor(ctx, info.AgentID, TaskKindUpgrade, TaskOptions{Confirm: true}, 3*time.Minute)
 }
 
 // AgentKey runs a keyring command on one machine. The password stays inside
@@ -238,6 +259,10 @@ func (d *Dispatcher) AgentResolve(ctx context.Context, agentID, choice string) (
 }
 
 func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKind, options TaskOptions) (json.RawMessage, error) {
+	return d.writeAgentFor(ctx, agentID, kind, options, dispatcherTimeout)
+}
+
+func (d *Dispatcher) writeAgentFor(ctx context.Context, agentID string, kind TaskKind, options TaskOptions, wait time.Duration) (json.RawMessage, error) {
 	info, err := d.agentInfo(agentID)
 	if err != nil {
 		return nil, err
@@ -253,6 +278,9 @@ func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKi
 		if options.Overwrite {
 			query.Set("overwrite", "true")
 		}
+		if options.AllowSecrets {
+			query.Set("allowSecrets", "true")
+		}
 		if options.Resolve != "" {
 			query.Set("resolve", options.Resolve)
 		}
@@ -266,7 +294,7 @@ func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKi
 		}
 		raw = body
 	case AgentModeConnect:
-		body, err := d.enqueueAndWait(ctx, info.AgentID, kind, options)
+		body, err := d.enqueueAndWaitFor(ctx, info.AgentID, kind, options, wait)
 		if err != nil {
 			return nil, err
 		}
@@ -321,6 +349,10 @@ func (d *Dispatcher) requireOnline(agentID string) error {
 }
 
 func (d *Dispatcher) enqueueAndWait(ctx context.Context, agentID string, kind TaskKind, options TaskOptions) (json.RawMessage, error) {
+	return d.enqueueAndWaitFor(ctx, agentID, kind, options, dispatcherTimeout)
+}
+
+func (d *Dispatcher) enqueueAndWaitFor(ctx context.Context, agentID string, kind TaskKind, options TaskOptions, wait time.Duration) (json.RawMessage, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -342,7 +374,7 @@ func (d *Dispatcher) enqueueAndWait(ctx context.Context, agentID string, kind Ta
 		// registry was concurrently replaced), rather than a missing agent.
 		return nil, newAgentError("agent-unreachable", http.StatusBadGateway, err)
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, dispatcherTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	result, err := d.Registry.Wait(waitCtx, task.TaskID)
 	if err != nil {

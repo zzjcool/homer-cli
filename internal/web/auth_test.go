@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -275,6 +276,53 @@ func TestJoinCommandRequiresAuth(t *testing.T) {
 		t.Fatal("join response missing the install-pipe command")
 	}
 }
+
+func TestJoinStatusTurnsInactiveWhenCodeIsUsed(t *testing.T) {
+	fixture := authFixture(t)
+	book := &joinCodeBook{live: map[string]bool{}}
+	server, err := NewServer(ServeOptions{
+		Addr:       "127.0.0.1:0",
+		HomerHome:  fixture.home,
+		Token:      "hub-token-x",
+		Enrollment: book,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	issued := requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x")
+	var joined map[string]any
+	if issued.Code != http.StatusOK || json.Unmarshal(issued.Body.Bytes(), &joined) != nil || joined["code"] != "hr_once" {
+		t.Fatalf("join = %d %s", issued.Code, issued.Body)
+	}
+	active := requestWithToken(t, handler, http.MethodGet, "/api/auth/join/status?code=hr_once", "hub-token-x")
+	var activeBody map[string]any
+	if active.Code != http.StatusOK || json.Unmarshal(active.Body.Bytes(), &activeBody) != nil || activeBody["active"] != true {
+		t.Fatalf("active = %d %s", active.Code, active.Body)
+	}
+	delete(book.live, "hr_once")
+	used := requestWithToken(t, handler, http.MethodGet, "/api/auth/join/status?code=hr_once", "hub-token-x")
+	var usedBody map[string]any
+	if used.Code != http.StatusOK || json.Unmarshal(used.Body.Bytes(), &usedBody) != nil || usedBody["active"] != false {
+		t.Fatalf("used = %d %s", used.Code, used.Body)
+	}
+	if response := request(t, handler, http.MethodGet, "/api/auth/join/status?code=hr_once"); response.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d", response.Code)
+	}
+}
+
+type joinCodeBook struct {
+	live map[string]bool
+}
+
+func (b *joinCodeBook) Mint(time.Duration) (string, error) {
+	b.live["hr_once"] = true
+	return "hr_once", nil
+}
+
+func (b *joinCodeBook) ValidCode(code string) bool { return b.live[code] }
+
+func (b *joinCodeBook) Revoke(string) bool { return false }
 
 // Deleting the administrator password returns the hub to first-run and
 // rejects session cookies. Replacing the file does not.

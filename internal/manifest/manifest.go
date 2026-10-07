@@ -17,6 +17,7 @@ import (
 	"github.com/kballard/go-shellquote"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/shellenv"
 )
 
 // CommandPort abstracts external command execution. Production uses
@@ -296,24 +297,43 @@ func (buffer *limitedBuffer) Write(data []byte) (int, error) {
 }
 
 func minimalCommandEnv() []string {
+	path := shellenv.Path()
 	keys := []string{"PATH", "HOME", "TERM", "LANG"}
 	env := make([]string, 0, len(keys))
 	for _, key := range keys {
 		value, _ := os.LookupEnv(key)
+		if key == "PATH" {
+			value = path
+		}
 		env = append(env, key+"="+value)
 	}
 	return env
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }
 
 func run(argv []string, timeout time.Duration) ([]byte, error) {
 	// argv comes from the user's own homer.json listCmd/applyCmd (trusted
 	// local config, never remote input); the sandboxing below (timeout,
 	// minimal env, output cap) is hygiene, not a security boundary.
+	// Resolve PATH before the command timeout starts. A login shell can
+	// take longer than a short command budget, and it is not the command.
+	env := minimalCommandEnv()
+	if resolved, err := shellenv.LookIn(argv[0], envValue(env, "PATH")); err == nil && resolved != "" {
+		argv[0] = resolved
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Env = minimalCommandEnv()
+	cmd.Env = env
 	// Manifest commands may spawn descendants. Keep the command in its own
 	// process group so timeout cancellation cannot leave a child holding the
 	// stdout pipe open indefinitely.

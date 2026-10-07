@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/shellenv"
 )
 
 // runTar extracts the archive with the system tar inside a bounded timeout
@@ -15,7 +17,12 @@ import (
 func runTar(archivePath, dir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "tar", "-xzf", archivePath, "-C", dir)
+	tarBin, env, err := shellenv.Resolve("tar", os.Environ())
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, tarBin, "-xzf", archivePath, "-C", dir)
+	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {

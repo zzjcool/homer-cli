@@ -30,7 +30,18 @@ func TestConsoleUserCopy(t *testing.T) {
 		"全部对齐",
 		"收取", "下发", "确认收取", "确认下发", "/api/sync?",
 		"/api/sync/choices", "勾选要动的适配器", "body: { adapters: adapters }",
-		"全选", "清除",
+		"全选", "反选", "全不选",
+		"密钥跟着这次一起",
+		"口令只在这一步使用",
+		"下一步", "上一步", "先解开这些密钥，然后才会下发。",
+		"机器用这个接入码连上之后，窗口会自己关上。",
+		"密钥还没收到中心，这次不会一起下发：",
+		"插件没有安装成功",
+		"更新程序", "全部更新", "a.outdated",
+		"但有插件没有装上",
+		"正在下发并解开…",
+		"缺的会逐个下载安装，请留在这个窗口，装完才会结束。",
+		"item.id === \"keyring\" && app.scopeDirection !== \"resolve\"",
 		"以这台机器为准", "以中心为准", "/api/resolve?",
 		"需要现在选择保留哪一边",
 		"没有冲突的内容已经写到",
@@ -41,6 +52,7 @@ func TestConsoleUserCopy(t *testing.T) {
 		"正在向这台机器实时查询", "未收取", "待下发",
 		// 机器卡片上的资源快照（agent 心跳上报）
 		"内存", "网卡", "负载", "磁盘", "已运行", "等待机器上报系统信息",
+		"上次心跳", "版本未上报", "还没有心跳",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)

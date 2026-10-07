@@ -21,7 +21,7 @@ import (
 type Executor interface {
 	Status(ctx context.Context) (commands.StatusReport, error)
 	Diff(ctx context.Context, params web.DiffParams) (string, error)
-	Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error)
+	Push(ctx context.Context, confirm bool, adapters []string, overwrite bool, allowSecrets bool) (commands.PushReport, error)
 	Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error)
 }
 
@@ -142,7 +142,7 @@ func (e *localExecutor) Diff(ctx context.Context, params web.DiffParams) (string
 	return text, nil
 }
 
-func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error) {
+func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool, allowSecrets bool) (commands.PushReport, error) {
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err
 	}
@@ -174,10 +174,11 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []strin
 		}
 	}
 	report := commands.RunPush(commands.PushOptions{
-		HomerHome: e.homerHome,
-		Yes:       confirm,
-		Adapters:  adapters,
-		Overwrite: overwrite,
+		HomerHome:    e.homerHome,
+		Yes:          confirm,
+		Adapters:     adapters,
+		Overwrite:    overwrite,
+		AllowSecrets: allowSecrets,
 	}, deps)
 	if err := contextError(ctx); err != nil {
 		return commands.PushReport{}, err

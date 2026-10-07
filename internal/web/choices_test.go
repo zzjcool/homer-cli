@@ -195,6 +195,9 @@ func TestSyncChoicesEndpoint(t *testing.T) {
 	if !strings.Contains(dispatch.Body.String(), `"id":"vscode"`) || strings.Contains(dispatch.Body.String(), "only-local") {
 		t.Fatalf("dispatch body = %s", dispatch.Body)
 	}
+	if !strings.Contains(dispatch.Body.String(), "口令能解开才会下发") {
+		t.Fatalf("dispatch hint = %s", dispatch.Body)
+	}
 
 	fresh := &sourceStub{statusRaw: []byte(`{"adapters":[],"errors":["未找到 homer 配置: /tmp/homer.json"]}`)}
 	freshServer := newWebServer(t, fixture, "test-token", fresh, nil)

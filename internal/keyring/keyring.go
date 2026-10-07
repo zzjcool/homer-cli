@@ -6,7 +6,9 @@ package keyring
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -36,11 +39,14 @@ const (
 // Command is one keyring operation. Password fields are inputs only and are
 // never copied into Result.
 type Command struct {
-	Action      string `json:"action"`
-	ID          string `json:"id,omitempty"`
-	Name        string `json:"name,omitempty"`
-	File        string `json:"file,omitempty"`
-	Path        string `json:"path,omitempty"`
+	Action string `json:"action"`
+	ID     string `json:"id,omitempty"`
+	Name   string `json:"name,omitempty"`
+	File   string `json:"file,omitempty"`
+	Path   string `json:"path,omitempty"`
+	// Adapter is the module this file follows. Collecting or dispatching
+	// that module also carries the keyring.
+	Adapter     string `json:"adapter,omitempty"`
 	Password    string `json:"password,omitempty"`
 	NewPassword string `json:"newPassword,omitempty"`
 	WorkFactor  int    `json:"-"`
@@ -50,6 +56,9 @@ type Command struct {
 type FileInfo struct {
 	ID          string `json:"id"`
 	Destination string `json:"destination"`
+	// Adapter is the module this ciphertext travels with. Empty means the
+	// file is only in the keyring, not tied to a sync.
+	Adapter string `json:"adapter,omitempty"`
 }
 
 // Summary is safe to return to a client. It has no key material.
@@ -59,13 +68,21 @@ type Summary struct {
 	Files []FileInfo `json:"files"`
 }
 
+// PathEntry is one child of the directory the console is browsing.
+type PathEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Dir  bool   `json:"dir"`
+}
+
 // Result is the JSON report for CLI and the console.
 type Result struct {
-	OK      bool      `json:"ok"`
-	Status  string    `json:"status,omitempty"`
-	Keys    []Summary `json:"keys,omitempty"`
-	Written []string  `json:"written,omitempty"`
-	Errors  []string  `json:"errors,omitempty"`
+	OK      bool        `json:"ok"`
+	Status  string      `json:"status,omitempty"`
+	Keys    []Summary   `json:"keys,omitempty"`
+	Written []string    `json:"written,omitempty"`
+	Entries []PathEntry `json:"entries,omitempty"`
+	Errors  []string    `json:"errors,omitempty"`
 }
 
 type manifest struct {
@@ -91,8 +108,12 @@ func Apply(homerHome string, cmd Command) Result {
 		return encrypt(paths, cmd)
 	case "unlock":
 		return unlock(paths, cmd)
+	case "check":
+		return check(paths, cmd)
 	case "passwd":
 		return passwd(paths, cmd)
+	case "browse":
+		return browse(cmd)
 	default:
 		return fail("bad-action", "未知的密钥操作")
 	}
@@ -105,20 +126,27 @@ func list(paths core.HomerPaths) Result {
 	// on this process, so it is merged in and does not hide the center.
 	merged := map[string]Summary{}
 	order := []string{}
-	add := func(items []Summary) {
+	add := func(items []Summary, overlay bool) {
 		for _, item := range items {
-			if _, ok := merged[item.ID]; !ok {
+			prev, ok := merged[item.ID]
+			if !ok {
 				order = append(order, item.ID)
+				merged[item.ID] = item
+				continue
 			}
-			merged[item.ID] = item
+			if overlay {
+				// A file encrypted on this machine but not yet collected
+				// must stay visible. The center still wins when both
+				// sides have the same file id.
+				merged[item.ID] = overlayKeyFiles(prev, item)
+			}
 		}
 	}
 	if local, ok := readAll(localItems(paths)); ok {
-		add(local)
+		add(local, false)
 	}
-	// Center is applied second so a collected key replaces a stale local copy.
 	if center, ok := readAll(centerItems(paths)); ok {
-		add(center)
+		add(center, true)
 	}
 	keys := make([]Summary, 0, len(order))
 	for _, id := range order {
@@ -129,8 +157,11 @@ func list(paths core.HomerPaths) Result {
 }
 
 func create(paths core.HomerPaths, cmd Command) Result {
-	id := strings.TrimSpace(cmd.ID)
 	name := strings.TrimSpace(cmd.Name)
+	id := strings.TrimSpace(cmd.ID)
+	if id == "" {
+		id = uniqueKeyID(paths, slugID(name))
+	}
 	if name == "" {
 		name = id
 	}
@@ -162,8 +193,8 @@ func encrypt(paths core.HomerPaths, cmd Command) Result {
 	id := strings.TrimSpace(cmd.ID)
 	fileID := strings.TrimSpace(cmd.File)
 	destination := strings.TrimSpace(cmd.Path)
-	if !validID(id) || !validID(fileID) {
-		return fail("invalid", "密钥 id 和文件 id 都要是合法名称")
+	if !validID(id) {
+		return fail("invalid", "密钥 id 需要以字母或数字开头，其余只能是字母、数字、点、下划线或横线")
 	}
 	if !validDestination(destination) {
 		return fail("invalid", "路径要以 ~ 或 / 开头")
@@ -174,6 +205,16 @@ func encrypt(paths core.HomerPaths, cmd Command) Result {
 	doc, envelope, blobs, err := readKey(paths, id)
 	if err != nil {
 		return fail("missing", err.Error())
+	}
+	if fileID == "" {
+		fileID = fileIDFromPath(destination, doc.Files)
+	}
+	if !validID(fileID) {
+		return fail("invalid", "文件 id 需要以字母或数字开头，其余只能是字母、数字、点、下划线或横线")
+	}
+	adapter := strings.TrimSpace(cmd.Adapter)
+	if adapter == keys.AdapterID || (adapter != "" && !core.ValidAdapterID(adapter)) {
+		return fail("invalid", "要绑定一个适配器，例如 pi")
 	}
 	secret, err := openIdentity(envelope, cmd.Password)
 	if err != nil {
@@ -196,11 +237,28 @@ func encrypt(paths core.HomerPaths, cmd Command) Result {
 		return fail("error", err.Error())
 	}
 	blobs[fileID] = ciphertext
-	doc.Files = upsertFile(doc.Files, FileInfo{ID: fileID, Destination: destination})
+	doc.Files = upsertFile(doc.Files, FileInfo{ID: fileID, Destination: destination, Adapter: adapter})
 	if err := writeKey(paths, doc, envelope, blobs); err != nil {
 		return fail("error", err.Error())
 	}
 	return Result{OK: true, Status: "encrypted", Keys: []Summary{summaryOf(doc)}}
+}
+
+// check opens the envelope and stops. It does not write plaintext, so a
+// dispatch can refuse a forgotten password before anything is sent.
+func check(paths core.HomerPaths, cmd Command) Result {
+	id := strings.TrimSpace(cmd.ID)
+	if err := checkPassword(cmd.Password); err != nil {
+		return fail("invalid", err.Error())
+	}
+	doc, envelope, _, err := readKey(paths, id)
+	if err != nil {
+		return fail("missing", err.Error())
+	}
+	if _, err := openIdentity(envelope, cmd.Password); err != nil {
+		return fail("bad-password", "口令不正确")
+	}
+	return Result{OK: true, Status: "checked", Keys: []Summary{summaryOf(doc)}}
 }
 
 func unlock(paths core.HomerPaths, cmd Command) Result {
@@ -269,6 +327,96 @@ func passwd(paths core.HomerPaths, cmd Command) Result {
 		return fail("error", err.Error())
 	}
 	return Result{OK: true, Status: "rotated", Keys: []Summary{summaryOf(doc)}}
+}
+
+const browseLimit = 80
+
+// browse lists the directory under cmd.Path. A path that already names a
+// directory shows its children. A partial last segment filters those names.
+func browse(cmd Command) Result {
+	raw := strings.TrimSpace(cmd.Path)
+	if strings.Contains(raw, "..") {
+		return fail("invalid", "路径不能包含 ..")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fail("error", "无法确定用户主目录")
+	}
+	if raw == "" || raw == "~" {
+		raw = "~/"
+	}
+	tilde := false
+	var abs string
+	switch {
+	case raw == "~" || strings.HasPrefix(raw, "~/"):
+		tilde = true
+		rest := strings.TrimPrefix(strings.TrimPrefix(raw, "~"), "/")
+		abs = home
+		if rest != "" {
+			abs = filepath.Join(home, filepath.FromSlash(rest))
+		}
+	case strings.HasPrefix(raw, "/"):
+		abs = filepath.Clean(raw)
+	default:
+		return fail("invalid", "路径要以 ~ 或 / 开头")
+	}
+	listDir := abs
+	prefix := ""
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		listDir = abs
+	} else {
+		listDir = filepath.Dir(abs)
+		prefix = filepath.Base(abs)
+	}
+	dirEntries, err := os.ReadDir(listDir)
+	if err != nil {
+		return Result{OK: true, Status: "browsed", Entries: []PathEntry{}}
+	}
+	out := make([]PathEntry, 0)
+	for _, entry := range dirEntries {
+		name := entry.Name()
+		if prefix != "" && !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		full := filepath.Join(listDir, name)
+		dir := entry.IsDir()
+		if entry.Type()&os.ModeSymlink != 0 {
+			if info, err := os.Stat(full); err == nil {
+				dir = info.IsDir()
+			}
+		}
+		out = append(out, PathEntry{Name: name, Path: browsePath(home, tilde, full, dir), Dir: dir})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Dir != out[j].Dir {
+			return out[i].Dir
+		}
+		return out[i].Name < out[j].Name
+	})
+	if len(out) > browseLimit {
+		out = out[:browseLimit]
+	}
+	return Result{OK: true, Status: "browsed", Entries: out}
+}
+
+func browsePath(home string, tilde bool, abs string, dir bool) string {
+	var out string
+	if tilde {
+		rel, err := filepath.Rel(home, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			out = filepath.ToSlash(abs)
+		} else if rel == "." {
+			out = "~/"
+		} else {
+			out = "~/" + filepath.ToSlash(rel)
+		}
+	} else {
+		out = filepath.ToSlash(abs)
+	}
+	if dir && !strings.HasSuffix(out, "/") {
+		out += "/"
+	}
+	return out
 }
 
 func ensureAdapter(paths core.HomerPaths) error {
@@ -486,6 +634,45 @@ func upsertFile(files []FileInfo, next FileInfo) []FileInfo {
 	return out
 }
 
+// overlayKeyFiles unions two copies of one key. Files that exist only on
+// the base stay. A file id present on both sides keeps the extra copy.
+func overlayKeyFiles(base, extra Summary) Summary {
+	out := extra
+	if out.ID == "" {
+		out.ID = base.ID
+	}
+	if out.Name == "" {
+		out.Name = base.Name
+	}
+	files := map[string]FileInfo{}
+	order := make([]string, 0, len(base.Files)+len(extra.Files))
+	put := func(file FileInfo, replace bool) {
+		if file.ID == "" {
+			return
+		}
+		if _, ok := files[file.ID]; ok {
+			if replace {
+				files[file.ID] = file
+			}
+			return
+		}
+		order = append(order, file.ID)
+		files[file.ID] = file
+	}
+	for _, file := range base.Files {
+		put(file, false)
+	}
+	for _, file := range extra.Files {
+		put(file, true)
+	}
+	out.Files = make([]FileInfo, 0, len(order))
+	for _, id := range order {
+		out.Files = append(out.Files, files[id])
+	}
+	sort.Slice(out.Files, func(i, j int) bool { return out.Files[i].ID < out.Files[j].ID })
+	return out
+}
+
 func summaryOf(doc manifest) Summary {
 	files := append([]FileInfo(nil), doc.Files...)
 	if files == nil {
@@ -551,6 +738,85 @@ func resolvePaths(home string) core.HomerPaths {
 		}
 		return os.Getenv(name)
 	})
+}
+
+// uniqueKeyID picks a directory name. A usable slug is kept; otherwise the
+// name is not a legal directory (for example a Chinese label) and a short
+// random id is used. Callers never have to invent one.
+func uniqueKeyID(paths core.HomerPaths, prefer string) string {
+	if validID(prefer) {
+		if _, err := findKeyDir(paths, prefer); err != nil {
+			return prefer
+		}
+	}
+	prefix := "k"
+	if validID(prefer) {
+		prefix = prefer
+	}
+	for range 8 {
+		buf := make([]byte, 3)
+		if _, err := rand.Read(buf); err != nil {
+			break
+		}
+		id := prefix + "-" + hex.EncodeToString(buf)
+		if _, err := findKeyDir(paths, id); err != nil {
+			return id
+		}
+	}
+	return prefix + "-" + strconv.FormatInt(int64(os.Getpid()), 36)
+}
+
+func slugID(name string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(name) {
+		ok := r >= 'a' && r <= 'z' || r >= '0' && r <= '9'
+		if !ok && (r == '.' || r == '_' || r == '-' || r == ' ') {
+			if b.Len() > 0 && !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+			continue
+		}
+		if !ok {
+			continue
+		}
+		b.WriteRune(r)
+		lastDash = false
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// fileIDFromPath names the ciphertext after the file. The same destination
+// keeps its existing name so encrypting it again replaces that copy.
+func fileIDFromPath(destination string, files []FileInfo) string {
+	for _, file := range files {
+		if file.Destination == destination && validID(file.ID) {
+			return file.ID
+		}
+	}
+	base := filepath.Base(filepath.Clean(destination))
+	id := base
+	if !validID(id) {
+		id = slugID(base)
+	}
+	if !validID(id) {
+		id = "file"
+	}
+	used := map[string]struct{}{}
+	for _, file := range files {
+		used[file.ID] = struct{}{}
+	}
+	if _, taken := used[id]; !taken {
+		return id
+	}
+	for n := 2; n < 1000; n++ {
+		next := id + "-" + strconv.Itoa(n)
+		if _, taken := used[next]; !taken && validID(next) {
+			return next
+		}
+	}
+	return id + "-x"
 }
 
 func validID(value string) bool {

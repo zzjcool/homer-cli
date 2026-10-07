@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/shellenv"
 )
 
 // ExecResult is the non-throwing result of a git subprocess.
@@ -66,7 +68,12 @@ func executeGit(home string, args []string, timeout time.Duration) commandOutput
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	gitBin, env, err := shellenv.Resolve("git", os.Environ())
+	if err != nil {
+		return commandOutput{err: err}
+	}
+	cmd := exec.CommandContext(ctx, gitBin, args...)
+	cmd.Env = env
 	if home != "" {
 		cmd.Dir = home
 	}
@@ -88,7 +95,7 @@ func executeGit(home string, args []string, timeout time.Duration) commandOutput
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 
 	return commandOutput{
 		stdout:   append([]byte(nil), stdout.Bytes()...),

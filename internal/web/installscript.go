@@ -97,6 +97,27 @@ if [ "$GOOS_ACTUAL" = "$GOOS_EXPECT" ] && [ "$GOARCH_ACTUAL" = "$GOARCH_EXPECT" 
   chmod 755 "$BIN_DIR/homer.tmp"
   mv "$BIN_DIR/homer.tmp" "$BIN_DIR/homer"
   echo ">> 已安装到 $BIN_DIR/homer"
+  # ~/.local/bin 在桌面登录里通常已经进了 PATH。容器里的 sh 不会读
+  # 那份配置，所以再链到默认 PATH 里的 /usr/local/bin。没有写权限就只
+  # 把目录记进 shell 启动文件，下一次交互式 shell 能找到命令。
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+      if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+        ln -sfn "$BIN_DIR/homer" /usr/local/bin/homer
+        echo ">> 已链接到 /usr/local/bin/homer，可以直接运行 homer"
+      else
+        path_line='export PATH="$HOME/.local/bin:$PATH"'
+        for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+          if [ -f "$rc" ] && grep -q '.local/bin' "$rc" 2>/dev/null; then
+            continue
+          fi
+          printf '\n%s\n' "$path_line" >> "$rc"
+        done
+        echo ">> 当前 shell 还找不到 homer。新开一个终端，或执行: export PATH=\"\$HOME/.local/bin:\$PATH\""
+      fi
+      ;;
+  esac
 else
   # 3. 平台不匹配 → 源码构建指引（hub 二进制仅覆盖自身平台）
   echo "!! 平台不匹配（本机 $GOOS_ACTUAL/$GOARCH_ACTUAL，hub 提供 $GOOS_EXPECT/$GOARCH_EXPECT）"
@@ -106,10 +127,10 @@ else
   echo "   （需要 Go 1.22+；token 已写入 $HOMER_HOME/keys/hub-token）"
 fi
 
-# 4. 零参数接入（token 从文件、hub 地址从脚本尾部参数）。
-#    agent 是常驻 daemon——放后台跑（nohup），终端立刻归还给用户。
-#    前台 exec 会占住 ssh 会话：用户以为卡住、Ctrl+C、agent 死、
-#    机器列表停在"等待首次心跳"。
+# 4. 零参数接入。和 Tailscale 一样：安装脚本自己退出，daemon 交给
+#    服务管理器在后台跑（systemctl enable --now）。没有 systemd 的
+#    环境才退回 nohup。容器里如果没有常驻的主进程，光 nohup 也会
+#    跟着容器一起停。
 AGENT_BIN=""
 if [ -x "$BIN_DIR/homer" ]; then AGENT_BIN="$BIN_DIR/homer"; fi
 if [ -z "$AGENT_BIN" ] && command -v homer >/dev/null 2>&1; then AGENT_BIN="$(command -v homer)"; fi
@@ -118,16 +139,75 @@ if [ -n "$LISTEN" ] && [ -z "$ADVERTISE" ]; then
   exit 1
 fi
 if [ -n "$AGENT_BIN" ]; then
-  LOG="$HOMER_HOME/agent.log"
   if [ -n "$LISTEN" ]; then
-    nohup "$AGENT_BIN" agent --listen "$LISTEN" --advertise "$ADVERTISE" --hub "$HUB" >>"$LOG" 2>&1 &
-    echo ">> agent 已在后台启动（中心直连 $ADVERTISE，日志: $LOG，PID: $!）"
+    AGENT_ARGS="agent --listen $LISTEN --advertise $ADVERTISE --hub $HUB"
   else
-    nohup "$AGENT_BIN" agent --connect "$HUB" >>"$LOG" 2>&1 &
-    echo ">> agent 已在后台启动（机器上报，日志: $LOG，PID: $!）"
+    AGENT_ARGS="agent --connect $HUB"
+  fi
+  started=0
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      mkdir -p /etc/systemd/system
+      cat > /etc/systemd/system/homer-agent.service <<EOF
+[Unit]
+Description=homer agent
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=$HOME
+Environment=HOMER_HOME=$HOMER_HOME
+ExecStart=$AGENT_BIN $AGENT_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      if systemctl daemon-reload && systemctl enable --now homer-agent.service; then
+        echo ">> agent 已交给 systemd 在后台运行（homer-agent.service）"
+        started=1
+      fi
+    elif [ -n "${XDG_RUNTIME_DIR:-}" ] && systemctl --user show-environment >/dev/null 2>&1; then
+      unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+      mkdir -p "$unit_dir"
+      cat > "$unit_dir/homer-agent.service" <<EOF
+[Unit]
+Description=homer agent
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=$HOME
+Environment=HOMER_HOME=$HOMER_HOME
+ExecStart=$AGENT_BIN $AGENT_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+      if systemctl --user daemon-reload && systemctl --user enable --now homer-agent.service; then
+        echo ">> agent 已交给用户服务在后台运行（homer-agent.service）"
+        started=1
+      fi
+    fi
+  fi
+  if [ "$started" -eq 0 ]; then
+    LOG="$HOMER_HOME/agent.log"
+    # setsid 让 agent 脱离安装脚本，脚本可以马上退出。
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$AGENT_BIN" $AGENT_ARGS >>"$LOG" 2>&1 < /dev/null &
+    else
+      nohup "$AGENT_BIN" $AGENT_ARGS >>"$LOG" 2>&1 &
+    fi
+    echo ">> agent 已在后台启动（日志: $LOG，PID: $!）"
+    if [ -f /.dockerenv ]; then
+      echo ">> 这个容器没有 systemd。请让容器自己保持运行，否则主进程退出时 agent 会一起停。"
+    fi
   fi
   echo ">> 几秒后刷新控制台，这台机器会出现在机器列表。"
-  echo ">> 停止: pkill -f 'homer agent'"
+  echo ">> 停止: systemctl stop homer-agent，或 pkill -f 'homer agent'"
 else
   echo ">> homer agent 未在 PATH，token 已保存；装好后运行:"
   if [ -n "$LISTEN" ]; then

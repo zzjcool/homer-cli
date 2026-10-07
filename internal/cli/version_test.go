@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/zzjcool/homer-cli/internal/web"
 )
 
 func TestVersionAndVersionFlagPrintDevelopmentVersion(t *testing.T) {
@@ -26,7 +28,11 @@ func TestVersionAndVersionFlagPrintDevelopmentVersion(t *testing.T) {
 
 func TestSetVersionFeedsVersionCommand(t *testing.T) {
 	old := version
-	t.Cleanup(func() { version = old })
+	oldWeb := web.Version
+	t.Cleanup(func() {
+		version = old
+		web.Version = oldWeb
+	})
 	t.Setenv("HOMER_NO_VERSION_CHECK", "1")
 	SetVersion("v1.1.0-test")
 	var out, errOut bytes.Buffer
@@ -35,5 +41,8 @@ func TestSetVersionFeedsVersionCommand(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out.String()); got != "homer version: v1.1.0-test" {
 		t.Fatalf("injected version output = %q", got)
+	}
+	if web.Version != "v1.1.0-test" {
+		t.Fatalf("hub version = %q", web.Version)
 	}
 }

@@ -104,6 +104,9 @@ func (r *Registry) Register(info AgentInfo) error {
 		if info.Drift == nil {
 			info.Drift = agent.info.Drift
 		}
+		if info.Version == "" {
+			info.Version = agent.info.Version
+		}
 		agent.info = info
 		return nil
 	}
@@ -125,6 +128,22 @@ func (r *Registry) SetDialSecret(agentID, secret string) {
 	if agent, ok := r.agents[agentID]; ok {
 		agent.info.DialSecret = secret
 	}
+}
+
+// UpdateVersion records the program version from a heartbeat. An empty
+// report leaves the previous value in place.
+func (r *Registry) UpdateVersion(agentID, version string) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, ok := r.agents[agentID]
+	if !ok {
+		return
+	}
+	agent.info.Version = version
 }
 
 // UpdateDrift caches a machine's self-reported status summary.

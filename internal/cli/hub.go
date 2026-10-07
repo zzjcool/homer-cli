@@ -66,7 +66,12 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	}
 	registry := hub.NewRegistry()
 	dispatcher := hub.NewDispatcher(registry, token)
-	enrollment := hub.NewEnrollmentManager()
+	enrollment, enrollErr := hub.OpenEnrollment(paths.Home)
+	if enrollErr != nil {
+		_ = listener.Close()
+		writeLine(errOut, fmt.Sprintf("homer serve: %s", enrollErr.Error()))
+		return 1
+	}
 	agentAPI := hub.NewAgentAPI(registry, token).SetEnrollment(enrollment)
 	server, err := web.NewServer(web.ServeOptions{
 		Addr:                    boundAddr,
@@ -113,7 +118,9 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	httpServer := &http.Server{
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      90 * time.Second,
+		// Pull can spend several minutes installing plugins. The write
+		// budget has to cover that wait; agent polls finish well inside it.
+		WriteTimeout: 13 * time.Minute,
 	}
 	// Graceful shutdown: SIGINT/SIGTERM drains in-flight requests before the
 	// process exits, matching the pair command's NotifyContext pattern.

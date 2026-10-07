@@ -24,7 +24,10 @@ func TestRenderInstallScript(t *testing.T) {
 		"--connect-timeout 20",
 		"keys/hub-token",
 		"homer agent --connect",
+		"systemctl enable --now homer-agent.service",
+		"setsid \"$AGENT_BIN\" $AGENT_ARGS",
 		"chmod 600",
+		"ln -sfn \"$BIN_DIR/homer\" /usr/local/bin/homer",
 		`Authorization: Bearer $TOKEN`,
 	} {
 		if !strings.Contains(script, want) {

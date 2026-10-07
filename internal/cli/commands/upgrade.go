@@ -132,7 +132,6 @@ func RunUpgrade(opts UpgradeOptions) UpgradeReport {
 	}
 
 	write(">> 已升级: %s（%d 字节, sha256 %s）", self, size, hex.EncodeToString(hasher.Sum(nil))[:16])
-	write(">> 重启 agent 后生效: pkill -f 'homer agent'; nohup %s agent --connect %s >> %s/agent.log 2>&1 &", self, hubURL, paths.Home)
 	return UpgradeReport{
 		OK: true, Status: "upgraded", FromHub: hubURL, Binary: self,
 		SizeBytes: size, Hash: hex.EncodeToString(hasher.Sum(nil)),

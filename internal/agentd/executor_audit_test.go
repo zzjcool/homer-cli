@@ -13,7 +13,7 @@ import (
 func TestLocalExecutorConfirmDoesNotInit(t *testing.T) {
 	home := t.TempDir()
 	executor := NewLocalExecutor(home)
-	pushReport, err := executor.Push(context.Background(), true, nil, false)
+	pushReport, err := executor.Push(context.Background(), true, nil, false, false)
 	if err == nil && pushReport.OK {
 		t.Fatal("push on uninitialized home must not succeed")
 	}

@@ -508,6 +508,30 @@ func TestScanPiPackagesPinsInstalledVersion(t *testing.T) {
 	}
 }
 
+func TestScanPiPackagesIgnoresPlaceholderLettersWithoutIDPattern(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, "npm/node_modules/pi-lens/package.json", "{\"name\":\"pi-lens\",\"version\":\"4.3.0\"}\n")
+	port := &fakeManifestPort{output: []byte("User packages:\n  _\n  R\n  E\n  npm:pi-lens\n    /tmp/pi-lens\n")}
+	outcome := adapter.ScanAdapter("pi", core.AdapterConfig{
+		Root: root,
+		Categories: map[string]core.CategoryConfig{
+			"packages": {
+				Kind:     manifestKind(),
+				Mode:     core.SyncModeMirror,
+				ListCmd:  "pi list",
+				ApplyCmd: "pi install",
+			},
+		},
+	}, adapter.ScanDeps{Commands: port})
+	if len(outcome.Errors) != 0 {
+		t.Fatalf("errors = %#v", outcome.Errors)
+	}
+	got := category(t, outcome.Snapshot, "packages").Files[manifest.VirtualFileName("packages")].Content
+	if got != "npm:pi-lens@4.3.0\n" {
+		t.Fatalf("manifest = %q", got)
+	}
+}
+
 func TestScanManifestFailureDoesNotBlockOtherCategories(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, "settings.json", "settings\n")

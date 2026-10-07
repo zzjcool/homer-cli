@@ -43,6 +43,91 @@ func SplitManifestActions(config core.HomerConfig, plan PullPlan, local []core.A
 	return remaining, tasks, warnings
 }
 
+// SupplementManifestInstalls installs center IDs the machine does not
+// currently list, even when the file drift looks like a local deletion.
+// A dispatch records the manifest as the new baseline after `pi install`
+// fails or never runs. The next dispatch then sees "the machine removed
+// these" and skips them, while `pi list` is still empty.
+func SupplementManifestInstalls(config core.HomerConfig, local, remote []core.AdapterSnapshot, tasks []manifest.Task) []manifest.Task {
+	type taskKey struct {
+		adapter  string
+		category string
+	}
+	index := make(map[taskKey]int, len(tasks))
+	for i, task := range tasks {
+		index[taskKey{task.AdapterID, task.Category}] = i
+	}
+	localByAdapter := indexByAdapter(local)
+	remoteByAdapter := indexByAdapter(remote)
+	adapterIDs := make([]string, 0, len(config.Adapters))
+	for adapterID := range config.Adapters {
+		adapterIDs = append(adapterIDs, adapterID)
+	}
+	sort.Strings(adapterIDs)
+	for _, adapterID := range adapterIDs {
+		remoteSnapshot, ok := remoteByAdapter[adapterID]
+		if !ok {
+			continue
+		}
+		adapter := config.Adapters[adapterID]
+		names := make([]string, 0, len(adapter.Categories))
+		for name := range adapter.Categories {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			category := adapter.Categories[name]
+			if !category.IsManifest() {
+				continue
+			}
+			content := manifestContent(&remoteSnapshot, name)
+			if content == "" {
+				continue
+			}
+			present := make(map[string]struct{})
+			for _, id := range localIDs(localByAdapter, PullAction{AdapterID: adapterID, Category: name}) {
+				present[id] = struct{}{}
+			}
+			missing := make([]string, 0)
+			for _, id := range manifest.IDsOf(content) {
+				if _, ok := present[id]; ok {
+					continue
+				}
+				missing = append(missing, id)
+			}
+			if len(missing) == 0 {
+				continue
+			}
+			key := taskKey{adapterID, name}
+			if at, ok := index[key]; ok {
+				tasks[at].IDs = sortedUniqueManifestIDs(append(tasks[at].IDs, missing...))
+				continue
+			}
+			tasks = append(tasks, manifest.Task{
+				AdapterID: adapterID,
+				Category:  name,
+				IDs:       sortedUniqueManifestIDs(missing),
+				ListCmd:   category.ListCmd,
+				ApplyCmd:  category.ApplyCmd,
+			})
+			index[key] = len(tasks) - 1
+		}
+	}
+	return tasks
+}
+
+func manifestContent(snapshot *core.AdapterSnapshot, category string) string {
+	found := findCategory(snapshot, category)
+	if found == nil {
+		return ""
+	}
+	entry, ok := found.Files[manifest.VirtualFileName(category)]
+	if !ok {
+		return ""
+	}
+	return entry.Content
+}
+
 func manifestCategory(config core.HomerConfig, adapterID, category string) (core.CategoryConfig, bool) {
 	adapterConfig, ok := config.Adapters[adapterID]
 	if !ok {

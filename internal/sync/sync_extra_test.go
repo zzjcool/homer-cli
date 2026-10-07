@@ -13,6 +13,18 @@ import (
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
 )
 
+func TestDropUnresolvedPlaceholderOmitsStoreSentinel(t *testing.T) {
+	content := "{\n  \"packages\": \"__REQUIRED__\",\n  \"theme\": \"dark\"\n}\n"
+	got := OmitPlaceholderContent(content, []string{"packages"})
+	if strings.Contains(got, "__REQUIRED__") || strings.Contains(got, "packages") || !strings.Contains(got, "dark") {
+		t.Fatalf("live settings = %s", got)
+	}
+	kept := OmitPlaceholderContent(content, nil)
+	if kept != content {
+		t.Fatal("unrelated content was rewritten")
+	}
+}
+
 func TestExcludedKeysMatrixAndPlanting(t *testing.T) {
 	config := core.HomerConfig{Adapters: map[string]core.AdapterConfig{
 		"pi": {Categories: map[string]core.CategoryConfig{

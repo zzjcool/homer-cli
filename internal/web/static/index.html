@@ -162,6 +162,12 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 .secret-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
 .secret-row input { flex: 1; min-width: 140px; }
 .secret-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.path-suggest { margin-top: 6px; max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg-sink); }
+.path-suggest button { display: block; width: 100%; text-align: left; min-height: 32px; padding: 4px 10px; border: none; border-radius: 0; background: transparent; border-bottom: 1px solid var(--line); }
+.path-suggest button:hover { background: var(--bg); }
+.path-suggest button.dir { font-weight: 650; }
+.path-suggest .muted { padding: 6px 10px; }
+#dlg-key select { font: inherit; padding: 8px 10px; border: 1px solid #bbb; border-radius: 4px; min-height: 40px; width: 100%; background: var(--bg); color: var(--ink); }
 .agent-empty { padding: 14px 4px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 
 /* auth screens */
@@ -206,6 +212,11 @@ dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-w
 .choice-item .choice-id { font-weight: 650; }
 .choice-item.disabled { opacity: .6; cursor: default; }
 .choice-tools { display: flex; gap: 8px; margin-top: 10px; }
+.dispatch-unlocks { display: grid; gap: 8px; margin-top: 12px; }
+.dispatch-unlocks:empty { display: none; }
+#confirm-err { color: var(--danger); margin: 10px 0 0; }
+#confirm-err:empty { display: none; }
+#btn-confirm-back { margin-right: auto; }
 dialog::backdrop { background: #0007; }
 dialog h2 { margin: 0 0 8px; font-size: 1.1rem; }
 dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 18px 0 0; }
@@ -308,10 +319,13 @@ html { scroll-behavior: smooth; }
     <h2 id="confirm-title">确认</h2>
     <p id="confirm-desc"></p>
     <div id="confirm-choices"></div>
+    <div id="dispatch-unlocks" class="dispatch-unlocks hidden"></div>
     <p class="muted small" id="confirm-note">受影响文件会先备份。</p>
+    <p id="confirm-err" class="small"></p>
     <menu>
-      <button value="cancel" id="btn-confirm-cancel">取消</button>
-      <button value="confirm" class="primary" id="btn-confirm-ok">确认</button>
+      <button type="button" id="btn-confirm-back" class="hidden">上一步</button>
+      <button type="button" value="cancel" id="btn-confirm-cancel">取消</button>
+      <button type="button" value="confirm" class="primary" id="btn-confirm-ok">确认</button>
     </menu>
   </form>
 </dialog>
@@ -350,6 +364,7 @@ html { scroll-behavior: smooth; }
       <button id="btn-copy-listen" type="button">复制</button>
     </div>
     <p class="muted small hidden" id="copy-fallback">当前环境不支持自动复制：已全选文本，请按 Ctrl+C。</p>
+    <p class="muted small" id="join-wait">机器用这个接入码连上之后，窗口会自己关上。</p>
     <menu><button value="ok" class="primary">完成</button></menu>
   </form>
 </dialog>
@@ -372,7 +387,7 @@ const $ = id => document.getElementById(id);
  * POST /api/sync?direction=collect&agent=<id>&confirm=true   body {adapters}
  * POST /api/agents/<id>/pull?confirm=true                    body {adapters}
  * POST /api/resolve?choice=local|center&agent=<id>&confirm=true  在某台机器上裁决
- * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,version,drift,host}]}
+ * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,version,outdated,drift,host}]}
  * GET  /api/keys
  * POST /api/keys                 {id, name, password}
  * POST /api/keys/encrypt         {id, file, path, password}
@@ -385,6 +400,10 @@ const app = {
   console: null,          // 最近一次 /api/console 的存储视角
   pendingAction: null,    // 收取/下发/裁决/密钥 待确认
   keys: [],
+  scopeKeys: [],
+  scopeChoices: [],
+  scopeStep: "choose",
+  scopeHint: "",
   openDiffs: new Set(),   // 展开的 diff 抽屉，key = adapter/category（轮询不重置）
 };
 
@@ -664,6 +683,11 @@ function openHostDetail(a) {
   body.append(renderHostFacts(a));
   dlg.showModal();
 }
+function machineIdentity(a) {
+  const version = a.version ? "版本 " + a.version : "版本未上报";
+  const seen = a.lastSeen ? "上次心跳 " + fmtSeen(a.lastSeen) : "还没有心跳";
+  return version + " · " + seen;
+}
 function machineMeta(a) {
   const parts = [];
   const host = a.host || {};
@@ -674,8 +698,7 @@ function machineMeta(a) {
   if (host.cpu && host.cpu.model) parts.push(host.cpu.model);
   if (a.mode === "listen") parts.push(a.addr ? "直连 " + a.addr : "直连");
   else parts.push("主动连接");
-  if (a.version) parts.push(a.version);
-  if (a.lastSeen) parts.push("上报 " + fmtSeen(a.lastSeen));
+  parts.push(machineIdentity(a));
   if (a.stale) parts.push("离线");
   return parts.join(" · ");
 }
@@ -719,6 +742,7 @@ function renderAgents(agents, disabledFeature) {
       head.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
     }
     const summary = el("div", "agent-summary", hostSummary(a));
+    const identity = el("div", "agent-summary", machineIdentity(a));
     const actions = el("div", "agent-actions");
 
     const detailBtn = el("button", "small-btn", "详情");
@@ -757,6 +781,15 @@ function renderAgents(agents, disabledFeature) {
     secretBtn.disabled = a.stale;
     secretBtn.addEventListener("click", () => openMachineKeys(a));
     actions.append(secretBtn);
+
+    if (a.outdated) {
+      const upgradeBtn = el("button", "small-btn", "更新程序");
+      upgradeBtn.type = "button";
+      upgradeBtn.title = "这台机器的程序比中心旧。换成中心现在这份，然后自动重启 agent";
+      upgradeBtn.disabled = a.stale;
+      upgradeBtn.addEventListener("click", () => upgradeAgent(a));
+      actions.append(upgradeBtn);
+    }
 
     const keyBtn = el("button", "small-btn", "登录公钥");
     keyBtn.type = "button";
@@ -801,13 +834,52 @@ function renderAgents(agents, disabledFeature) {
       } catch (e) { toast("移除失败：" + e.message); }
     });
     actions.append(revoke, removeBtn);
-    card.append(head, summary, actions);
+    card.append(head, summary, identity, actions);
     list.append(card);
   });
   const joinBtn = el("button", "small-btn", "＋ 接入新机器");
   joinBtn.type = "button"; joinBtn.addEventListener("click", openJoin);
   const foot = el("div"); foot.style.padding = "10px 4px 0"; foot.append(joinBtn);
+  const outdated = agents.filter(a => a.outdated && !a.stale);
+  if (outdated.length) {
+    const upgradeAll = el("button", "small-btn", "全部更新");
+    upgradeAll.type = "button";
+    upgradeAll.title = "让版本比中心旧的在线机器换成现在这份 homer";
+    upgradeAll.addEventListener("click", () => upgradeAgents(outdated));
+    foot.append(upgradeAll);
+  }
   list.append(foot);
+}
+function upgradeFailure(e) {
+  return (e && e.report && e.report.note) || (e && e.errors && e.errors[0]) || (e && e.message) || "没有完成";
+}
+async function upgradeAgent(agent) {
+  const name = agent.hostname || agent.agentId;
+  if (!confirm("把「" + name + "」的 homer 换成中心现在这份？换完后这台机器上的 agent 会自动重启。")) return;
+  await upgradeAgents([agent]);
+}
+async function upgradeAgents(list) {
+  if (!list.length) { toast("没有在线的机器"); return; }
+  if (list.length > 1 && !confirm("更新 " + list.length + " 台在线机器？每台都会换成中心现在这份 homer，并自动重启 agent。")) return;
+  const failed = [];
+  for (const agent of list) {
+    const name = agent.hostname || agent.agentId;
+    setBusy("正在更新 " + name + "…");
+    try {
+      const d = await api("/api/agents/" + encodeURIComponent(agent.agentId) + "/upgrade", { method: "POST", body: {} });
+      if (!d.ok) failed.push(name + "：" + (d.note || "没有完成"));
+    } catch (e) {
+      failed.push(name + "：" + upgradeFailure(e));
+    } finally {
+      clearBusy();
+    }
+  }
+  try { await refresh(); } catch (_) {}
+  if (!failed.length) {
+    toast(list.length === 1 ? "已更新，agent 会用新程序重新启动" : "已更新 " + list.length + " 台，agent 会用新程序重新启动");
+    return;
+  }
+  showAlert("有机器没有更新", failed, "还在用旧程序的机器不认识这个指令，需要在那台机器上执行一次 homer upgrade，之后就能从这里更新。");
 }
 
 function renderAgentsError(msg) {
@@ -846,35 +918,188 @@ function selectedAdapters() {
   });
   return picked;
 }
+function secretsBoundTo(adapterId) {
+  const paths = [];
+  (app.scopeKeys || []).forEach(key => {
+    (key.files || []).forEach(file => {
+      if (file.adapter === adapterId && file.destination) paths.push(file.destination);
+    });
+  });
+  return paths;
+}
+function keyringChoice() {
+  return (app.scopeChoices || []).find(item => item.id === "keyring") || null;
+}
+function keyringCanTravel() {
+  const keyring = keyringChoice();
+  if (keyring && !keyring.enabled) return false;
+  // 下发只能送中心里已经有的密文。没收取过的密钥不在选项里。
+  if (app.scopeDirection === "dispatch") return !!keyring;
+  return true;
+}
+function adaptersWithSecrets(adapters) {
+  const out = (adapters || []).slice();
+  if (app.scopeDirection === "resolve" || out.indexOf("keyring") >= 0) return out;
+  if (!keyringCanTravel()) return out;
+  if (out.some(id => secretsBoundTo(id).length)) out.push("keyring");
+  return out;
+}
+function alignKeyring(box) {
+  if (!box || app.scopeDirection === "resolve") return;
+  const keyring = box.querySelector('input[data-adapter="keyring"]');
+  if (!keyring || keyring.disabled) return;
+  const ids = [];
+  box.querySelectorAll("input[data-adapter]").forEach(input => {
+    if (input.checked && input.dataset.adapter !== "keyring") ids.push(input.dataset.adapter);
+  });
+  if (ids.some(id => secretsBoundTo(id).length)) keyring.checked = true;
+}
+function selectionToken() {
+  return selectedAdapters().slice().sort().join("\n");
+}
+function dispatchKeysForSelection() {
+  if (app.scopeDirection !== "dispatch" || !keyringCanTravel()) return [];
+  const keyring = keyringChoice();
+  if (keyring && !keyring.enabled) return [];
+  const selected = {};
+  selectedAdapters().forEach(id => { if (id !== "keyring") selected[id] = true; });
+  const keys = [];
+  (app.scopeKeys || []).forEach(key => {
+    const hit = (key.files || []).some(file => file.adapter && selected[file.adapter]);
+    if (hit) keys.push(key);
+  });
+  return keys;
+}
+function syncDispatchUnlocks() {
+  const host = $("dispatch-unlocks");
+  if (!host) return;
+  const token = app.scopeDirection === "dispatch" ? selectionToken() : "";
+  if (host.dataset.selection === token) return;
+  const previous = {};
+  host.querySelectorAll("input[data-key]").forEach(input => { previous[input.dataset.key] = input.value; });
+  clear(host);
+  host.dataset.selection = token;
+  const keys = dispatchKeysForSelection();
+  if (!keys.length) return;
+  const paths = boundPathsForSelection();
+  if (paths.length) host.append(el("p", "muted small", paths.join("、")));
+  keys.forEach(key => {
+    const label = el("label", null, "口令 · " + (key.name || key.id));
+    const input = el("input");
+    input.type = "password";
+    input.dataset.key = key.id;
+    input.autocomplete = "off";
+    input.value = previous[key.id] || "";
+    input.addEventListener("input", updateScopeConfirm);
+    input.addEventListener("keydown", ev => {
+      if (ev.key !== "Enter") return;
+      ev.preventDefault();
+      if (!$("btn-confirm-ok").disabled) $("btn-confirm-ok").click();
+    });
+    label.append(input);
+    host.append(label);
+  });
+}
+function readDispatchUnlocks() {
+  const rows = [];
+  const host = $("dispatch-unlocks");
+  if (!host) return rows;
+  host.querySelectorAll("input[data-key]").forEach(input => {
+    rows.push({ id: input.dataset.key, password: input.value || "" });
+  });
+  return rows;
+}
+function clearDispatchUnlocks() {
+  const host = $("dispatch-unlocks");
+  if (!host) return;
+  host.dataset.selection = "";
+  clear(host);
+}
+function boundPathsForSelection() {
+  const selected = {};
+  selectedAdapters().forEach(id => { selected[id] = true; });
+  const paths = [];
+  dispatchKeysForSelection().forEach(key => {
+    (key.files || []).forEach(file => {
+      if (selected[file.adapter] && file.destination && paths.indexOf(file.destination) < 0) paths.push(file.destination);
+    });
+  });
+  return paths;
+}
 function updateScopeConfirm() {
-  $("btn-confirm-ok").disabled = selectedAdapters().length === 0;
+  syncDispatchUnlocks();
+  const ok = $("btn-confirm-ok");
+  const keys = dispatchKeysForSelection();
+  if (app.scopeDirection === "dispatch" && app.scopeStep !== "unlock" && app.scopeStep !== "done") {
+    ok.textContent = keys.length ? "下一步" : "确认下发";
+    ok.disabled = selectedAdapters().length === 0;
+    return;
+  }
+  if (app.scopeStep === "unlock") {
+    ok.textContent = "确认下发";
+    ok.disabled = readDispatchUnlocks().some(row => [...row.password].length < 8);
+    return;
+  }
+  ok.disabled = selectedAdapters().length === 0;
+}
+function showScopeStep(step) {
+  app.scopeStep = step;
+  const choices = $("confirm-choices");
+  const unlocks = $("dispatch-unlocks");
+  const back = $("btn-confirm-back");
+  const err = $("confirm-err");
+  if (err) err.textContent = "";
+  if (step === "unlock") {
+    choices.classList.add("hidden");
+    unlocks.classList.remove("hidden");
+    back.classList.remove("hidden");
+    $("confirm-desc").textContent = "先解开这些密钥，然后才会下发。";
+    $("confirm-note").textContent = "口令只在这一步使用。解开成功后，文件会写回这台机器。";
+    updateScopeConfirm();
+    const first = unlocks.querySelector("input");
+    if (first) setTimeout(() => first.focus(), 0);
+    return;
+  }
+  app.scopeStep = "choose";
+  choices.classList.remove("hidden");
+  unlocks.classList.add("hidden");
+  back.classList.add("hidden");
+  if (app.scopeHint) $("confirm-desc").textContent = app.scopeHint;
+  if (app.scopeDirection === "dispatch") $("confirm-note").textContent = "受影响文件会先备份。";
+  updateScopeConfirm();
 }
 function renderScopeChoices(data) {
-  $("confirm-desc").textContent = data.hint || "选择要操作的适配器。";
+  app.scopeHint = data.hint || "选择要操作的适配器。";
+  app.scopeStep = "choose";
+  $("confirm-desc").textContent = app.scopeHint;
   const box = $("confirm-choices");
   clear(box);
   const list = data.adapters || [];
   if (!list.length) return;
   const tools = el("div", "choice-tools");
-  const all = el("button", "small-btn", "全选");
-  all.type = "button";
-  all.addEventListener("click", ev => {
-    ev.preventDefault();
+  const setChecks = (mode) => {
     box.querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => {
-      if (!input.disabled) input.checked = true;
+      if (input.disabled) return;
+      if (mode === "all") input.checked = true;
+      else if (mode === "none") input.checked = false;
+      else input.checked = !input.checked;
     });
+    alignKeyring(box);
     updateScopeConfirm();
+  };
+  [["全选", "all"], ["反选", "invert"], ["全不选", "none"]].forEach(pair => {
+    const btn = el("button", "small-btn", pair[0]);
+    btn.type = "button";
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      setChecks(pair[1]);
+    });
+    tools.append(btn);
   });
-  const none = el("button", "small-btn", "清除");
-  none.type = "button";
-  none.addEventListener("click", ev => {
-    ev.preventDefault();
-    box.querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => { input.checked = false; });
-    updateScopeConfirm();
-  });
-  tools.append(all, none);
   const rows = el("div", "choice-list");
   list.forEach(item => {
+    // 密钥不是单独一项。勾了它绑定的适配器，确认时会带上。
+    if (item.id === "keyring" && app.scopeDirection !== "resolve") return;
     const block = el("div", "choice-block");
     const label = el("label", "choice-item" + (item.enabled ? "" : " disabled"));
     const input = document.createElement("input");
@@ -882,7 +1107,7 @@ function renderScopeChoices(data) {
     input.dataset.adapter = item.id;
     input.checked = !!item.checked && !!item.enabled;
     input.disabled = !item.enabled;
-    input.addEventListener("change", updateScopeConfirm);
+    input.addEventListener("change", () => { updateScopeConfirm(); alignKeyring($("confirm-choices")); });
     const copy = el("span", "choice-copy");
     const cats = item.categories || [];
     if (cats.length) {
@@ -896,6 +1121,18 @@ function renderScopeChoices(data) {
     }
     const detail = [item.detail, item.reason].filter(Boolean).join(" · ");
     if (detail) copy.append(el("span", "muted small", detail));
+    const bound = secretsBoundTo(item.id);
+    if (bound.length) {
+      const keyring = list.find(row => row.id === "keyring");
+      const verb = app.scopeDirection === "collect" ? "收取" : "下发";
+      let text = "密钥跟着这次一起" + verb + "：" + bound.join("、");
+      if (keyring && !keyring.enabled) {
+        text = "绑定了密钥，但密钥有冲突，这次不会一起同步：" + bound.join("、");
+      } else if (app.scopeDirection === "dispatch" && !keyring) {
+        text = "密钥还没收到中心，这次不会一起下发：" + bound.join("、") + "。先在加密的那台机器上收取。";
+      }
+      copy.append(el("span", "muted small", text));
+    }
     label.append(input, copy);
     if (!cats.length) block.append(label);
     if (item.conflicts > 0 && app.scopeAgent && app.scopeDirection !== "resolve") {
@@ -922,6 +1159,8 @@ function renderScopeChoices(data) {
     rows.append(block);
   });
   box.append(tools, rows);
+  app.scopeChoices = list;
+  alignKeyring(box);
   updateScopeConfirm();
 }
 function openScopeDialog(opts) {
@@ -929,16 +1168,32 @@ function openScopeDialog(opts) {
   $("confirm-desc").textContent = "正在读取可选项…";
   $("confirm-note").textContent = "受影响文件会先备份。";
   $("confirm-choices").replaceChildren();
+  clearDispatchUnlocks();
+  $("confirm-err").textContent = "";
+  $("btn-confirm-back").classList.add("hidden");
+  $("confirm-choices").classList.remove("hidden");
+  $("dispatch-unlocks").classList.add("hidden");
   const okBtn = $("btn-confirm-ok");
   okBtn.disabled = true;
   okBtn.textContent = opts.okLabel;
   app.pendingAction = null;
   app.scopeAgent = opts.agent || null;
   app.scopeDirection = opts.direction || "";
+  app.scopeStep = "choose";
+  app.scopeHint = "";
+  app.scopeKeys = [];
+  app.scopeChoices = [];
   $("dlg-confirm").showModal();
-  api("/api/sync/choices?direction=" + encodeURIComponent(opts.direction) + "&agent=" + encodeURIComponent(opts.agent.agentId))
-    .then(data => {
+  const keysRequest = opts.direction === "dispatch"
+    ? keyApi(null, { action: "list" })
+    : keyApi(opts.agent, { action: "list" });
+  Promise.all([
+    api("/api/sync/choices?direction=" + encodeURIComponent(opts.direction) + "&agent=" + encodeURIComponent(opts.agent.agentId)),
+    keysRequest.catch(() => ({ keys: [] })),
+  ])
+    .then(([data, keysView]) => {
       if (!$("dlg-confirm").open) return;
+      app.scopeKeys = (keysView && keysView.keys) || [];
       renderScopeChoices(data);
       app.pendingAction = opts.action;
     })
@@ -982,6 +1237,11 @@ function confirmSSHKey(agent) {
   try { input.value = localStorage.getItem("homer-github-user") || ""; } catch (_) { input.value = ""; }
   label.append(input);
   $("confirm-choices").replaceChildren(label);
+  clearDispatchUnlocks();
+  $("confirm-err").textContent = "";
+  $("btn-confirm-back").classList.add("hidden");
+  $("confirm-choices").classList.remove("hidden");
+  $("dispatch-unlocks").classList.add("hidden");
   $("btn-confirm-ok").textContent = "确认写入";
   $("btn-confirm-ok").disabled = false;
   app.pendingAction = { kind: "ssh-key", agentId: agent.agentId, name };
@@ -1000,7 +1260,17 @@ function confirmResolveOn(choice, agent) {
   });
 }
 
-$("dlg-confirm").addEventListener("close", () => { app.pendingAction = null; });
+$("dlg-confirm").querySelector("form").addEventListener("submit", ev => ev.preventDefault());
+$("btn-confirm-back").addEventListener("click", ev => {
+  ev.preventDefault();
+  if (app.scopeStep === "unlock") showScopeStep("choose");
+});
+$("dlg-confirm").addEventListener("close", () => {
+  stopDispatchWait();
+  app.pendingAction = null;
+  app.scopeStep = "choose";
+  clearDispatchUnlocks();
+});
 // 显式接线，不依赖 dialog 表单的隐式提交行为（兼容性兜底）
 $("btn-confirm-ok").addEventListener("click", ev => {
   ev.preventDefault();
@@ -1016,8 +1286,26 @@ $("btn-confirm-ok").addEventListener("click", ev => {
     executeSSHKey(action.agentId, action.name, githubUser);
     return;
   }
-  const adapters = selectedAdapters();
+  if (action.kind === "dispatch-done") {
+    $("dlg-confirm").close("confirm");
+    return;
+  }
+  const adapters = adaptersWithSecrets(selectedAdapters());
+  const unlocks = readDispatchUnlocks();
   if (!adapters.length) return;
+  if (action.kind === "dispatch-one" && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
+    showScopeStep("unlock");
+    return;
+  }
+  if (action.kind === "dispatch-one" && app.scopeStep === "unlock") {
+    if (unlocks.some(row => [...row.password].length < 8)) return;
+    executeDispatchOne(action.agentId, action.name, adapters, unlocks, true);
+    return;
+  }
+  if (action.kind === "dispatch-one") {
+    executeDispatchOne(action.agentId, action.name, adapters, unlocks, true);
+    return;
+  }
   okBtn.disabled = true; okBtn.textContent = "处理中…";
   // 直接执行（close→事件→fetch 的链路在 headless 环境会丢事件），
   // 然后关对话框；真实浏览器与 headless 行为一致
@@ -1025,7 +1313,6 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
   if (action.kind === "collect") executeCollect(action.agentId, action.name, adapters);
-  if (action.kind === "dispatch-one") executeDispatchOne(action.agentId, action.name, adapters);
   if (action.kind === "resolve-on") executeResolveOn(action.choice, action.agentId, adapters);
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
@@ -1099,31 +1386,197 @@ async function settleWriteFailure(kind, agentId, name, data) {
   presentWriteFailure(kind, agentId, name, data);
   try { await refresh(); } catch (_) {}
 }
-async function executeCollect(agentId, name, adapters) {
+function secretNoticeLines(e) {
+  const lines = [];
+  const seen = {};
+  const report = (e && e.report && e.report.errors) || [];
+  const direct = (e && e.errors) || [];
+  report.concat(direct).forEach(line => {
+    if (!line || seen[line]) return;
+    seen[line] = true;
+    lines.push(line);
+  });
+  return lines.length ? lines : ["这些文件里有像密钥的内容。"];
+}
+async function executeCollect(agentId, name, adapters, allowSecrets) {
   const okBtn = $("btn-confirm-ok");
   clearAlert();
   setBusy("正在从 " + name + " 收取…");
+  const body = { adapters: adapters };
+  if (allowSecrets) body.allowSecrets = true;
   try {
-    const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
+    const d = await api("/api/sync?direction=collect&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: body });
     if (d.ok) toast("已从 " + name + " 收取，存入中心");
     else presentWriteFailure("收取", agentId, name, d);
     await refresh();
   } catch (e) {
     if (e.code === "secrets-rejected") {
-      showAlert("已停止：检测到疑似密钥", e.errors, null);
+      showAlert("这些文件像是带有密钥", secretNoticeLines(e), "确认之后，这份内容仍会写入中心。", [
+        { label: "仍然收取", primary: true, onClick: () => executeCollect(agentId, name, adapters, true) },
+      ]);
       try { await refresh(); } catch (_) {}
     } else {
       await settleWriteFailure("收取", agentId, name, e.report || { status: e.code, errors: e.errors && e.errors.length ? e.errors : [e.message] });
     }
   } finally { finishConfirmButton(okBtn); }
 }
-async function executeDispatchOne(agentId, name, adapters) {
+function dispatchDialogError(e) {
+  const lines = [];
+  const seen = {};
+  const report = (e && e.report && e.report.errors) || [];
+  const direct = (e && e.errors) || [];
+  report.concat(direct).forEach(line => {
+    if (!line || seen[line]) return;
+    seen[line] = true;
+    lines.push(line);
+  });
+  if (!lines.length && e && e.message) lines.push(e.message);
+  return lines.length ? lines.join("；") : "没有完成";
+}
+function installFailures(data) {
+  const lines = [];
+  const seen = {};
+  const add = (line) => {
+    line = String(line || "").trim();
+    if (!line || seen[line]) return;
+    seen[line] = true;
+    lines.push(line);
+  };
+  const failed = data && data.manifest && data.manifest.failed;
+  if (Array.isArray(failed)) failed.forEach(add);
+  ((data && data.warnings) || []).forEach(line => {
+    if (String(line).indexOf("安装失败") >= 0) add(line);
+  });
+  return lines;
+}
+function pluginsForSelection(adapters) {
+  const picked = {};
+  (adapters || []).forEach(id => { picked[id] = true; });
+  const names = [];
+  (app.scopeChoices || []).forEach(item => {
+    if (!picked[item.id]) return;
+    (item.categories || []).forEach(cat => {
+      if (cat.kind !== "manifest" && cat.label !== "插件") return;
+      (cat.files || []).forEach(file => {
+        const path = String(file.path || "");
+        if (!path || path.endsWith(".manifest.txt")) return;
+        names.push(path);
+      });
+    });
+  });
+  return names;
+}
+function stopDispatchWait() {
+  if (app.dispatchWaitTimer) {
+    clearInterval(app.dispatchWaitTimer);
+    app.dispatchWaitTimer = 0;
+  }
+  const cancel = $("btn-confirm-cancel");
+  if (cancel) cancel.disabled = false;
+}
+function beginDispatchWait(name, plugins, unlocking) {
+  stopDispatchWait();
+  app.scopeStep = "wait";
+  $("confirm-choices").classList.add("hidden");
+  $("dispatch-unlocks").classList.add("hidden");
+  $("btn-confirm-back").classList.add("hidden");
+  $("confirm-err").textContent = "";
+  const cancel = $("btn-confirm-cancel");
+  if (cancel) cancel.disabled = true;
+  const ok = $("btn-confirm-ok");
+  ok.disabled = true;
+  const started = Date.now();
+  const clock = () => {
+    const sec = Math.floor((Date.now() - started) / 1000);
+    if (sec < 60) return sec + " 秒";
+    return Math.floor(sec / 60) + " 分 " + (sec % 60) + " 秒";
+  };
+  let label = "正在下发…";
+  if (plugins.length) {
+    $("confirm-desc").textContent = "正在逐个安装 " + plugins.length + " 个插件。缺的会逐个下载安装，请留在这个窗口，装完才会结束。";
+    $("confirm-note").textContent = plugins.join("、");
+    label = "正在安装插件…";
+  } else if (unlocking) {
+    $("confirm-desc").textContent = "正在下发并解开…";
+    $("confirm-note").textContent = "口令已经核对过。配置和密钥写完才会结束。";
+    label = "正在下发并解开…";
+  } else {
+    $("confirm-desc").textContent = "正在把配置写到「" + name + "」。";
+    $("confirm-note").textContent = "写完才会结束。";
+  }
+  const tick = () => { ok.textContent = label + " " + clock(); };
+  tick();
+  app.dispatchWaitTimer = setInterval(tick, 1000);
+}
+function finishDispatchInDialog(name, paths, problems) {
+  stopDispatchWait();
+  app.scopeStep = "done";
+  $("confirm-choices").classList.add("hidden");
+  $("dispatch-unlocks").classList.add("hidden");
+  $("btn-confirm-back").classList.add("hidden");
+  const failed = problems || [];
+  if (failed.length) {
+    $("confirm-desc").textContent = "配置已写到「" + name + "」，但有插件没有装上。";
+    $("confirm-note").textContent = "这台机器上要有 pi 命令，并且能联网，插件才会装上。";
+    $("confirm-err").textContent = failed.join("；");
+  } else {
+    $("confirm-err").textContent = "";
+    $("confirm-note").textContent = "";
+    $("confirm-desc").textContent = paths.length
+      ? "已下发到「" + name + "」，并已写回：" + paths.join("、")
+      : "已下发到「" + name + "」。";
+  }
+  const ok = $("btn-confirm-ok");
+  ok.disabled = false;
+  ok.textContent = "完成";
+  app.pendingAction = { kind: "dispatch-done" };
+}
+function failDispatchInDialog(text) {
+  stopDispatchWait();
+  const message = text || "没有完成";
+  if (dispatchKeysForSelection().length) {
+    app.scopeStep = "unlock";
+    $("confirm-desc").textContent = "先解开这些密钥，然后才会下发。";
+    $("confirm-err").textContent = message;
+    $("btn-confirm-back").disabled = false;
+    $("btn-confirm-back").classList.remove("hidden");
+    updateScopeConfirm();
+    return;
+  }
+  showScopeStep("choose");
+  $("confirm-err").textContent = message;
+}
+async function executeDispatchOne(agentId, name, adapters, unlocks, stay) {
   const okBtn = $("btn-confirm-ok");
+  const body = { adapters: adapters };
+  if (unlocks && unlocks.length) body.unlocks = unlocks;
+  const paths = boundPathsForSelection();
+  if (stay) {
+    clearAlert();
+    $("btn-confirm-back").disabled = true;
+    beginDispatchWait(name, pluginsForSelection(adapters), unlocks && unlocks.length);
+    try {
+      const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: body });
+      if (d.ok) {
+        finishDispatchInDialog(name, paths, installFailures(d));
+        try { await refresh(); } catch (_) {}
+      } else {
+        const lines = collectErrorLines(d);
+        failDispatchInDialog(lines.length ? lines.join("；") : "下发没有完成");
+      }
+    } catch (e) {
+      failDispatchInDialog(dispatchDialogError(e));
+    }
+    return;
+  }
   clearAlert();
   setBusy("正在下发到 " + name + "…");
   try {
-    const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: { adapters: adapters } });
-    if (d.ok) toast("已下发到 " + name);
+    const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: body });
+    const problems = d.ok ? installFailures(d) : [];
+    if (d.ok && problems.length) {
+      showAlert("插件没有安装成功", ["「" + name + "」上的配置已经写上，但这些插件没有装上。"].concat(problems), "这台机器上要有 pi 命令，并且能联网，插件才会装上。");
+    } else if (d.ok) toast("已下发到 " + name);
     else presentWriteFailure("下发", agentId, name, d);
     await refresh();
   } catch (e) {
@@ -1566,8 +2019,30 @@ async function openMachineView(a) {
   }
 }
 
+let joinWatch = 0;
+function stopJoinWatch() {
+  if (!joinWatch) return;
+  clearInterval(joinWatch);
+  joinWatch = 0;
+}
+function watchJoinCode(code) {
+  stopJoinWatch();
+  if (!code || code.indexOf("hr_") !== 0) return;
+  joinWatch = setInterval(async () => {
+    if (!$("dlg-join").open) { stopJoinWatch(); return; }
+    try {
+      const st = await api("/api/auth/join/status?code=" + encodeURIComponent(code));
+      if (st.active) return;
+      stopJoinWatch();
+      if (!$("dlg-join").open) return;
+      toast("机器已接入");
+      $("dlg-join").close();
+    } catch (_) {}
+  }, 2000);
+}
 async function openJoin() {
   const dlg = $("dlg-join");
+  stopJoinWatch();
   $("copy-fallback").classList.add("hidden");
   $("btn-copy").textContent = "复制";
   $("join-cmd").value = "获取中…";
@@ -1577,6 +2052,7 @@ async function openJoin() {
     const d = await api("/api/auth/join");
     $("join-cmd").value = d.command;
     $("join-listen").value = d.listenCommand || "";
+    watchJoinCode(d.code || "");
   } catch (e) {
     $("join-cmd").value = "";
     $("join-listen").value = "";
@@ -1600,12 +2076,20 @@ $("btn-copy-listen").addEventListener("click", () => copyJoin("join-listen", "bt
 $("btn-join-top").addEventListener("click", openJoin);
 // 「完成」：关闭对话框并立即刷新——新机器此刻应该已经出现在列表里
 // （若 agent 还在安装/启动，几秒后 30s 轮询也会补上）。
-$("dlg-join").addEventListener("close", () => { refresh(); });
+$("dlg-join").addEventListener("close", () => { stopJoinWatch(); refresh(); });
 
 /* ---------- keys ---------- */
 function keyLines(e) {
-  const report = e.report || {};
-  return [].concat(e.errors || [], report.errors || []).filter(Boolean);
+  const report = (e && e.report && e.report.errors) || [];
+  const direct = (e && e.errors) || [];
+  const seen = {};
+  const lines = [];
+  report.concat(direct).forEach(line => {
+    if (!line || seen[line]) return;
+    seen[line] = true;
+    lines.push(line);
+  });
+  return lines;
 }
 function keyEndpoint(agent) {
   return agent ? "/api/agents/" + encodeURIComponent(agent.agentId) + "/keys" : "";
@@ -1613,6 +2097,7 @@ function keyEndpoint(agent) {
 async function keyApi(agent, body) {
   if (!agent) {
     const action = body.action;
+    if (action === "browse") return api("/api/keys/op", { method: "POST", body: body });
     const path = action === "list" ? "/api/keys"
       : action === "create" ? "/api/keys"
       : action === "encrypt" ? "/api/keys/encrypt"
@@ -1644,7 +2129,6 @@ function renderKeys(agent, keys) {
     const row = el("div", "adapter-row");
     const line = el("div", "adapter-line");
     line.append(el("span", "name", key.name || key.id));
-    line.append(el("span", "small muted mono", key.id));
     const actions = el("div", "row-actions");
     const enc = el("button", "small-btn", "加密文件");
     enc.type = "button";
@@ -1659,7 +2143,8 @@ function renderKeys(agent, keys) {
     line.append(actions);
     row.append(line);
     (key.files || []).forEach(file => {
-      row.append(el("div", "cat-line", file.id + "  →  " + file.destination));
+      const note = file.adapter ? " · 跟着 " + adapterTitle(file.adapter) : "";
+      row.append(el("div", "cat-line", file.destination + note));
     });
     box.append(row);
   });
@@ -1680,6 +2165,105 @@ function field(labelText, id, type, value) {
   label.append(input);
   return label;
 }
+function adapterForPath(path) {
+  const text = String(path || "").replace(/\\/g, "/");
+  if (text.indexOf("/.pi/") >= 0 || text.endsWith("/.pi")) return "pi";
+  if (text.indexOf("/herdr/") >= 0) return "herdr";
+  if (text.indexOf("/opencode/") >= 0) return "opencode";
+  if (text.indexOf("/Code/") >= 0 || text.indexOf("Application Support/Code") >= 0) return "vscode";
+  return "";
+}
+function adapterField() {
+  const label = el("label", null, "跟着哪个适配器");
+  const select = document.createElement("select");
+  select.id = "key-adapter";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "不同步，只留在密钥里";
+  select.append(none);
+  ["pi", "herdr", "opencode", "vscode"].forEach(id => {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = adapterTitle(id);
+    select.append(option);
+  });
+  select.addEventListener("change", () => { select.dataset.touched = "1"; });
+  label.append(select);
+  return label;
+}
+function pathField(agent) {
+  const wrap = el("div");
+  const label = el("label", null, "路径");
+  const input = el("input");
+  input.id = "key-path";
+  input.type = "text";
+  input.value = "~/";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  label.append(input);
+  const list = el("div", "path-suggest");
+  wrap.append(label, list);
+  let token = 0;
+  const show = (text) => {
+    clear(list);
+    list.append(el("div", "muted small", text));
+  };
+  const paint = (view) => {
+    clear(list);
+    const entries = (view && view.entries) || [];
+    if (!entries.length) {
+      show("没有匹配的文件");
+      return;
+    }
+    entries.forEach(entry => {
+      const btn = el("button", entry.dir ? "dir" : "", (entry.dir ? "▸ " : "") + entry.name + (entry.dir ? "/" : ""));
+      btn.type = "button";
+      btn.addEventListener("click", ev => {
+        ev.preventDefault();
+        input.value = entry.path;
+        const select = $("key-adapter");
+        if (select && select.dataset.touched !== "1") select.value = adapterForPath(entry.path);
+        if (entry.dir) refresh();
+        else clear(list);
+        input.focus();
+      });
+      list.append(btn);
+    });
+    if (entries.length >= 80) list.append(el("div", "muted small", "还有更多，继续输入以缩小范围"));
+  };
+  const refresh = (attempt) => {
+    const mine = ++token;
+    show("读取目录…");
+    keyApi(agent, { action: "browse", path: input.value })
+      .then(view => {
+        if (mine !== token || !$("dlg-key").open) return;
+        paint(view);
+      })
+      .catch(err => {
+        if (mine !== token || !$("dlg-key").open) return;
+        if (!attempt) {
+          setTimeout(() => { if (mine === token) refresh(1); }, 400);
+          return;
+        }
+        const line = keyLines(err)[0] || (err && err.message) || "读取目录失败";
+        show(line);
+      });
+  };
+  input.addEventListener("keydown", ev => {
+    if (ev.key !== "Enter") return;
+    ev.preventDefault();
+    const first = list.querySelector("button");
+    if (first) first.click();
+  });
+  input.addEventListener("input", () => {
+    clearTimeout(input._timer);
+    input._timer = setTimeout(() => refresh(0), 180);
+    const select = $("key-adapter");
+    if (select && select.dataset.touched !== "1") select.value = adapterForPath(input.value);
+  });
+  setTimeout(() => refresh(0), 0);
+  return wrap;
+}
 function openKeyForm(agent, action, key) {
   const titles = { create: "新建密钥", encrypt: "加密文件", unlock: "解开密钥", passwd: "更换口令" };
   $("key-dlg-title").textContent = (agent ? (agent.hostname || agent.agentId) + " · " : "") + titles[action];
@@ -1688,10 +2272,11 @@ function openKeyForm(agent, action, key) {
   $("key-dlg-err").textContent = "";
   $("key-dlg-ok").classList.remove("hidden");
   if (action === "create") {
-    body.append(field("id", "key-id", "text", ""), field("名称", "key-name", "text", ""), field("口令", "key-pw", "password", ""), field("再输入一次口令", "key-pw2", "password", ""));
+    body.append(field("名称", "key-name", "text", ""), field("口令", "key-pw", "password", ""), field("再输入一次口令", "key-pw2", "password", ""));
   } else if (action === "encrypt") {
     body.append(el("p", "small", key.name || key.id));
-    body.append(field("文件 id", "key-file", "text", ""), field("路径", "key-path", "text", "~/"), field("口令", "key-pw", "password", ""));
+    body.append(el("p", "small muted", "点目录展开，点文件填入路径。选了适配器之后，收取或下发它时这份密钥会一起走。"));
+    body.append(pathField(agent), adapterField(), field("口令", "key-pw", "password", ""));
   } else if (action === "unlock") {
     body.append(el("p", "small", "用口令解开「" + (key.name || key.id) + "」，写回原来的路径。"));
     body.append(field("口令", "key-pw", "password", ""));
@@ -1713,13 +2298,16 @@ async function submitKeyForm(ev) {
   const body = { action: spec.action, password: pw };
   if (spec.key) body.id = spec.key.id;
   if (spec.action === "create") {
-    body.id = ($("key-id").value || "").trim();
     body.name = ($("key-name").value || "").trim();
     if (pw !== pw2) { $("key-dlg-err").textContent = "两次口令不一致"; return; }
   }
   if (spec.action === "encrypt") {
-    body.file = ($("key-file").value || "").trim();
     body.path = ($("key-path").value || "").trim();
+    body.adapter = ($("key-adapter") && $("key-adapter").value || "").trim();
+  }
+  if (spec.action !== "list" && [...pw].length < 8) {
+    $("key-dlg-err").textContent = "口令至少 8 位";
+    return;
   }
   if (spec.action === "passwd") {
     body.newPassword = pw2;

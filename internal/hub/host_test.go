@@ -77,8 +77,8 @@ func TestRegisterKeepsReportedHostAndDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, _ = r.Get("a")
-	if info.Host == nil || info.Host.OS != "fresh" || info.Host.Memory == nil || info.Drift == nil || info.Drift.Pull != 2 {
-		t.Fatalf("replacement = %+v drift=%+v", info.Host, info.Drift)
+	if info.Host == nil || info.Host.OS != "fresh" || info.Host.Memory == nil || info.Drift == nil || info.Drift.Pull != 2 || info.Version != "v2" {
+		t.Fatalf("replacement = %+v drift=%+v version=%q", info.Host, info.Drift, info.Version)
 	}
 	if time.Since(info.LastSeen) > time.Minute {
 		t.Fatalf("last seen = %s", info.LastSeen)

@@ -284,6 +284,11 @@ func resolveConfiguredPath(abs, rootReal, rootRel string, allowEscape []string, 
 
 func scanCategory(adapterID, root, rootReal string, category string, cfg core.CategoryConfig, ignore, allowEscape []string, port manifest.CommandPort, errors *[]ScanError, warnings *[]string) core.CategorySnapshot {
 	if cfg.IsManifest() {
+		if strings.TrimSpace(cfg.IDPattern) == "" {
+			if pattern := defaultManifestIDPattern(adapterID, category); pattern != "" {
+				cfg.IDPattern = pattern
+			}
+		}
 		cfg.ListCmd = manifest.VersionedListCommand(cfg.ListCmd)
 		snapshot, problems := manifest.ScanCategory(adapterID, category, cfg, port)
 		// pi list prints npm:name only. The installed version lives in
@@ -447,6 +452,18 @@ func ScanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) 
 		outcome.Snapshot.Categories = append(outcome.Snapshot.Categories, cat)
 	}
 	return outcome
+}
+
+// defaultManifestIDPattern fills the built-in filter when a saved
+// homer.json predates idPattern. Without it, pi list headers and other
+// non-package lines are stored as plugin names.
+func defaultManifestIDPattern(adapterID, category string) string {
+	// Kept in sync with pi.DefaultPIAdapter. The adapter package cannot
+	// import pi: pi's registration imports this package.
+	if adapterID == "pi" && category == "packages" {
+		return `^  (npm:[A-Za-z0-9@/._-]+)$`
+	}
+	return ""
 }
 
 func manifestCommandName(command string) string {

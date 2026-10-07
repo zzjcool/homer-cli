@@ -477,7 +477,7 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 			if len(choices) == 0 {
 				hint = "中心还没有可下发的适配器。"
 			} else {
-				hint = "只会把勾选的适配器写到这台机器。其他适配器这次不动。"
+				hint = "只会把勾选的适配器写到这台机器。其他适配器这次不动。带密钥的适配器要先填口令，口令能解开才会下发。"
 			}
 		}
 	default:
@@ -509,5 +509,5 @@ func collectChoiceHint(report commands.StatusReport, choices []AdapterChoice) st
 		}
 		return "这台机器没有可收取的适配器。"
 	}
-	return "只会把勾选的适配器写入中心。没勾选的适配器保持中心现有内容。"
+	return "只会把勾选的适配器写入中心。没勾选的适配器保持中心现有内容。绑在适配器上的密钥会跟着走。"
 }

@@ -78,7 +78,7 @@ func TestPushBootstrapsFreshMachine(t *testing.T) {
 	executor := NewLocalExecutorWithHub(homerHome, hub.URL, "secret")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	report, err := executor.Push(ctx, true, nil, false)
+	report, err := executor.Push(ctx, true, nil, false, false)
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}

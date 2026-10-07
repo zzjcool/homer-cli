@@ -371,7 +371,7 @@ func (e *recordingExecutor) Diff(ctx context.Context, params web.DiffParams) (st
 	return "diff", nil
 }
 
-func (e *recordingExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool) (commands.PushReport, error) {
+func (e *recordingExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool, _ bool) (commands.PushReport, error) {
 	e.record(call{kind: hub.TaskKindPush, confirm: confirm, adapters: strings.Join(adapters, ","), overwrite: overwrite})
 	return commands.PushReport{OK: true, Status: commands.PushStatusPushed}, nil
 }
@@ -552,7 +552,7 @@ func TestLocalExecutorHubTransport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("next-change\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pushReport, err := executor.Push(ctx, true, nil, false)
+	pushReport, err := executor.Push(ctx, true, nil, false, false)
 	if err != nil || !pushReport.OK || pushReport.Status != commands.PushStatusPushed {
 		t.Fatalf("push = %#v err=%v", pushReport, err)
 	}

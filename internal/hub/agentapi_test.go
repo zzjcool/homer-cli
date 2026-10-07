@@ -321,4 +321,17 @@ func TestAgentAPIPollStoresHost(t *testing.T) {
 	if info.Host.Nets[0].Name != "enp3s0" || info.Host.Nets[0].Addrs[0] != "192.168.1.20/24" {
 		t.Fatalf("poll nets = %+v", info.Host.Nets)
 	}
+	if info.Version != "v1" {
+		t.Fatalf("poll without a version cleared it: %q", info.Version)
+	}
+	updated := postAgentJSON(t, server.URL+"/agent/v1/poll", "token", map[string]any{
+		"agentId": "agent-a", "waitSeconds": 0, "version": "v2",
+	})
+	if updated.StatusCode != http.StatusOK {
+		t.Fatalf("version poll = %d %s", updated.StatusCode, updated.Body)
+	}
+	info, _ = registry.Get("agent-a")
+	if info.Version != "v2" {
+		t.Fatalf("heartbeat version = %q", info.Version)
+	}
 }

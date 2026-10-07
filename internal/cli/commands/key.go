@@ -25,10 +25,11 @@ const KEY_USAGE = `用法: homer key <list|create|encrypt|unlock|passwd> [option
 
 选项:
   --home <dir>           homer 工作区
-  --id <id>              密钥 id
-  --name <name>          显示名称（create；缺省等于 id）
-  --file <id>            文件 id（encrypt）
+  --id <id>              密钥 id（create 省略时按名称生成）
+  --name <name>          显示名称（create）
+  --file <id>            文件 id（encrypt 省略时按路径生成，同一路径会覆盖）
   --path <path>          文件路径，以 ~ 或 / 开头（encrypt）
+  --adapter <id>         跟着哪个适配器一起同步（encrypt，例如 pi）
   --password <secret>    口令（非交互时必填；会出现在进程参数里）
   --new-password <secret> 新口令（passwd）
   --json
@@ -70,6 +71,7 @@ func RunKeyArgs(args []string, out, errOut io.Writer) int {
 		Name:        flags.name,
 		File:        flags.file,
 		Path:        flags.path,
+		Adapter:     flags.adapter,
 		Password:    flags.password,
 		NewPassword: flags.newPassword,
 	}
@@ -109,8 +111,8 @@ func RunKeyArgs(args []string, out, errOut io.Writer) int {
 }
 
 type keyFlags struct {
-	home, id, name, file, path, password, newPassword string
-	json, help                                        bool
+	home, id, name, file, path, adapter, password, newPassword string
+	json, help                                                 bool
 }
 
 func parseKeyFlags(args []string) (keyFlags, error) {
@@ -159,6 +161,12 @@ func parseKeyFlags(args []string) (keyFlags, error) {
 				return flags, err
 			}
 			flags.path = value
+		case arg == "--adapter":
+			value, err := need()
+			if err != nil {
+				return flags, err
+			}
+			flags.adapter = value
 		case arg == "--password":
 			value, err := need()
 			if err != nil {
