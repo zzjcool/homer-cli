@@ -16,7 +16,7 @@
 | P2 hub | worker-7 | ws/p2-hub | ✅ 已合并 b0fb343(tag ws/p2-merged);hub+web+stream 合并后 build/vet/race 全过 |
 | P3 agent | worker-8 | ws/p3-agent | ✅ 已合并 9de73f8(tag ws/p3-merged) |
 | P4c web+UI | worker-9 | ws/p4c-web | ✅ 已合并 37a1a23(tag ws/p4c-merged);复验 web race/闸口矩阵/ETag/ChoicesStream/fanout 通过 |
-| P4b agent 数据面 | worker-10 | ws/p4b-data | 进行中 |
+| P4b agent 数据面 | worker-10 | ws/p4b-data | ✅ 已合并(tag ws/p4b-merged) |
 | I1 集成 | orchestrator | master | ✅ f18141c(tag ws/i1-integrated):CLI 改 --hub/--data-url、serve 装配 AgentHub、删 listen/connect;go build ./... 通过,internal/... -race 全绿 |
 | P5 docker/脚本/文档 | worker-12 | ws/p5-docs | ✅ 已合并 95a3fb0(tag ws/p5-merged);README runbook 已对齐 hw 真实 unit(`--connect <url>` 空格写法) |
 | P6a 集成测试 | worker-11 | ws/p6a-integration | 进行中(tests/integration+tests/bench) |
@@ -51,3 +51,6 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - 派出 P4b(10) P6a(11) P5(12) P6b(13) 四个 worker,文件范围互不重叠(agentd / tests/integration+bench / e2e+docs / tests/e2e)
 - P5 合并。残留:e2e/console/docker-compose.yml 保留休眠容器名 box-listen(只 sleep,无 agent 进程),引用它的 e2e 由 P6b 处理
 - P6b 合并。独立复验通过;抽查 TestRevokeKicksLiveAgent 有真断言(agent 日志吊销、hub 踢线日志、旧 secret 重连 401 可读提示、status 返回 503)
+- P4b 合并。复验发现 TestAgentHubSupersedesPreviousSession 在全量并行下偶发失败:测试等待「任意会话」而非「会话被替换」,是测试竞态非产品缺陷;已修(等待 registry 会话换成非 firstSession),-race -count=200 通过
+- **第二次端到端冒烟(本机回环,P4b 合并后,真 hub+真 agent)**:choices 整包 0.69~0.92s(基线 1.3~1.6s,撞车 3.3~4.75s);4 并发全部 0.73s(基线严格串行 0.13/3.5/5.8s);12 并发按 readSem=4 分三批 0.70/1.41/2.17s(设计如此);stream=1 首字节 0.69s;agent 离线后调用 1ms 返回 503(基线等 60s)
+- 注意:单次 choices ~0.7s 由本机全量扫描决定(homer status 本机 0.78s),这是扫描成本,传输层已不是瓶颈;P7 在 hw 经 tunnel 的真实数字待测
