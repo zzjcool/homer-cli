@@ -58,3 +58,7 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - 全仓验证:gofmt 干净;go build ./... 通过;go vet ./...(含 consolee2e tag、tests/spike)通过;-race 全绿(internal+cmd+tests/integration+tests/bench 34 包 ok;tests/e2e 100s ok)。
 - 发现并修复基线即存在的问题:tests/e2e TestServe* 在 -race 下 strings.Builder 数据竞态(pre-ws-master 上同样失败)已修。internal/cli/commands TestPushUnbornRepositoryCreatesInitialBaseline 在隔离 GIT_CONFIG_GLOBAL 时无提交者身份而失败,基线同样,与本次无关,单独带 git 身份跑通过
 - 下一步:三路 fresh-context 对抗式 review(正确性/回归、测试覆盖、简洁性),再 P7(hw 实测与部署)
+- **对抗式 review(三路 fresh-context)**:reviewer-2(简洁性)与 reviewer-1(测试覆盖)已回,reviewer-0(正确性/回归)进行中
+  - reviewer-2:6 项必须改——两套 singleflight 重复且 runStatusFlight 无 recover;零调用的 ListenAndServe/clearEnrollCode/requiresAdvertiseHint/Dispatcher.Token/三个无发送方的 agent.* 事件;agent 侧缺「已连接」日志;poll/register/connect 措辞残留;**WS close reason 125 字节上限**(orchestrator 已实测复现:142 字节中文 reason 使对端收到 EOF 而不是 4401);接入层仍绑死 wsconn(加 gRPC 要改 5 个文件,建议后续加 Dialer/serveConn,本轮不做)
+  - reviewer-1:约 45 处手动变异中约 12 处存活——R5 写后失效(writeGen/forgetDrift)、关闭码数值 4000/4001/4403、心跳线上码与默认 25s/75s、Run 级退避/重置/重试日志、dispatcher 排队后二次 requireOnline、U10 CAS 退化、I14 重连 hello;TestDispatcherCallConcurrencyLimit 压力下约 2% 不稳定;I15 死断言
+  - 已派:批次 A(worker-15, ws/fix-a-cleanup:清理+close reason 截断+日志+迁移提示)、批次 B(worker-14, ws/fix-b-tests:补测试+变异自证);等 reviewer-0 回来决定是否追加批次 C
