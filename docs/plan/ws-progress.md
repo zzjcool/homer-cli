@@ -20,7 +20,7 @@
 | I1 集成 | orchestrator | master | ✅ f18141c(tag ws/i1-integrated):CLI 改 --hub/--data-url、serve 装配 AgentHub、删 listen/connect;go build ./... 通过,internal/... -race 全绿 |
 | P5 docker/脚本/文档 | worker-12 | ws/p5-docs | ✅ 已合并 95a3fb0(tag ws/p5-merged);README runbook 已对齐 hw 真实 unit(`--connect <url>` 空格写法) |
 | P6a 集成测试 | worker-11 | ws/p6a-integration | 进行中(tests/integration+tests/bench) |
-| P6b e2e 迁移 | worker-13 | ws/p6b-e2e | 进行中(tests/e2e,含 SOP 三守门员) |
+| P6b e2e 迁移 | worker-13 | ws/p6b-e2e | ✅ 已合并(tag ws/p6b-merged);orchestrator 独立复验:SOP 三守门员通过,全量 tests/e2e 77s 通过,tagged vet 编译通过 |
 | P7 hw 性能验收 | orchestrator+用户 | - | 待 |
 
 ## 合并顺序
@@ -50,3 +50,4 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - 教训:不要用 pkill -f 带路径模式(会匹配到自己的 bash -c 命令行),用 PID 精确 kill
 - 派出 P4b(10) P6a(11) P5(12) P6b(13) 四个 worker,文件范围互不重叠(agentd / tests/integration+bench / e2e+docs / tests/e2e)
 - P5 合并。残留:e2e/console/docker-compose.yml 保留休眠容器名 box-listen(只 sleep,无 agent 进程),引用它的 e2e 由 P6b 处理
+- P6b 合并。独立复验通过;抽查 TestRevokeKicksLiveAgent 有真断言(agent 日志吊销、hub 踢线日志、旧 secret 重连 401 可读提示、status 返回 503)
