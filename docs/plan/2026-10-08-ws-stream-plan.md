@@ -860,7 +860,7 @@ timeout 300 go vet ./...
 timeout 900 go test -race -count=1 ./internal/<本阶段包>/...
 ```
 
-**P1 额外**:`go mod tidy && git diff --exit-code -- go.mod go.sum`(除新增 websocket 外无其他变化,`go 1.23.4` 不变)。
+**P1 额外**:基线 go.mod 本身未 tidy(`// indirect` 标记有误),所以**不要运行 `go mod tidy`**。依赖处理:`go get github.com/coder/websocket@v1.8.12` 之后写出第一个 import 它的源文件,再用 `go build ./...` 确认;验收用 `git diff -- go.mod go.sum`,只允许新增 coder/websocket 这一项 require 与对应 go.sum 行,`go 1.23.4` 不变。
 
 **I1 集成后**:
 ```bash
