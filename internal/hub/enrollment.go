@@ -30,7 +30,8 @@ type EnrollmentManager struct {
 	// codes holds minted enrollment codes that are not yet redeemed.
 	codes map[string]enrollmentCode
 	// secrets maps agentID -> sha256 of the live per-agent secret.
-	secrets map[string][32]byte
+	secrets    map[string][32]byte
+	revokeHook func(agentID string)
 }
 
 const agentSecretsFilename = "agent-secrets.json"
@@ -135,10 +136,12 @@ func (m *EnrollmentManager) BindAgent(agentID, secret string) {
 // VerifySecret reports whether the presented secret matches the live
 // binding for agentID.
 func (m *EnrollmentManager) VerifySecret(agentID, secret string) bool {
-	if agentID == "" || secret == "" {
+	if m == nil || agentID == "" || secret == "" {
 		return false
 	}
+	m.mu.Lock()
 	want, ok := m.secrets[agentID]
+	m.mu.Unlock()
 	if !ok {
 		return false
 	}
@@ -149,14 +152,31 @@ func (m *EnrollmentManager) VerifySecret(agentID, secret string) bool {
 // Revoke drops an agent's secret binding. The agent's next request fails
 // with 401; the agentID itself stays eligible for a fresh enrollment
 // (revocation targets the credential, not the machine identity).
-func (m *EnrollmentManager) Revoke(agentID string) bool {
+func (m *EnrollmentManager) SetRevokeHook(fn func(agentID string)) {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.revokeHook = fn
+	m.mu.Unlock()
+}
+
+func (m *EnrollmentManager) Revoke(agentID string) bool {
+	if m == nil || agentID == "" {
+		return false
+	}
+	m.mu.Lock()
 	if _, ok := m.secrets[agentID]; !ok {
+		m.mu.Unlock()
 		return false
 	}
 	delete(m.secrets, agentID)
 	_ = m.saveLocked()
+	hook := m.revokeHook
+	m.mu.Unlock()
+	if hook != nil {
+		hook(agentID)
+	}
 	return true
 }
 
