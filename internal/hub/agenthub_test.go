@@ -531,10 +531,18 @@ func TestAgentHubSupersedesPreviousSession(t *testing.T) {
 
 	second := dialTestAgent(t, server.URL, hubTestToken)
 	sendTestHello(t, second, "same-agent", stream.ProtocolVersion)
-	secondSession := waitRegistrySession(t, registry, "same-agent")
-	if secondSession == nil || secondSession == firstSession {
-		t.Fatal("second connection did not replace the first session")
-	}
+	// The second hello is processed asynchronously: until the hub attaches
+	// it, the registry still returns the first session. Wait for the swap
+	// itself instead of for "any session", which races with the attach.
+	var secondSession *stream.Session
+	await(t, func() bool {
+		current, ok := registry.Session("same-agent")
+		if !ok || current == nil || current == firstSession {
+			return false
+		}
+		secondSession = current
+		return true
+	})
 	select {
 	case remoteErr := <-firstAgentRun:
 		var closeErr *stream.CloseError
