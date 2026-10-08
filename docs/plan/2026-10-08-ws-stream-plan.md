@@ -546,7 +546,7 @@ P5+P6a ─► P6b e2e/docker/UI ─► P7 hw 性能验收与部署演练(orchest
 | V11 | http.Server 设 `WriteTimeout=3s` 时,hijack 后连接是否活过 3s(验证 Go 清 deadline) |
 | V12 | 经 Go 中间件链(包一层不实现 Hijacker 的 ResponseWriter)时 Accept 的失败表现,记录以便 P2 防护 |
 
-- **验收**:`timeout 900 go run ./tests/spike/wsprobe -url wss://<host>/ws -suite all -out /tmp/spike.json`,报告给出每项 pass/fail 和数字。
+- **验收**:`cd tests/spike && timeout 900 go run ./wsprobe -url wss://<host>/ws -suite all -out /tmp/spike.json`,报告给出每项 pass/fail 和数字。
 - **闸口 G0**:V1、V4、V6(不通过则 close code 改走 `reason` 前缀)必须通过,否则暂停并上报。**不得回退长轮询。**
 - 同时给出 CF 实测空闲上限,据此确认 25s/75s 取值,必要时调整 A7。
 
