@@ -9,9 +9,17 @@ import (
 // Stream methods shared by the hub and agents. Method names are the wire
 // representation of TaskKind where a task kind already exists.
 const (
-	MethodHello     = "hello"
-	MethodHeartbeat = "hb"
-	MethodInspect   = "collect.inspect"
+	MethodHello       = "hello"
+	MethodHeartbeat   = "hb"
+	MethodInspect     = "collect.inspect"
+	MethodStatus      = string(TaskKindStatus)
+	MethodDiff        = string(TaskKindDiff)
+	MethodPush        = string(TaskKindPush)
+	MethodPull        = string(TaskKindPull)
+	MethodSSHKey      = string(TaskKindSSHKey)
+	MethodSecret      = string(TaskKindSecret)
+	MethodUpgrade     = string(TaskKindUpgrade)
+	MethodToolUpgrade = string(TaskKindToolUpgrade)
 )
 
 // HelloParams is the agent's first stream request.
@@ -46,18 +54,21 @@ type HeartbeatParams struct {
 }
 
 const (
-	CallBudgetDefault = 60 * time.Second
-	ReqDeadlineSlack  = 5 * time.Second
+	CallBudgetDefault     = 60 * time.Second
+	ReqDeadlineSlack      = 5 * time.Second
+	CallBudgetPull        = 12 * time.Minute
+	CallBudgetUpgrade     = 3 * time.Minute
+	CallBudgetToolUpgrade = 7 * time.Minute
 )
 
 func CallBudget(kind TaskKind) time.Duration {
 	switch kind {
 	case TaskKindPull:
-		return PullWait
+		return CallBudgetPull
 	case TaskKindUpgrade:
-		return UpgradeWait
+		return CallBudgetUpgrade
 	case TaskKindToolUpgrade:
-		return ToolUpgradeWait
+		return CallBudgetToolUpgrade
 	default:
 		return CallBudgetDefault
 	}

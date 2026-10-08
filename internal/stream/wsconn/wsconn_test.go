@@ -1,7 +1,6 @@
 package wsconn
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -14,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/zzjcool/homer-cli/internal/stream"
@@ -69,7 +67,7 @@ func TestWebSocketRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCloseCodeReasonRoundTrip(t *testing.T) {
+func TestConcurrentWritesAndCloseCodeReasonRoundTrip(t *testing.T) {
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -95,6 +93,25 @@ func TestCloseCodeReasonRoundTrip(t *testing.T) {
 		t.Fatal("Accept did not complete")
 	}
 	defer accepted.CloseNow()
+	var writes sync.WaitGroup
+	for n := 0; n < 32; n++ {
+		writes.Add(1)
+		go func(n int) {
+			defer writes.Done()
+			writeCtx, writeCancel := context.WithTimeout(context.Background(), socketTestTimeout)
+			defer writeCancel()
+			_ = client.Write(writeCtx, []byte("parallel-"+strconv.Itoa(n)))
+		}(n)
+	}
+	writes.Wait()
+	for range 32 {
+		readCtx, readCancel := context.WithTimeout(context.Background(), socketTestTimeout)
+		message, readErr := accepted.Read(readCtx)
+		readCancel()
+		if readErr != nil || !strings.HasPrefix(string(message), "parallel-") {
+			t.Fatalf("concurrent write message = %q, %v", message, readErr)
+		}
+	}
 	if err := accepted.Close(stream.CloseSuperseded, "new agent connected"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -177,12 +194,6 @@ func TestAcceptRequiresHijacker(t *testing.T) {
 
 type nonHijacker struct{ http.ResponseWriter }
 
-type hijackerWrapper struct{ http.ResponseWriter }
-
-func (h hijackerWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return h.ResponseWriter.(http.Hijacker).Hijack()
-}
-
 func TestHijackClearsWriteTimeout(t *testing.T) {
 	accepted := make(chan stream.Conn, 1)
 	server := &http.Server{WriteTimeout: 200 * time.Millisecond, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -224,9 +235,6 @@ func TestHijackClearsWriteTimeout(t *testing.T) {
 		t.Fatal("Accept did not finish")
 	}
 	defer conn.CloseNow()
-	if len := 1 * time.Second; len <= 200*time.Millisecond {
-		t.Fatal("test invariant")
-	}
 	time.Sleep(time.Second)
 	if err := client.Write(ctx, []byte("still alive")); err != nil {
 		t.Fatalf("write after server WriteTimeout elapsed: %v", err)
@@ -322,12 +330,4 @@ func TestResponseBodyLimited(t *testing.T) {
 	if !errors.As(err, &dialErr) || len(dialErr.Body) > 4<<10 {
 		t.Fatalf("DialError = %#v, response %#v", dialErr, response)
 	}
-}
-
-func TestCloseReasonUTF8Safe(t *testing.T) {
-	if !utf8.ValidString("reason") {
-		t.Fatal("impossible UTF-8 check")
-	}
-	_ = strconv.Itoa(1)
-	_ = sync.Once{}
 }

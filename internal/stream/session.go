@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -138,7 +137,7 @@ func NewSession(conn Conn, opts Options) *Session {
 func (s *Session) Handle(method string, h Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.running {
+	if s.running || s.isDone() {
 		panic("stream: Handle called after Run")
 	}
 	if method == "" || h == nil {
@@ -150,7 +149,7 @@ func (s *Session) Handle(method string, h Handler) {
 func (s *Session) OnEvent(method string, h EventHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.running {
+	if s.running || s.isDone() {
 		panic("stream: OnEvent called after Run")
 	}
 	if method == "" || h == nil {
@@ -174,14 +173,24 @@ func (s *Session) Run(ctx context.Context) error {
 		s.runMu.Unlock()
 		return s.Err()
 	}
+	childCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
+	if s.isDone() {
+		alreadyClosed := s.err
+		s.mu.Unlock()
+		cancel()
+		s.runMu.Unlock()
+		return alreadyClosed
+	}
 	s.running = true
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.ctx = childCtx
+	s.cancel = cancel
 	s.mu.Unlock()
 	s.lastRecvMu.Lock()
 	s.lastRecv = s.clock.Now()
 	s.lastRecvMu.Unlock()
 	s.runMu.Unlock()
+	defer cancel()
 
 	finished := make(chan error, 3)
 	var loops sync.WaitGroup
@@ -278,7 +287,8 @@ func (s *Session) handleRequest(frame *Frame) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if frame.DL > 0 {
-		ctx, cancel = context.WithTimeout(baseCtx, time.Duration(frame.DL)*time.Millisecond)
+		budget := maxDurationFromMillis(frame.DL)
+		ctx, cancel = context.WithTimeout(baseCtx, budget)
 	} else {
 		ctx, cancel = context.WithCancel(baseCtx)
 	}
@@ -288,7 +298,7 @@ func (s *Session) handleRequest(frame *Frame) {
 
 	req := &Request{
 		ID: frame.ID, Method: frame.M, Params: append(json.RawMessage(nil), frame.P...),
-		Budget: time.Duration(frame.DL) * time.Millisecond, Session: s,
+		Budget: maxDurationFromMillis(frame.DL), Session: s,
 		progress: func(v any) { s.enqueueProgress(frame.ID, in, v) },
 	}
 	go s.runHandler(ctx, cancel, in, req, handler)
@@ -313,6 +323,11 @@ func (s *Session) runHandler(ctx context.Context, cancel context.CancelFunc, in 
 	}
 	if !in.state.CompareAndSwap(0, 1) {
 		cancel()
+		s.mu.Lock()
+		if s.inflight[req.ID] == in {
+			delete(s.inflight, req.ID)
+		}
+		s.mu.Unlock()
 		return
 	}
 	cancel()
@@ -349,16 +364,14 @@ func (s *Session) runHandler(ctx context.Context, cancel context.CancelFunc, in 
 func (s *Session) handleCancel(id string) {
 	s.mu.Lock()
 	in := s.inflight[id]
-	s.mu.Unlock()
-	if in == nil || !in.state.CompareAndSwap(0, 2) {
-		return
-	}
-	in.cancel()
-	s.mu.Lock()
-	if s.inflight[id] == in {
+	cancelled := in != nil && in.state.CompareAndSwap(0, 2)
+	if cancelled {
 		delete(s.inflight, id)
 	}
 	s.mu.Unlock()
+	if cancelled {
+		in.cancel()
+	}
 }
 
 func (s *Session) handleResponse(frame *Frame) {
@@ -440,6 +453,7 @@ func (s *Session) enqueueProgress(id string, in *inboundCall, value any) {
 	}
 	payload, err := json.Marshal(value)
 	if err != nil {
+		s.progressDropped.Add(1)
 		return
 	}
 	frame := &Frame{T: TProg, ID: id, Seq: in.seq.Add(1), P: payload}
@@ -660,6 +674,9 @@ func (s *Session) pingLoop() error {
 		case <-timer.C():
 			timer.Stop()
 		}
+		if s.isDone() {
+			return nil
+		}
 		now = s.clock.Now()
 		s.lastRecvMu.Lock()
 		last = s.lastRecv
@@ -672,7 +689,7 @@ func (s *Session) pingLoop() error {
 		if !now.Before(nextPing) {
 			id := fmt.Sprintf("ping-%d", s.nextID.Add(1))
 			s.pingMu.Lock()
-			s.pings[id] = now
+			s.pings = map[string]time.Time{id: now}
 			s.pingMu.Unlock()
 			if err := s.enqueue(&Frame{T: TPing, ID: id}, true, false); err != nil {
 				return err
@@ -999,4 +1016,13 @@ func (s *Session) maxInflight() int {
 	return s.opts.MaxInflightIn
 }
 
-func cleanErrorMessage(message string) string { return strings.TrimSpace(message) }
+func maxDurationFromMillis(milliseconds int64) time.Duration {
+	if milliseconds <= 0 {
+		return 0
+	}
+	maxMilliseconds := int64((time.Duration(1<<63 - 1)) / time.Millisecond)
+	if milliseconds > maxMilliseconds {
+		return time.Duration(1<<63 - 1)
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}

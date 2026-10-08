@@ -49,6 +49,7 @@ func (c *FakeClock) NewTimer(delay time.Duration) stream.Timer {
 	if !timer.due.After(c.now) {
 		timer.channel <- c.now
 		timer.active = false
+		delete(c.timers, timer)
 	}
 	return timer
 }
@@ -88,6 +89,7 @@ func (c *FakeClock) Advance(d time.Duration) {
 	for timer := range c.timers {
 		if timer.active && !timer.due.After(now) {
 			timer.active = false
+			delete(c.timers, timer)
 			select {
 			case timer.channel <- timer.due:
 			default:
@@ -116,6 +118,7 @@ func (t *fakeTimer) Stop() bool {
 	defer t.clock.mu.Unlock()
 	wasActive := t.active
 	t.active = false
+	delete(t.clock.timers, t)
 	return wasActive
 }
 func (t *fakeTimer) Reset(delay time.Duration) bool {
@@ -131,6 +134,9 @@ func (t *fakeTimer) Reset(delay time.Duration) bool {
 	if !t.due.After(t.clock.now) {
 		t.channel <- t.clock.now
 		t.active = false
+		delete(t.clock.timers, t)
+	} else {
+		t.clock.timers[t] = struct{}{}
 	}
 	return wasActive
 }
@@ -139,6 +145,7 @@ func (t *fakeTicker) C() <-chan time.Time { return t.channel }
 func (t *fakeTicker) Stop() {
 	t.clock.mu.Lock()
 	t.active = false
+	delete(t.clock.tickers, t)
 	t.clock.mu.Unlock()
 }
 
