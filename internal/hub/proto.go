@@ -54,21 +54,18 @@ type HeartbeatParams struct {
 }
 
 const (
-	CallBudgetDefault     = 60 * time.Second
-	ReqDeadlineSlack      = 5 * time.Second
-	CallBudgetPull        = 12 * time.Minute
-	CallBudgetUpgrade     = 3 * time.Minute
-	CallBudgetToolUpgrade = 7 * time.Minute
+	CallBudgetDefault = 60 * time.Second
+	ReqDeadlineSlack  = 5 * time.Second
 )
 
 func CallBudget(kind TaskKind) time.Duration {
 	switch kind {
 	case TaskKindPull:
-		return CallBudgetPull
+		return 12 * time.Minute
 	case TaskKindUpgrade:
-		return CallBudgetUpgrade
+		return 3 * time.Minute
 	case TaskKindToolUpgrade:
-		return CallBudgetToolUpgrade
+		return 7 * time.Minute
 	default:
 		return CallBudgetDefault
 	}

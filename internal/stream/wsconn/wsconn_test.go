@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 const socketTestTimeout = 4 * time.Second
 
 func TestWebSocketRoundTrip(t *testing.T) {
+	baseline := runtime.NumGoroutine()
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -30,7 +32,10 @@ func TestWebSocketRoundTrip(t *testing.T) {
 		}
 		serverConn <- conn
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close()
+		waitGoroutines(t, baseline)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), socketTestTimeout)
 	defer cancel()
@@ -68,6 +73,7 @@ func TestWebSocketRoundTrip(t *testing.T) {
 }
 
 func TestConcurrentWritesAndCloseCodeReasonRoundTrip(t *testing.T) {
+	trackGoroutineBaseline(t)
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -123,6 +129,7 @@ func TestConcurrentWritesAndCloseCodeReasonRoundTrip(t *testing.T) {
 }
 
 func TestReadLimit(t *testing.T) {
+	trackGoroutineBaseline(t)
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{MaxMessage: 4})
@@ -158,6 +165,7 @@ func TestReadLimit(t *testing.T) {
 }
 
 func TestDialNon101ReturnsDialError(t *testing.T) {
+	trackGoroutineBaseline(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, "credential rejected")
@@ -177,6 +185,7 @@ func TestDialNon101ReturnsDialError(t *testing.T) {
 }
 
 func TestAcceptRequiresHijacker(t *testing.T) {
+	trackGoroutineBaseline(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wrapped := nonHijacker{ResponseWriter: w}
 		if _, err := Accept(wrapped, r, AcceptOptions{}); err == nil {
@@ -195,6 +204,7 @@ func TestAcceptRequiresHijacker(t *testing.T) {
 type nonHijacker struct{ http.ResponseWriter }
 
 func TestHijackClearsWriteTimeout(t *testing.T) {
+	trackGoroutineBaseline(t)
 	accepted := make(chan stream.Conn, 1)
 	server := &http.Server{WriteTimeout: 200 * time.Millisecond, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -248,6 +258,7 @@ func TestHijackClearsWriteTimeout(t *testing.T) {
 }
 
 func TestDialHeaderAndMaxMessageInfo(t *testing.T) {
+	trackGoroutineBaseline(t)
 	var auth atomic.Bool
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +295,7 @@ func TestDialHeaderAndMaxMessageInfo(t *testing.T) {
 }
 
 func TestWsCloseIdempotent(t *testing.T) {
+	trackGoroutineBaseline(t)
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -317,7 +329,28 @@ func TestWsCloseIdempotent(t *testing.T) {
 	_ = accepted.CloseNow()
 }
 
+func trackGoroutineBaseline(t *testing.T) {
+	t.Helper()
+	baseline := runtime.NumGoroutine()
+	t.Cleanup(func() { waitGoroutines(t, baseline) })
+}
+
+func waitGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
+		runtime.GC()
+		select {
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if got := runtime.NumGoroutine(); got > baseline {
+		t.Errorf("goroutines after WebSocket close = %d, baseline %d", got, baseline)
+	}
+}
+
 func TestResponseBodyLimited(t *testing.T) {
+	trackGoroutineBaseline(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, strings.Repeat("x", 8192))

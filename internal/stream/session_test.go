@@ -18,6 +18,23 @@ import (
 
 const testTimeout = 3 * time.Second
 
+func trackGoroutineBaseline(t *testing.T) {
+	t.Helper()
+	baseline := runtime.NumGoroutine()
+	t.Cleanup(func() {
+		deadline := time.Now().Add(time.Second)
+		for runtime.NumGoroutine() > baseline+2 && time.Now().Before(deadline) {
+			runtime.GC()
+			select {
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if got := runtime.NumGoroutine(); got > baseline+2 {
+			t.Errorf("goroutines after test = %d, baseline %d (+2 tolerance)", got, baseline)
+		}
+	})
+}
+
 func waitDone(t *testing.T, done <-chan error, name string) {
 	t.Helper()
 	select {
@@ -43,6 +60,7 @@ func callJSON[T any](t *testing.T, session *Session, method string, params any, 
 }
 
 func TestSessionHappyPath(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	client := NewSession(left, Options{PingInterval: time.Hour})
 	server := NewSession(right, Options{PingInterval: time.Hour})
@@ -193,6 +211,7 @@ func TestOutOfOrderCompletion(t *testing.T) {
 }
 
 func TestDuplicateID(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	server := NewSession(right, Options{PingInterval: time.Hour})
 	started := make(chan struct{}, 1)
@@ -217,9 +236,7 @@ func TestDuplicateID(t *testing.T) {
 	second := *first
 	for _, frame := range []*Frame{first, &second} {
 		data, _ := EncodeFrame(frame, 1024)
-		if err := left.Write(context.Background(), data); err != nil {
-			t.Fatal(err)
-		}
+		writeBytes(t, left, data)
 	}
 	select {
 	case <-started:
@@ -236,9 +253,7 @@ func TestDuplicateID(t *testing.T) {
 		t.Fatalf("first response = %#v", firstResult)
 	}
 	data, _ := EncodeFrame(first, 1024)
-	if err := left.Write(context.Background(), data); err != nil {
-		t.Fatal(err)
-	}
+	writeBytes(t, left, data)
 	reused := readFrame(t, left)
 	if reused.T != TRes || reused.ID != "same" || !reused.OK {
 		t.Fatalf("reused ID response = %#v", reused)
@@ -247,6 +262,7 @@ func TestDuplicateID(t *testing.T) {
 }
 
 func TestUnknownMethod(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	server := NewSession(right, Options{PingInterval: time.Hour})
 	serverDone := make(chan error, 1)
@@ -295,6 +311,7 @@ func TestCancel(t *testing.T) {
 }
 
 func TestCancelFrameWithoutCall(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	server := NewSession(right, Options{PingInterval: time.Hour})
 	started := make(chan struct{}, 1)
@@ -391,6 +408,7 @@ type raceGate struct {
 }
 
 func TestDeadlineBudget(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	server := NewSession(right, Options{PingInterval: time.Hour})
 	server.Handle("timeout", func(ctx context.Context, _ *Request) (any, error) {
@@ -472,6 +490,7 @@ func TestProgressBackpressure(t *testing.T) {
 }
 
 func TestBackpressureSlowConsumer(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{Buffer: 1})
 	slowWriter := &streamtest.FaultConn{Conn: left, WriteDelay: time.Second}
 	client := NewSession(slowWriter, Options{PingInterval: time.Hour, WriteTimeout: 100 * time.Millisecond, SendQueue: 1})
@@ -518,9 +537,10 @@ func TestBackpressureSlowConsumer(t *testing.T) {
 }
 
 func TestPingPriorityOverQueuedResponses(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	writer := &firstWriteGate{Conn: right, firstStarted: make(chan struct{}, 1), release: make(chan struct{})}
-	server := NewSession(writer, Options{PingInterval: time.Hour, WriteTimeout: time.Second, SendQueue: 8})
+	server := NewSession(writer, Options{PingInterval: time.Hour, WriteTimeout: time.Second, SendQueue: 2})
 	server.Handle("reply", func(_ context.Context, req *Request) (any, error) { return req.ID, nil })
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Run(context.Background()) }()
@@ -570,6 +590,7 @@ func (c *firstWriteGate) Write(ctx context.Context, message []byte) error {
 }
 
 func TestHeartbeatTimeout(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	clock := streamtest.NewFakeClock(time.Unix(0, 0))
 	session := NewSession(left, Options{Clock: clock, PingInterval: 20 * time.Second, PingTimeout: 10 * time.Second})
@@ -590,6 +611,7 @@ func TestHeartbeatTimeout(t *testing.T) {
 }
 
 func TestHeartbeatDataRefresh(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	clock := streamtest.NewFakeClock(time.Unix(0, 0))
 	session := NewSession(left, Options{Clock: clock, PingInterval: 20 * time.Second, PingTimeout: 10 * time.Second})
@@ -735,6 +757,7 @@ func TestSessionCloseFailsPending(t *testing.T) {
 }
 
 func TestInflightLimit(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	server := NewSession(right, Options{PingInterval: time.Hour, MaxInflightIn: 1})
 	started := make(chan struct{}, 1)
@@ -804,6 +827,7 @@ func TestMaxFrame(t *testing.T) {
 }
 
 func TestUnknownFrameType(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	logger := &countLogger{}
 	server := NewSession(right, Options{PingInterval: time.Hour, Logger: logger})
@@ -812,9 +836,7 @@ func TestUnknownFrameType(t *testing.T) {
 	go func() { serverDone <- server.Run(context.Background()) }()
 	defer func() { server.Close(CloseGoingAway, "test cleanup"); waitDone(t, serverDone, "server") }()
 	for i := 0; i < 3; i++ {
-		if err := left.Write(context.Background(), []byte(`{"t":"future"}`)); err != nil {
-			t.Fatal(err)
-		}
+		writeBytes(t, left, []byte(`{"t":"future"}`))
 	}
 	waitUntil(t, func() bool { return server.Stats().FramesIn == 3 })
 	if logger.count() != 1 {
@@ -828,6 +850,7 @@ func TestUnknownFrameType(t *testing.T) {
 }
 
 func TestBinaryFrame(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	binary := &binaryConn{Conn: right}
 	session := NewSession(binary, Options{PingInterval: time.Hour})
@@ -861,6 +884,7 @@ func (c *binaryConn) CloseNow() error { return c.Conn.CloseNow() }
 func (c *binaryConn) Info() ConnInfo  { return c.Conn.Info() }
 
 func TestOversizeFrameCloses1009(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	tracked := &closeCodeConn{Conn: right}
 	session := NewSession(tracked, Options{MaxFrame: 16, PingInterval: time.Hour})
@@ -894,10 +918,15 @@ func (c *closeCodeConn) Close(code CloseCode, reason string) error {
 }
 
 func TestSessionProtocolErrorCloseCode(t *testing.T) {
+	trackGoroutineBaseline(t)
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	session := NewSession(right, Options{PingInterval: time.Hour})
 	done := make(chan error, 1)
 	go func() { done <- session.Run(context.Background()) }()
+	defer func() {
+		session.Close(CloseGoingAway, "protocol test cleanup")
+		_ = left.CloseNow()
+	}()
 	writeFrame(t, left, &Frame{T: ""})
 	select {
 	case err := <-done:
@@ -915,8 +944,8 @@ func TestCallParamsTooLargeDoesNotSend(t *testing.T) {
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	client := NewSession(left, Options{MaxFrame: 64, PingInterval: time.Hour})
 	server := NewSession(right, Options{MaxFrame: 64, PingInterval: time.Hour})
-	clientDone, serverDone, cancel := runSessions(t, client, server)
-	defer cleanupSessions(t, client, server, clientDone, serverDone, cancel)
+	clientDone, serverDone, cancelSessions := runSessions(t, client, server)
+	defer cleanupSessions(t, client, server, clientDone, serverDone, cancelSessions)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	_, err := client.Call(ctx, "too-large", strings.Repeat("x", 200))
@@ -925,6 +954,54 @@ func TestCallParamsTooLargeDoesNotSend(t *testing.T) {
 	}
 	if client.Stats().FramesOut != 0 {
 		t.Fatalf("FramesOut = %d, large call was sent", client.Stats().FramesOut)
+	}
+}
+
+func TestSessionGoroutinesDoNotLeak(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+	left, right := streamtest.Pipe(streamtest.PipeOptions{})
+	client := NewSession(left, Options{PingInterval: time.Hour})
+	server := NewSession(right, Options{PingInterval: time.Hour})
+	started := make(chan struct{}, 1)
+	handlerCanceled := make(chan struct{}, 1)
+	server.Handle("wait", func(ctx context.Context, _ *Request) (any, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		handlerCanceled <- struct{}{}
+		return nil, ctx.Err()
+	})
+	clientDone, serverDone, cancel := runSessions(t, client, server)
+	ctx, callCancel := context.WithTimeout(context.Background(), testTimeout)
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := client.Call(ctx, "wait", nil)
+		callDone <- err
+	}()
+	waitSignal(t, started, "handler start")
+	client.Close(CloseGoingAway, "goroutine leak test")
+	select {
+	case err := <-callDone:
+		var closed *SessionClosedError
+		if !errors.As(err, &closed) {
+			t.Fatalf("Call error = %T %v", err, err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("pending Call did not return")
+	}
+	waitSignal(t, handlerCanceled, "handler cancellation")
+	waitDone(t, clientDone, "client session")
+	waitDone(t, serverDone, "server session")
+	callCancel()
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
+		runtime.GC()
+		select {
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if got := runtime.NumGoroutine(); got > baseline {
+		t.Fatalf("goroutines after session shutdown = %d, baseline %d", got, baseline)
 	}
 }
 
@@ -955,6 +1032,7 @@ func TestNotifyAndEvent(t *testing.T) {
 
 func runSessions(t *testing.T, a, b *Session) (aDone, bDone <-chan error, cancel context.CancelFunc) {
 	t.Helper()
+	trackGoroutineBaseline(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	ad, bd := make(chan error, 1), make(chan error, 1)
 	go func() { ad <- a.Run(ctx) }()
@@ -977,6 +1055,11 @@ func writeFrame(t *testing.T, conn Conn, frame *Frame) {
 	if err != nil {
 		t.Fatalf("EncodeFrame: %v", err)
 	}
+	writeBytes(t, conn, payload)
+}
+
+func writeBytes(t *testing.T, conn Conn, payload []byte) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	if err := conn.Write(ctx, payload); err != nil {

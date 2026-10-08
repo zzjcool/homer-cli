@@ -144,10 +144,12 @@ func TestFakeClockTimerReset(t *testing.T) {
 
 func TestPipeOperationsHonorContext(t *testing.T) {
 	a, b := Pipe(PipeOptions{Buffer: 2})
-	if err := a.Write(context.Background(), []byte("first")); err != nil {
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer writeCancel()
+	if err := a.Write(writeCtx, []byte("first")); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Write(context.Background(), []byte("second")); err != nil {
+	if err := a.Write(writeCtx, []byte("second")); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)

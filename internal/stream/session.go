@@ -816,7 +816,7 @@ func (s *Session) enqueueCancelBestEffort(id string) {
 		s.queueMu.Unlock()
 		return
 	}
-	s.normalQ = append(s.normalQ, outbound{frame: frame, order: s.queueSeq.Add(1)})
+	s.urgentQ = append(s.urgentQ, outbound{frame: frame, order: s.queueSeq.Add(1)})
 	s.queueCount++
 	s.queueMu.Unlock()
 	signal(s.wakeQ)
