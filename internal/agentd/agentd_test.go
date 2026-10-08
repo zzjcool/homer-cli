@@ -129,11 +129,6 @@ func TestDaemonStreamHelloAndStatusHandler(t *testing.T) {
 
 	callCtx, callCancel := context.WithTimeout(context.Background(), time.Second)
 	defer callCancel()
-	_, err := peer.Call(callCtx, hub.MethodHello, hub.HelloParams{AgentID: "inbound-hello"}, stream.WithBudget(time.Second))
-	var helloError *stream.Error
-	if !errors.As(err, &helloError) || helloError.Code != stream.CodeBadRequest {
-		t.Fatalf("server-side hello request error = %v, want bad-request", err)
-	}
 	payload, err := peer.Call(callCtx, string(hub.TaskKindStatus), hub.TaskOptions{}, stream.WithBudget(time.Second))
 	if err != nil {
 		t.Fatalf("status call: %v", err)
@@ -601,6 +596,79 @@ func TestHandlersUpgradeFlushBeforeReexec(t *testing.T) {
 	hubSession.Close(stream.CloseNormal, "test done")
 }
 
+func TestHandlersCanceledWriteRetainsFIFO(t *testing.T) {
+	exec := &testExecutor{pushStarted: make(chan string, 2), pushRelease: make(chan struct{}, 2)}
+	d := New(Config{AgentID: "canceled-write", TaskTimeout: time.Second}, exec)
+	agentConn, peerConn := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agentConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	d.registerHandlers(agentSession)
+	hubSession := stream.NewSession(peerConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	defer func() {
+		agentSession.Close(stream.CloseNormal, "test done")
+		hubSession.Close(stream.CloseNormal, "test done")
+	}()
+
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer firstCancel()
+	start := time.Now()
+	_, err := hubSession.Call(firstCtx, string(hub.TaskKindPush), hub.TaskOptions{Adapters: []string{"cancel-first"}}, stream.WithBudget(35*time.Millisecond))
+	if err == nil || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("canceled write returned after %v with %v", time.Since(start), err)
+	}
+	if got := <-exec.pushStarted; got != "cancel-first" {
+		t.Fatalf("first write = %q", got)
+	}
+
+	queued := make(chan string, 2)
+	secondDone := make(chan error, 1)
+	go func() {
+		callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer callCancel()
+		_, err := hubSession.Call(callCtx, string(hub.TaskKindPush), hub.TaskOptions{Adapters: []string{"second"}},
+			stream.WithBudget(2*time.Second), stream.WithProgress(func(raw json.RawMessage) {
+				var progress struct {
+					Stage string `json:"stage"`
+				}
+				if json.Unmarshal(raw, &progress) == nil {
+					queued <- progress.Stage
+				}
+			}),
+		)
+		secondDone <- err
+	}()
+	select {
+	case stage := <-queued:
+		if stage != "queued" {
+			t.Fatalf("second write progress = %q, want queued", stage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second write did not report queued")
+	}
+	select {
+	case got := <-exec.pushStarted:
+		t.Fatalf("second write %q began while canceled write still ran", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The command is not context-aware and completes naturally after the
+	// caller is gone. Only then may the FIFO write lock pass to the next task.
+	exec.pushRelease <- struct{}{}
+	if got := <-exec.pushStarted; got != "second" {
+		t.Fatalf("second write = %q, want second", got)
+	}
+	exec.pushRelease <- struct{}{}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if got := hubSession.Stats().Pending; got != 0 {
+		t.Fatalf("pending calls after write completion = %d, want no duplicate canceled response", got)
+	}
+}
+
 func TestHandlersCancellationReturnsPromptly(t *testing.T) {
 	exec := &testExecutor{blockDiff: make(chan struct{})}
 	d := New(Config{AgentID: "cancel-handler", TaskTimeout: time.Second}, exec)
@@ -1011,11 +1079,16 @@ func (e *testExecutor) Diff(ctx context.Context, params web.DiffParams) (string,
 
 func (e *testExecutor) Push(ctx context.Context, _ bool, adapters []string, _ bool, _ bool) (commands.PushReport, error) {
 	if e.pushStarted != nil {
-		e.pushStarted <- strings.Join(adapters, ",")
-		select {
-		case <-e.pushRelease:
-		case <-ctx.Done():
-			return commands.PushReport{}, ctx.Err()
+		id := strings.Join(adapters, ",")
+		e.pushStarted <- id
+		if id == "cancel-first" {
+			<-e.pushRelease
+		} else {
+			select {
+			case <-e.pushRelease:
+			case <-ctx.Done():
+				return commands.PushReport{}, ctx.Err()
+			}
 		}
 	}
 	return commands.PushReport{OK: true, Status: commands.PushStatusPushed}, ctx.Err()

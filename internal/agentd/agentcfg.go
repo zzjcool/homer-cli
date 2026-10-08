@@ -91,13 +91,13 @@ func SaveAgentConfig(home string, cfg AgentConfig) error {
 func ResolveConfig(cfg Config) (Config, error) {
 	persisted, ok := LoadAgentConfig(cfg.Home)
 	explicitToken := strings.TrimSpace(cfg.Token) != ""
-	explicitCredential := strings.TrimSpace(cfg.AgentSecret) != "" ||
-		explicitToken || strings.TrimSpace(cfg.EnrollCode) != ""
-	if explicitToken {
+	if explicitToken && ok && strings.TrimSpace(cfg.AgentSecret) == strings.TrimSpace(persisted.AgentSecret) {
 		// The CLI supplies agentSecret from agent.json alongside explicit token
 		// flags. An explicit token must win that persisted value.
 		cfg.AgentSecret = ""
 	}
+	explicitCredential := strings.TrimSpace(cfg.AgentSecret) != "" ||
+		explicitToken || strings.TrimSpace(cfg.EnrollCode) != ""
 	if ok {
 		if strings.TrimSpace(cfg.AgentID) == "" {
 			cfg.AgentID = persisted.AgentID

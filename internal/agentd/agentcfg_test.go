@@ -122,7 +122,7 @@ func TestAgentCfgExplicitTokenOverridesButPreservesSavedSecret(t *testing.T) {
 	if err := SaveAgentConfig(home, AgentConfig{AgentID: "saved", HubURL: "https://saved.example", AgentSecret: "saved-secret"}); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := ResolveConfig(Config{Home: home, Token: "explicit-token"})
+	resolved, err := ResolveConfig(Config{Home: home, AgentSecret: "saved-secret", Token: "explicit-token"})
 	if err != nil {
 		t.Fatal(err)
 	}

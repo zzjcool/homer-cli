@@ -26,9 +26,6 @@ import (
 // inbound stream request has its own task ID and can safely execute in parallel
 // when taskclass permits it.
 func (d *Daemon) registerHandlers(session *stream.Session) {
-	session.Handle(hub.MethodHello, func(_ context.Context, _ *stream.Request) (any, error) {
-		return nil, &stream.Error{Code: stream.CodeBadRequest, Message: "hello must be the first request"}
-	})
 	for _, method := range []string{
 		string(hub.TaskKindStatus), string(hub.TaskKindDiff), string(hub.TaskKindPush),
 		string(hub.TaskKindPull), string(hub.TaskKindSSHKey), string(hub.TaskKindSecret),
