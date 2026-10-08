@@ -68,3 +68,5 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
   - Y2 🟡 **已独立复现**:evt 每条一个 goroutine,2000 条事件 612 次逆序;agent 在写完/扫描完/工具探测完各自补发 hb,hub 可能先应用新 drift 再应用旧的;且无并发上限
   - 其余 Y3 reexec 无超时 / Y4 写锁楔住无日志 / Y5 空 hub 409 时 inspect 双扫描 / Y6 ETag 撞号,待合并 A/B 后统一排批次 C
   - 等 A(worker-15)/B(worker-14) 回来,合并后在其基础上做批次 C(Y1 Y2 Y3 Y4 Y5 Y6),避免与 A 的 session.go/client.go/agenthub.go 改动冲突
+- 批次 A 合并(tag ws/fix-a-merged):close reason UTF-8 截断到 123 字节(orchestrator 复验:142B 中文 reason 对端收到 code=4401、reason=123B 合法 UTF-8)、两套 singleflight 合一并统一 recover、删死代码(ListenAndServe/clearEnrollCode/requiresAdvertiseHint/Dispatcher.Token 字段/三个无发送方事件)、poll/register/connect 措辞与 Connect→HubURL 重命名、agent「已连接/断开时长」日志、CLI 对 --connect/--listen/--advertise 的专门迁移提示、README 补 HOMER_DATA_URL。与 R1 修复无冲突。
+- 批次 C 已派(worker-16, ws/fix-c-correctness):Y1 Session.Close 码在真 WS 送达、Y2 事件保序+有界队列、Y3 reexec 超时、Y4 写锁楔住可见化、Y5 空 hub 409 inspect 不再双扫、Y6 ETag 带内容摘要。批次 B(worker-14)补测试进行中
