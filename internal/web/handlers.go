@@ -78,17 +78,15 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if path == "/agent/v1/stream" {
+		s.handleAgentEndpoint(w, r)
+		return
+	}
 	if strings.HasPrefix(path, "/agent/") {
-		// /agent/v1/* carries machine credentials, not human ones: the
-		// per-agent enrollment secret (or the one-time enroll code for
-		// /agent/v1/enroll). The web layer's requireAuth only knows
-		// cookies, the hub token, and enrollment codes — it must NOT gate
-		// the machine endpoints; the agent API's own authorized() is the
-		// authority there (it validates per-agent secrets).
-		if path != "/agent/v1/enroll" && s.opts.AgentEndpoint != nil && !s.agentEndpointAuthorized(r) {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "未授权：请提供有效的 Bearer token", nil)
-			return
-		}
+		// The agent endpoint owns its protocol tombstones and unknown-route
+		// responses. In particular, no legacy web auth gate may hide 410/404.
+		s.handleAgentEndpoint(w, r)
+		return
 	}
 
 	switch {
@@ -104,12 +102,6 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleStatus(w, r)
-	case path == "/api/diff":
-		if r.Method != http.MethodGet {
-			writeMethodNotAllowed(w)
-			return
-		}
-		s.handleDiff(w, r)
 	case path == "/api/push":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w)
@@ -122,40 +114,18 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handlePull(w, r)
-	case path == "/api/upgrade":
-		if r.Method != http.MethodPost {
+	case path == "/api/diff":
+		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
 			return
 		}
-		s.handleLocalUpgrade(w, r)
-	case path == "/api/tools/upgrade":
-		// Listen-mode agents only: the hub dials this to upgrade one
-		// program (pi, herdr...) on the machine.
-		if r.Method != http.MethodPost {
-			writeMethodNotAllowed(w)
-			return
-		}
-		s.handleLocalToolUpgrade(w, r)
+		s.handleDiff(w, r)
 	case path == "/api/sync/choices":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
 			return
 		}
 		s.handleSyncChoices(w, r)
-	case path == "/api/sync/precheck":
-		if r.Method != http.MethodGet {
-			writeMethodNotAllowed(w)
-			return
-		}
-		s.handleCollectPrecheck(w, r)
-	case path == "/api/ssh-key":
-		// Listen-mode agents only. The hub dials this after fetching the
-		// GitHub user's public keys.
-		if r.Method != http.MethodPost {
-			writeMethodNotAllowed(w)
-			return
-		}
-		s.handleLocalSSHKey(w, r)
 	case path == "/api/sync":
 		// Manual sync (MVP): one action, human sentences only.
 		if r.Method != http.MethodPost {
@@ -225,16 +195,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAgentRemove(w, r)
-	case path == "/agent/v1/info":
-		if r.Method != http.MethodGet {
-			writeMethodNotAllowed(w)
-			return
-		}
-		s.handleAgentInfo(w, r)
 	case strings.HasPrefix(path, "/api/agents/"):
 		s.handleAgentRoute(w, r)
-	case strings.HasPrefix(path, "/agent/v1/"):
-		s.handleAgentEndpoint(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 	}
@@ -274,10 +236,9 @@ func (s *Server) handleHealth(w http.ResponseWriter) {
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	report, err := commands.RunStatus(commands.StatusOptions{HomerHome: s.opts.HomerHome, JSON: true})
 	if err != nil {
-		// Listen-mode parity with the connect-mode executor: a fresh
-		// machine (no homer.json) is a LEGAL state — answer with the
-		// degraded empty report instead of 409→502, so the console's
-		// status drawer works identically across agent modes.
+		// A fresh machine (no homer.json) is a legal state: answer with a
+		// degraded empty report instead of 409→502 so the console can still
+		// show the machine's status drawer.
 		if core.IsConfigNotInitialized(err) {
 			writeJSON(w, http.StatusOK, struct {
 				OK     bool                  `json:"ok"`
@@ -339,9 +300,6 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
-	if s.handleLocalResolve(w, r) {
-		return
-	}
 	scope, err := readSyncScope(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
@@ -353,26 +311,17 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	if scope.Explicit {
 		adapters = scope.Adapters
 	}
-	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
-	if s.opts.SyncDeps != nil {
-		deps = s.opts.SyncDeps.PushDeps(adapters)
-		deps.UI = commands.HeadlessUI{}
-	}
 	report := commands.RunPush(commands.PushOptions{
 		HomerHome:    s.opts.HomerHome,
 		Yes:          confirmValue(r),
 		Adapters:     adapters,
 		Overwrite:    scope.Overwrite,
 		AllowSecrets: scope.AllowSecrets,
-	}, deps)
-	s.afterLocalWrite()
+	}, &commands.PushDeps{UI: commands.HeadlessUI{}})
 	writeWriteReport(w, report.OK, string(report.Status), report)
 }
 
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
-	if s.handleLocalResolve(w, r) {
-		return
-	}
 	scope, err := readSyncScope(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
@@ -385,11 +334,9 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		adapters = scope.Adapters
 	}
 	deps := &commands.PullDeps{UI: commands.HeadlessUI{}, NoFetch: true}
-	if s.opts.SyncDeps != nil {
-		deps = s.opts.SyncDeps.PullDeps()
-		deps.UI = commands.HeadlessUI{}
-	} else if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
-		// No-git data plane: the hub's current generation IS the remote.
+	if head, ok := gens.New(s.opts.HomerHome).Read(); ok {
+		// The current hub generation is the remote for this legacy local
+		// endpoint; remote agents use /api/snapshot instead.
 		if snapshot, err := readSnapshotFromGeneration(head); err == nil {
 			deps.HubSnapshot = snapshot
 		}
@@ -400,14 +347,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		Adapters:     adapters,
 		PreferRemote: scope.Overwrite,
 	}, deps)
-	s.afterLocalWrite()
 	writeWriteReport(w, report.OK, string(report.Status), report)
-}
-
-func (s *Server) afterLocalWrite() {
-	if s != nil && s.opts.AfterLocalWrite != nil {
-		s.opts.AfterLocalWrite()
-	}
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
@@ -456,33 +396,12 @@ func (s *Server) handleAgents(w http.ResponseWriter, _ *http.Request) {
 	}{true, agents})
 }
 
-func (s *Server) handleAgentInfo(w http.ResponseWriter, _ *http.Request) {
-	if s.opts.Identity == nil {
+func (s *Server) handleAgentEndpoint(w http.ResponseWriter, r *http.Request) {
+	if s.opts.AgentEndpoint == nil {
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		OK       bool           `json:"ok"`
-		Identity *AgentIdentity `json:"identity"`
-	}{true, s.opts.Identity})
-}
-
-func (s *Server) handleAgentEndpoint(w http.ResponseWriter, r *http.Request) {
-	if s.opts.AgentEndpoint == nil {
-		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
-		return
-	}
 	s.opts.AgentEndpoint.ServeHTTP(w, r)
-}
-
-// agentEndpointAuthorized consults the machine-credential authority for
-// /agent/v1/* requests at the web gate (per-agent secrets live in the
-// agent API, not in the web auth store).
-func (s *Server) agentEndpointAuthorized(r *http.Request) bool {
-	if s.opts.AgentEndpointAuthorized == nil {
-		return true // no separate authority: the endpoint's own check applies
-	}
-	return s.opts.AgentEndpointAuthorized(r)
 }
 
 func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
@@ -653,61 +572,6 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 		}
 	}
 	writeRemoteWriteReport(w, raw)
-}
-
-// handleLocalResolve runs ?resolve=local|center on a listen-mode agent.
-// It reports whether it handled the request.
-func (s *Server) handleLocalResolve(w http.ResponseWriter, r *http.Request) bool {
-	choice := r.URL.Query().Get("resolve")
-	if choice != "local" && choice != "center" {
-		return false
-	}
-	if s.opts.LocalResolve == nil {
-		writeError(w, http.StatusNotImplemented, "agents-disabled", "这台进程不能在本地裁决冲突", nil)
-		return true
-	}
-	raw, err := s.opts.LocalResolve(r.Context(), choice)
-	s.afterLocalWrite()
-	if err != nil {
-		writeErrorValue(w, err)
-		return true
-	}
-	writeRemoteWriteReport(w, raw)
-	return true
-}
-
-func (s *Server) handleLocalSSHKey(w http.ResponseWriter, r *http.Request) {
-	if s.opts.Identity == nil {
-		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
-		return
-	}
-	var payload struct {
-		GitHubUser string   `json:"githubUser"`
-		SSHKeys    []string `json:"sshKeys"`
-	}
-	if err := readJSONBody(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
-		return
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "无法确定用户主目录", []string{err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, sshkey.Install(home, payload.GitHubUser, payload.SSHKeys))
-}
-
-func (s *Server) handleLocalUpgrade(w http.ResponseWriter, r *http.Request) {
-	if s.opts.LocalUpgrade == nil {
-		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
-		return
-	}
-	raw, err := s.opts.LocalUpgrade()
-	if err != nil {
-		writeErrorValue(w, err)
-		return
-	}
-	writeUpgradeReport(w, raw)
 }
 
 func (s *Server) handleAgentUpgrade(w http.ResponseWriter, r *http.Request, agentID string) {

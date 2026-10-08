@@ -272,8 +272,19 @@ func TestJoinCommandRequiresAuth(t *testing.T) {
 	if response := requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x"); response.Code != http.StatusOK {
 		t.Fatalf("bearer join = %d body=%s", response.Code, response.Body)
 	}
-	if !strings.Contains(requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x").Body.String(), "curl -fsSL http://example.com/install.sh | sh -s -- --token hub-token-x") {
+	joined := requestWithToken(t, handler, http.MethodGet, "/api/auth/join", "hub-token-x")
+	if !strings.Contains(joined.Body.String(), "curl -fsSL http://example.com/install.sh | sh -s -- --token hub-token-x") {
 		t.Fatal("join response missing the install-pipe command")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(joined.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["listenCommand"]; exists {
+		t.Fatalf("removed listen command is still exposed: %s", joined.Body)
+	}
+	if payload["command"] == nil {
+		t.Fatalf("join response has no command: %s", joined.Body)
 	}
 }
 

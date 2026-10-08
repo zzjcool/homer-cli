@@ -1,11 +1,8 @@
 package web
 
 import (
-	"context"
-	"encoding/json"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/zzjcool/homer-cli/internal/adapter/opencode"
 	"github.com/zzjcool/homer-cli/internal/adapter/pi"
@@ -90,25 +87,6 @@ func applyCredentialProbe(choices []AdapterChoice, found map[string]bool) {
 	}
 }
 
-// probeCredentials asks the machine which of the paths are regular files.
-// A missing entry in the result means the machine could not be asked.
-func probeCredentials(ctx context.Context, actor KeyAgentSource, agentID string, paths []string) map[string]bool {
-	if actor == nil || len(paths) == 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	raw, err := actor.AgentKey(ctx, agentID, keyring.Command{Action: "exists", Paths: paths})
-	if err != nil {
-		return nil
-	}
-	var result keyring.Result
-	if json.Unmarshal(raw, &result) != nil || !result.OK {
-		return nil
-	}
-	return result.Exists
-}
-
 // SecretHit is a file the machine's secret scanner stopped on. Destination
 // is where the file lives on that machine, which is what the key form needs.
 type SecretHit struct {
@@ -116,53 +94,6 @@ type SecretHit struct {
 	Destination string `json:"destination"`
 	Reason      string `json:"reason,omitempty"`
 	Line        int    `json:"line,omitempty"`
-}
-
-// preflightSecrets asks a machine to run a collect without confirming. The
-// machine scans, then stops before writing anything (confirm=false is the
-// same gate "确认" opens), so the files that would be refused are known
-// before the user commits to 收取.
-func (s *Server) preflightSecrets(ctx context.Context, agentID string, ids []string) map[string][]SecretHit {
-	if s.opts.Agents == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	// No adapter list means "everything this machine has": the preflight now
-	// starts before the status reply, so it cannot know the list yet.
-	scope := SyncScope{}
-	if len(ids) > 0 {
-		scope = SyncScope{Explicit: true, Adapters: ids}
-	}
-	raw, err := s.opts.Agents.AgentPush(ctx, agentID, false, scope)
-	if err != nil {
-		return nil
-	}
-	var report struct {
-		Status  string `json:"status"`
-		Secrets []struct {
-			Path        string `json:"path"`
-			Description string `json:"description"`
-			Line        int    `json:"line"`
-		} `json:"secrets"`
-	}
-	if json.Unmarshal(raw, &report) != nil || report.Status != "secrets-rejected" {
-		return nil
-	}
-	config, _ := core.LoadConfig(s.paths())
-	hits := map[string][]SecretHit{}
-	seen := map[string]bool{}
-	for _, found := range report.Secrets {
-		if seen[found.Path] {
-			continue
-		}
-		seen[found.Path] = true
-		adapterID, destination := secretDestination(config, found.Path)
-		hits[adapterID] = append(hits[adapterID], SecretHit{
-			Path: found.Path, Destination: destination, Reason: found.Description, Line: found.Line,
-		})
-	}
-	return hits
 }
 
 // secretDestination turns a store path ("pi/files/web-search.json") into the

@@ -368,16 +368,10 @@ html { scroll-behavior: smooth; }
 <dialog id="dlg-join">
   <form method="dialog" style="margin:0">
     <h2>接入新机器</h2>
-    <p class="muted small">两种方向。机器在 NAT 后面用「机器上报」；hub 能直接访问这台机器的地址时用「中心直连」，并把命令里的占位地址换成那台机器的 IP。</p>
-    <p class="muted small">机器上报</p>
+    <p class="muted small">机器通过主动连接加入 hub，不需要开放入站端口。</p>
     <div class="join-cmd">
-      <input id="join-cmd" readonly aria-label="机器上报命令">
+      <input id="join-cmd" readonly aria-label="机器接入命令">
       <button id="btn-copy" type="button">复制</button>
-    </div>
-    <p class="muted small">中心直连</p>
-    <div class="join-cmd">
-      <input id="join-listen" readonly aria-label="中心直连命令">
-      <button id="btn-copy-listen" type="button">复制</button>
     </div>
     <p class="muted small hidden" id="copy-fallback">当前环境不支持自动复制：已全选文本，请按 Ctrl+C。</p>
     <p class="muted small" id="join-wait">机器用这个接入码连上之后，窗口会自己关上。</p>
@@ -399,11 +393,11 @@ const $ = id => document.getElementById(id);
  * GET  /api/console       {published, generation, machines:[{agentId,hostname,stale,drift:{push,pull,conflicts}}]}
  * GET  /api/status        {report:{...}} (机器视角的兼容端点)
  * GET  /api/diff?adapter&category  {empty, text}
- * GET  /api/sync/choices?direction=collect|dispatch|resolve&agent=<id>
+ * GET  /api/sync/choices?direction=collect|dispatch|resolve&agent=<id>&stream=1 (collect NDJSON)
  * POST /api/sync?direction=collect&agent=<id>&confirm=true   body {adapters}
  * POST /api/agents/<id>/pull?confirm=true                    body {adapters}
  * POST /api/resolve?choice=local|center&agent=<id>&confirm=true  在某台机器上裁决
- * GET  /api/agents        {agents:[{agentId,hostname,mode,lastSeen,stale,version,outdated,drift,host}]}
+ * GET  /api/agents        {agents:[{agentId,hostname,lastSeen,stale,version,outdated,drift,host}]}
  * GET  /api/keys
  * POST /api/keys                 {id, name, password}
  * POST /api/keys/encrypt         {id, file, path, password}
@@ -418,9 +412,12 @@ const app = {
   keys: [],
   scopeKeys: [],
   scopeChoices: [],
+  scopePrecheck: null,
   scopeStep: "choose",
   scopeHint: "",
-  precheckToken: 0,
+  scopeLoading: false,
+  scopeStreamFailed: false,
+  scopeStreamController: null,
   openDiffs: new Set(),   // 展开的 diff 抽屉，key = adapter/category（轮询不重置）
 };
 
@@ -445,6 +442,12 @@ async function api(path, opts = {}) {
     throw e;
   }
   return data;
+}
+function splitNDJSONLines(buffer, chunk, final = false) {
+  const parts = (buffer + chunk).split("\n");
+  const remainder = final ? "" : (parts.pop() || "");
+  const lines = parts.map(line => line.endsWith("\r") ? line.slice(0, -1) : line).filter(line => line.trim());
+  return { lines, remainder };
 }
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -716,8 +719,6 @@ function machineMeta(a) {
   if (host.arch) parts.push(host.arch);
   if (host.kernel) parts.push("内核 " + host.kernel);
   if (host.cpu && host.cpu.model) parts.push(host.cpu.model);
-  if (a.mode === "listen") parts.push(a.addr ? "直连 " + a.addr : "直连");
-  else parts.push("主动连接");
   parts.push(machineIdentity(a));
   if (a.stale) parts.push("离线");
   return parts.join(" · ");
@@ -1178,7 +1179,7 @@ function updateScopeConfirm() {
   const keys = dispatchKeysForSelection();
   if (app.scopeDirection === "dispatch" && app.scopeStep !== "unlock" && app.scopeStep !== "done") {
     ok.textContent = keys.length ? "下一步" : "确认下发";
-    ok.disabled = selectedAdapters().length === 0;
+    ok.disabled = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
     return;
   }
   if (app.scopeStep === "unlock") {
@@ -1186,7 +1187,7 @@ function updateScopeConfirm() {
     ok.disabled = readDispatchUnlocks().some(row => [...row.password].length < 8);
     return;
   }
-  ok.disabled = selectedAdapters().length === 0;
+  ok.disabled = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
   $("btn-confirm-alt").disabled = ok.disabled;
   if (app.scopeDirection === "collect" && app.scopeStep === "choose") {
     ok.textContent = unresolvedSecretHits(adaptersWithSecrets(selectedAdapters())).length ? "仍然收取（含疑似密钥）" : "确认收取";
@@ -1225,7 +1226,11 @@ function renderScopeChoices(data) {
   const box = $("confirm-choices");
   clear(box);
   const list = data.adapters || [];
-  if (!list.length) return;
+  if (!list.length) {
+    app.scopeChoices = list;
+    updateScopeConfirm();
+    return;
+  }
   const tools = el("div", "choice-tools");
   const setChecks = (mode) => {
     box.querySelectorAll("input[type=checkbox][data-adapter]").forEach(input => {
@@ -1322,35 +1327,164 @@ function renderScopeChoices(data) {
   alignKeyring(box);
   updateScopeConfirm();
 }
-// 收取前的预检要问机器两件事（哪些凭证文件在、哪些文件会被密钥扫描拦下），
-// 每件都要等机器下一次轮询。列表先出来，预检结果回来再补上提示，不堵弹窗。
-function loadCollectPrecheck(agent) {
-  const token = ++app.precheckToken;
-  const note = $("confirm-note");
-  const base = note.textContent;
-  note.textContent = base + "　正在检查密钥…";
-  api("/api/sync/precheck?agent=" + encodeURIComponent(agent.agentId))
-    .then(data => {
-      if (token !== app.precheckToken || !$("dlg-confirm").open) return;
-      // 重画列表会重置勾选，先记下用户已经点过的，画完再还原。
-      const checked = {};
-      $("confirm-choices").querySelectorAll("input[data-adapter]").forEach(input => { checked[input.dataset.adapter] = input.checked; });
-      (app.scopeChoices || []).forEach(item => {
-        item.credentials = (data.credentials && data.credentials[item.id]) || [];
-        item.secretHits = (data.secretHits && data.secretHits[item.id]) || [];
-      });
+function checkedScopeChoices() {
+  const checked = {};
+  $("confirm-choices").querySelectorAll("input[data-adapter]").forEach(input => {
+    checked[input.dataset.adapter] = input.checked;
+  });
+  return checked;
+}
+function renderCollectChoicesPreservingChecks() {
+  const checked = checkedScopeChoices();
+  app.scopeChoices = preserveCollectChoiceChecks(app.scopeChoices, checked);
+  renderScopeChoices({ hint: app.scopeHint || "正在读取机器状态…", adapters: app.scopeChoices });
+  alignKeyring($("confirm-choices"));
+  updateScopeConfirm();
+}
+function mergeCollectChoiceList(choices, incoming, precheck) {
+  if (!incoming || !incoming.id) return choices;
+  const out = (choices || []).slice();
+  const index = out.findIndex(item => item.id === incoming.id);
+  const previous = index >= 0 ? out[index] : {};
+  const choice = { ...previous, ...incoming };
+  if (!Object.prototype.hasOwnProperty.call(incoming, "credentials")) choice.credentials = previous.credentials || [];
+  if (!Object.prototype.hasOwnProperty.call(incoming, "secretHits")) choice.secretHits = previous.secretHits || [];
+  if (precheck) {
+    if (Object.prototype.hasOwnProperty.call(precheck.credentials, incoming.id)) {
+      choice.credentials = precheck.credentials[incoming.id] || [];
+    }
+    if (Object.prototype.hasOwnProperty.call(precheck.secretHits, incoming.id)) {
+      choice.secretHits = precheck.secretHits[incoming.id] || [];
+    }
+  }
+  if (index >= 0) out[index] = choice;
+  else out.push(choice);
+  return out;
+}
+function upsertCollectChoice(incoming) {
+  app.scopeChoices = mergeCollectChoiceList(app.scopeChoices, incoming, app.scopePrecheck);
+}
+function applyCollectPrecheckToChoices(choices, precheck) {
+  const credentials = precheck.credentials || {};
+  const secretHits = precheck.secretHits || {};
+  return (choices || []).map(item => {
+    const updated = { ...item };
+    if (Object.prototype.hasOwnProperty.call(credentials, item.id)) updated.credentials = credentials[item.id] || [];
+    if (Object.prototype.hasOwnProperty.call(secretHits, item.id)) updated.secretHits = secretHits[item.id] || [];
+    return updated;
+  });
+}
+function preserveCollectChoiceChecks(choices, checked) {
+  return (choices || []).map(item => ({
+    ...item,
+    checked: item.enabled && Object.prototype.hasOwnProperty.call(checked, item.id) ? checked[item.id] : item.checked,
+  }));
+}
+function applyCollectPrecheck(event) {
+  const credentials = event.credentials || {};
+  const secretHits = event.secretHits || {};
+  app.scopePrecheck = { credentials, secretHits };
+  app.scopeChoices = applyCollectPrecheckToChoices(app.scopeChoices, app.scopePrecheck);
+  renderCollectChoicesPreservingChecks();
+}
+function handleCollectStreamEvent(event, opts, controller) {
+  if (!$("dlg-confirm").open || app.scopeStreamController !== controller) return true;
+  switch (event.type) {
+    case "adapter": {
+      upsertCollectChoice(event.adapter);
+      renderCollectChoicesPreservingChecks();
+      const done = event.done == null ? app.scopeChoices.length : event.done;
+      const total = event.total == null ? app.scopeChoices.length : event.total;
+      $("confirm-note").textContent = "已读取 " + done + "/" + total + "；受影响文件会先备份。";
+      break;
+    }
+    case "precheck":
+      applyCollectPrecheck(event);
+      break;
+    case "keys":
+      app.scopeKeys = event.keys || [];
+      renderCollectChoicesPreservingChecks();
+      break;
+    case "done": {
+      const checked = checkedScopeChoices();
+      app.scopeChoices = preserveCollectChoiceChecks(event.adapters || [], checked);
+      app.scopeHint = event.hint || "选择要收取的适配器。";
       renderScopeChoices({ hint: app.scopeHint, adapters: app.scopeChoices });
-      $("confirm-choices").querySelectorAll("input[data-adapter]").forEach(input => {
-        if (!input.disabled && input.dataset.adapter in checked) input.checked = checked[input.dataset.adapter];
-      });
       alignKeyring($("confirm-choices"));
+      app.scopeLoading = false;
+      app.scopeStreamFailed = false;
+      app.pendingAction = opts.action;
+      app.scopeStreamController = null;
+      $("confirm-note").textContent = "受影响文件会先备份。";
       updateScopeConfirm();
-      note.textContent = base;
-    })
-    .catch(() => {
-      if (token !== app.precheckToken) return;
-      note.textContent = base;
+      return true;
+    }
+    case "error": {
+      const code = event.code ? "（" + event.code + "）" : "";
+      throw new Error((event.message || "机器收取检查失败") + code);
+    }
+    default:
+      // 允许未来向 Inspect 增加不影响 console 的进度事件。
+      break;
+  }
+  return false;
+}
+async function loadCollectChoicesStream(opts) {
+  const controller = new AbortController();
+  app.scopeStreamController = controller;
+  app.scopeLoading = true;
+  try {
+    const path = "/api/sync/choices?direction=collect&agent="
+      + encodeURIComponent(opts.agent.agentId) + "&stream=1";
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Accept": "application/x-ndjson" },
+      signal: controller.signal,
     });
+    if (!response.ok) {
+      let message = "请求失败（" + response.status + "）";
+      try {
+        const body = await response.json();
+        if (body.error && body.error.message) message = body.error.message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    if (!response.body || typeof response.body.getReader !== "function") {
+      throw new Error("浏览器不支持读取收取结果流");
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let remainder = "";
+    while (true) {
+      const part = await reader.read();
+      const text = decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
+      const parsed = splitNDJSONLines(remainder, text, part.done);
+      remainder = parsed.remainder;
+      for (const line of parsed.lines) {
+        let event;
+        try { event = JSON.parse(line); }
+        catch (_) { throw new Error("机器返回了无法解析的收取结果"); }
+        if (handleCollectStreamEvent(event, opts, controller)) {
+          await reader.cancel().catch(() => {});
+          return;
+        }
+      }
+      if (part.done) break;
+    }
+    throw new Error("收取结果流在完成前中断，请重试");
+  } catch (error) {
+    if (controller.signal.aborted || app.scopeStreamController !== controller || !$("dlg-confirm").open) return;
+    app.scopeLoading = false;
+    app.scopeStreamFailed = true;
+    app.scopeStreamController = null;
+    app.pendingAction = null;
+    const message = error && error.message ? error.message : "网络连接中断";
+    $("confirm-desc").textContent = "读取收取选项失败（尚未完成）：" + message;
+    $("confirm-note").textContent = "连接已中断。请重试后再收取。";
+    $("confirm-err").textContent = "没有收到完整的机器检查结果，不能继续收取。";
+    $("btn-confirm-ok").disabled = true;
+    $("btn-confirm-alt").disabled = true;
+  }
 }
 // 收取时，适配器自己的凭证文件（pi 的 auth.json 等）不会明文同步。
 // 机器上有这个文件、又没加密时，当场说明并给出“加密它”，而不是悄悄略过。
@@ -1436,7 +1570,8 @@ function encryptCredential(agent, rule, adapterId) {
   };
 }
 function openScopeDialog(opts) {
-  app.precheckToken++;
+  if (app.scopeStreamController) app.scopeStreamController.abort();
+  app.scopeStreamController = null;
   $("confirm-title").textContent = opts.title;
   $("confirm-desc").textContent = "正在读取可选项…";
   $("confirm-note").textContent = "受影响文件会先备份。";
@@ -1460,7 +1595,14 @@ function openScopeDialog(opts) {
   app.scopeHint = "";
   app.scopeKeys = [];
   app.scopeChoices = [];
+  app.scopePrecheck = null;
+  app.scopeLoading = opts.direction === "collect";
+  app.scopeStreamFailed = false;
   $("dlg-confirm").showModal();
+  if (opts.direction === "collect") {
+    void loadCollectChoicesStream(opts);
+    return;
+  }
   const keysRequest = opts.direction === "dispatch"
     ? keyApi(null, { action: "list" })
     : keyApi(opts.agent, { action: "list" });
@@ -1473,7 +1615,6 @@ function openScopeDialog(opts) {
       app.scopeKeys = (keysView && keysView.keys) || [];
       renderScopeChoices(data);
       app.pendingAction = opts.action;
-      if (opts.direction === "collect") loadCollectPrecheck(opts.agent);
     })
     .catch(e => {
       if (!$("dlg-confirm").open) return;
@@ -1556,6 +1697,10 @@ $("btn-confirm-back").addEventListener("click", ev => {
 });
 $("dlg-confirm").addEventListener("close", () => {
   stopDispatchWait();
+  if (app.scopeStreamController) app.scopeStreamController.abort();
+  app.scopeStreamController = null;
+  app.scopeLoading = false;
+  app.scopeStreamFailed = false;
   $("btn-confirm-alt").classList.add("hidden");
   app.pendingAction = null;
   app.scopeStep = "choose";
@@ -2479,16 +2624,13 @@ async function openJoin() {
   $("copy-fallback").classList.add("hidden");
   $("btn-copy").textContent = "复制";
   $("join-cmd").value = "获取中…";
-  $("join-listen").value = "获取中…";
   dlg.showModal();
   try {
     const d = await api("/api/auth/join");
     $("join-cmd").value = d.command;
-    $("join-listen").value = d.listenCommand || "";
     watchJoinCode(d.code || "");
   } catch (e) {
     $("join-cmd").value = "";
-    $("join-listen").value = "";
     toast("获取接入命令失败：" + e.message);
     dlg.close();
   }
@@ -2505,7 +2647,6 @@ function copyJoin(inputId, buttonId) {
   });
 }
 $("btn-copy").addEventListener("click", () => copyJoin("join-cmd", "btn-copy"));
-$("btn-copy-listen").addEventListener("click", () => copyJoin("join-listen", "btn-copy-listen"));
 $("btn-join-top").addEventListener("click", openJoin);
 // 「完成」：关闭对话框并立即刷新——新机器此刻应该已经出现在列表里
 // （若 agent 还在安装/启动，几秒后 30s 轮询也会补上）。

@@ -377,12 +377,11 @@ func (s *Server) handleAuthAPI(w http.ResponseWriter, r *http.Request, path stri
 			writeError(w, http.StatusUnauthorized, "unauthorized", "未授权", nil)
 			return
 		}
-		connect, listen, code := s.joinCommandsForRequest(r)
+		command, code := s.joinCommandsForRequest(r)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":            true,
-			"command":       connect,
-			"listenCommand": listen,
-			"code":          code,
+			"ok":      true,
+			"command": command,
+			"code":    code,
 		})
 	case path == "/api/auth/join/status" && r.Method == http.MethodGet:
 		if !s.authorized(r) {
@@ -491,39 +490,23 @@ func validatePassword(password string) string {
 	return ""
 }
 
-// joinCommandForRequest renders the full one-line bootstrap for
-// authenticated administrators: a Tailscale-style install pipe carrying a
-// freshly minted one-time enrollment code. The shared hub token is never
-// exposed here — each machine gets its own credential at enrollment.
-func (s *Server) joinCommandForRequest(r *http.Request) string {
-	connect, _, _ := s.joinCommandsForRequest(r)
-	return connect
-}
-
-// joinCommandsForRequest mints one enrollment code and renders both
-// bootstrap lines: the machine dials the hub, or the hub dials the machine.
-// The code is empty when the hub has no one-time enrollment manager.
-func (s *Server) joinCommandsForRequest(r *http.Request) (string, string, string) {
+// joinCommandsForRequest renders the single supported bootstrap command for
+// authenticated administrators: the machine connects to this hub over its
+// outbound agent stream. The code is empty when enrollment is not enabled.
+func (s *Server) joinCommandsForRequest(r *http.Request) (string, string) {
 	base := requestBaseURL(r)
 	if s.opts.Enrollment == nil {
 		if s.opts.Token == "" {
-			return fmt.Sprintf("homer agent --connect %s", base),
-				fmt.Sprintf("homer agent --listen 0.0.0.0:7761 --advertise http://<这台机器的IP>:7761 --hub %s", base),
-				""
+			return fmt.Sprintf("homer agent --hub %s", base), ""
 		}
 		token := s.opts.Token
-		return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, token),
-			fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s --listen 0.0.0.0:7761 --advertise http://<这台机器的IP>:7761", base, token),
-			""
+		return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, token), ""
 	}
 	code, err := s.opts.Enrollment.Mint(24 * time.Hour)
 	if err != nil {
-		message := fmt.Sprintf("# 接入码生成失败: %s", err.Error())
-		return message, message, ""
+		return fmt.Sprintf("# 接入码生成失败: %s", err.Error()), ""
 	}
-	connect := fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, code)
-	listen := fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s --listen 0.0.0.0:7761 --advertise http://<这台机器的IP>:7761", base, code)
-	return connect, listen, code
+	return fmt.Sprintf("curl -fsSL %s/install.sh | sh -s -- --token %s", base, code), code
 }
 
 // readJSONBody decodes a small JSON request body (auth payloads only).

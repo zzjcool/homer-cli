@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -338,45 +339,63 @@ func (s *Server) syncToOthers(w http.ResponseWriter, r *http.Request, confirmed 
 // fanoutPullOnlineAgents asks every online machine to apply the center's
 // content. Stale machines are reported skipped; single failures never
 // break the loop.
+const maxConcurrentAgentPulls = 8
+
 func fanoutPullOnlineAgents(ctx context.Context, agents AgentsSource, scope SyncScope) []agentApplyResult {
-	results := []agentApplyResult{}
 	if agents == nil {
-		return results
+		return []agentApplyResult{}
 	}
-	for _, info := range agents.ListAgents() {
-		name := info.Hostname
-		if name == "" {
-			name = info.AgentID
-		}
-		result := agentApplyResult{AgentID: info.AgentID, Hostname: name, OK: true}
-		if info.Stale {
-			result.Skipped = true
-			results = append(results, result)
-			continue
-		}
-		raw, err := agents.AgentPull(ctx, info.AgentID, true, scope)
-		switch {
-		case err != nil:
-			result.OK = false
-			var agentErr *AgentError
-			if errors.As(err, &agentErr) && agentErr.Code == "agent-timeout" {
-				result.Error = name + msgAgentTimeout
-			} else {
-				result.Error = name + msgAgentUnreachable
+	infos := agents.ListAgents()
+	results := make([]agentApplyResult, len(infos))
+	jobs := make(chan int)
+	workers := min(maxConcurrentAgentPulls, len(infos))
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				info := infos[index]
+				name := info.Hostname
+				if name == "" {
+					name = info.AgentID
+				}
+				result := agentApplyResult{AgentID: info.AgentID, Hostname: name, OK: true}
+				if info.Stale {
+					result.Skipped = true
+					results[index] = result
+					continue
+				}
+				raw, err := agents.AgentPull(ctx, info.AgentID, true, scope)
+				switch {
+				case err != nil:
+					result.OK = false
+					var agentErr *AgentError
+					if errors.As(err, &agentErr) && agentErr.Code == "agent-timeout" {
+						result.Error = name + msgAgentTimeout
+					} else {
+						result.Error = name + msgAgentUnreachable
+					}
+				default:
+					var payload struct {
+						OK     bool   `json:"ok"`
+						Status string `json:"status"`
+					}
+					if json.Unmarshal(raw, &payload) != nil || !payload.OK {
+						result.OK = false
+						result.Status = payload.Status
+						result.Error = name + msgAgentNotApplied
+					}
+				}
+				results[index] = result
 			}
-		default:
-			var payload struct {
-				OK     bool   `json:"ok"`
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(raw, &payload) != nil || !payload.OK {
-				result.OK = false
-				result.Status = payload.Status
-				result.Error = name + msgAgentNotApplied
-			}
-		}
-		results = append(results, result)
+		}()
 	}
+	for index := range infos {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
 	return results
 }
 
@@ -508,6 +527,12 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "no-snapshot", "中心还没有任何快照（先从一台机器同步到其他机器）", nil)
 		return
 	}
+	etag := fmt.Sprintf("\"g%d\"", head.Generation)
+	w.Header().Set("ETag", etag)
+	if ifNoneMatch(r.Header.Values("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	store := map[string]map[string]string{}
 	_ = filepath.WalkDir(head.StoreDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
@@ -537,6 +562,18 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) 
 		HomerJSON:  string(head.Meta),
 		Store:      store,
 	})
+}
+
+func ifNoneMatch(values []string, etag string) bool {
+	for _, value := range values {
+		for _, candidate := range strings.Split(value, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "*" || strings.TrimPrefix(candidate, "W/") == etag {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // publishGeneration is the hub-side push sink: it publishes the prepared

@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
 )
 
@@ -30,8 +29,6 @@ type AgentIdentity struct {
 type AgentInfo struct {
 	AgentID  string    `json:"agentId"`
 	Hostname string    `json:"hostname"`
-	Mode     string    `json:"mode"`
-	Addr     string    `json:"addr,omitempty"`
 	LastSeen time.Time `json:"lastSeen"`
 	Version  string    `json:"version,omitempty"`
 	// Outdated is true when this machine reported a version older than the
@@ -41,7 +38,7 @@ type AgentInfo struct {
 	// than hub.AgentStaleAfter; the UI renders it as an offline status dot.
 	Stale bool `json:"stale"`
 	// Drift is the machine's last self-reported status summary (uploaded
-	// with each poll): counts relative to the storage it last synced with.
+	// with heartbeats): counts relative to the storage it last synced with.
 	Drift *AgentDrift `json:"drift,omitempty"`
 	// Host is the machine's last self-reported resource snapshot.
 	Host *HostSnapshot `json:"host,omitempty"`
@@ -152,50 +149,16 @@ type ServeOptions struct {
 	Addr          string
 	HomerHome     string
 	Token         string
-	Identity      *AgentIdentity
 	Agents        AgentsSource
 	AgentEndpoint http.Handler
-	// AgentEndpointAuthorized mirrors the agent API's machine-credential
-	// check (per-agent secrets) for the web layer's /agent/v1/* gate.
-	// When nil the endpoint's own authorized() still applies inside.
+	// AgentEndpointAuthorized mirrors the machine-credential authority for
+	// /api/* and /dl/*, which also accept enrolled agents' per-agent secrets.
 	AgentEndpointAuthorized func(r *http.Request) bool
 	// Enrollment is the shared Tailscale-style enrollment manager: the
 	// console mints one-time codes and revokes per-agent secrets through
 	// it. Declared as an interface to keep the web package free of the
 	// hub dependency (hub imports web for AgentsSource).
 	Enrollment EnrollmentService
-	// SyncDeps supplies the no-git data-plane transport for this server's
-	// /api/push and /api/pull (an agent's own web endpoint executes pulls
-	// pushed by the hub's dispatcher). When nil the legacy git transport
-	// runs.
-	SyncDeps SyncDepsSource
-	// LocalResolve runs a conflict choice on this process. Set only on a
-	// listen-mode agent, where the hub dials /api/push or /api/pull with
-	// ?resolve=local|center.
-	LocalResolve func(ctx context.Context, choice string) (json.RawMessage, error)
-	// LocalUpgrade replaces this process's homer binary with the hub's.
-	// Set only on a listen-mode agent. The console reaches connect-mode
-	// machines through an upgrade task instead.
-	LocalUpgrade func() (json.RawMessage, error)
-	// LocalToolUpgrade upgrades one program an adapter drives (pi, herdr...)
-	// on this machine and returns the report. Set only on a listen-mode
-	// agent; connect-mode machines get an upgrade task instead.
-	LocalToolUpgrade func(ctx context.Context, tool string) (json.RawMessage, error)
-	// AfterLocalWrite runs after this process applies a push, pull, or
-	// conflict choice. The agent uses it to drop a throttled drift cache
-	// so the next heartbeat matches what the write just did.
-	AfterLocalWrite func()
-}
-
-// SyncDepsSource builds command deps per request. The snapshot/secret
-// pair is the no-git transport; the sink uploads prepared snapshots.
-type SyncDepsSource interface {
-	// PullDeps returns deps for /api/pull on this server's home.
-	PullDeps() *commands.PullDeps
-	// PushDeps returns deps for /api/push on this server's home.
-	// adapters is nil for an unrestricted push and the explicit selection
-	// otherwise; the sink must publish that selection as a merge.
-	PushDeps(adapters []string) *commands.PushDeps
 }
 
 // EnrollmentService is the subset of the enrollment manager the console
@@ -236,15 +199,13 @@ func NewServer(opts ServeOptions) (*Server, error) {
 		})
 		opts.HomerHome = paths.Home
 	}
-	// Advisor rule 4: a hub console without an administrator password
-	// refuses to bind beyond loopback. A listen-mode agent (Identity set)
-	// is not a console: it binds so the hub can dial it, and every request
-	// still needs the per-agent secret.
+	// A hub console without an administrator password refuses to bind
+	// beyond loopback.
 	hasPassword := false
 	if info, err := os.Stat(filepath.Join(opts.HomerHome, "keys", "hub-password")); err == nil && !info.IsDir() {
 		hasPassword = true
 	}
-	if opts.Identity == nil && opts.Token == "" && !hasPassword && !isLoopbackAddr(opts.Addr) {
+	if opts.Token == "" && !hasPassword && !isLoopbackAddr(opts.Addr) {
 		return nil, fmt.Errorf("尚未设置管理员密码：请先用回环地址启动（homer serve）并在浏览器完成初始化，或用 --token 提供机器令牌")
 	}
 	server := &Server{opts: opts, auth: newAuthStore()}
