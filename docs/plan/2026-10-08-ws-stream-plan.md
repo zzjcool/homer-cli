@@ -435,7 +435,8 @@ type InspectParams struct {
 }
 type InspectEvent struct {
 	Stage       string                         `json:"stage"` // adapter | credentials | secrets | keys | queued
-	Done, Total int                            `json:"done,omitempty","total,omitempty"`
+	Done        int                            `json:"done,omitempty"`
+	Total       int                            `json:"total,omitempty"`
 	Adapter     *commands.StatusAdapterReport  `json:"adapter,omitempty"`
 	Present     map[string]bool                `json:"present,omitempty"`
 	Secrets     []InspectSecret                `json:"secrets,omitempty"`
