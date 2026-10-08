@@ -1,380 +1,272 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/stream"
+	"github.com/zzjcool/homer-cli/internal/stream/streamtest"
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 )
 
-func registryTestAgent(agentID string) AgentInfo {
-	return AgentInfo{
-		AgentID:  agentID,
-		Hostname: agentID + "-host",
-		Mode:     AgentModeConnect,
-		Version:  "test",
-	}
+func registryTestSession() (*stream.Session, stream.Conn) {
+	left, right := streamtest.Pipe(streamtest.PipeOptions{})
+	return stream.NewSession(left, stream.Options{}), right
 }
 
-func registryTestTask(taskID string) Task {
-	return Task{
-		TaskID:    taskID,
-		Kind:      TaskKindStatus,
-		CreatedAt: time.Now(),
-	}
-}
-
-func TestRegisterUpsertAndList(t *testing.T) {
+func TestRegistryAttach(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(AgentInfo{AgentID: "agent-b", Hostname: "box-b", Mode: AgentModeConnect, Version: "v1"}); err != nil {
-		t.Fatalf("register agent-b: %v", err)
+	first, firstPeer := registryTestSession()
+	defer firstPeer.CloseNow()
+	defer first.Close(stream.CloseNormal, "test complete")
+
+	info := AgentInfo{
+		AgentID:  "agent-a",
+		Hostname: "box-a",
+		Version:  "v1",
+		Drift:    &AgentDrift{Push: 1},
+		Host:     &HostSnapshot{OS: "linux"},
+		Tools:    []toolctl.Status{{ID: "pi", Version: "1.0"}},
 	}
-	if err := r.Register(AgentInfo{AgentID: "agent-a", Hostname: "box-a", Mode: AgentModeListen, Addr: "http://box-a:7761", Version: "v1"}); err != nil {
-		t.Fatalf("register agent-a: %v", err)
+	if previous := r.Attach(info, first); previous != nil {
+		t.Fatalf("first Attach() returned previous session %p", previous)
 	}
-	if err := r.Register(AgentInfo{AgentID: "agent-b", Hostname: "box-b-new", Mode: AgentModeConnect, Version: "v2"}); err != nil {
-		t.Fatalf("upsert agent-b: %v", err)
+	if got, ok := r.Session("agent-a"); !ok || got != first {
+		t.Fatalf("Session() = (%p, %v), want first session", got, ok)
+	}
+	listed, ok := r.Get("agent-a")
+	if !ok || listed.Stale || listed.LastSeen.IsZero() {
+		t.Fatalf("newly attached agent = %+v, found=%v; want a live non-stale agent", listed, ok)
 	}
 
-	got := r.List()
-	if len(got) != 2 {
-		t.Fatalf("List() returned %d agents, want 2", len(got))
+	second, secondPeer := registryTestSession()
+	defer secondPeer.CloseNow()
+	defer second.Close(stream.CloseNormal, "test complete")
+	previous := r.Attach(AgentInfo{AgentID: "agent-a", Hostname: "box-a-new"}, second)
+	if previous != first {
+		t.Fatalf("second Attach() returned %p, want first session %p", previous, first)
 	}
-	if ids := []string{got[0].AgentID, got[1].AgentID}; !reflect.DeepEqual(ids, []string{"agent-a", "agent-b"}) {
-		t.Fatalf("List() IDs = %v, want [agent-a agent-b]", ids)
+	// A late disconnect from the replaced session must not detach its successor.
+	r.Detach("agent-a", first)
+	if got, ok := r.Session("agent-a"); !ok || got != second {
+		t.Fatalf("stale Detach() cleared the current session: (%p, %v)", got, ok)
 	}
-	if got[1].Hostname != "box-b-new" || got[1].Version != "v2" {
-		t.Fatalf("upserted agent-b = %+v", got[1])
+	updated, ok := r.Get("agent-a")
+	if !ok || updated.Hostname != "box-a-new" || updated.Version != "v1" || updated.Drift == nil || updated.Drift.Push != 1 || updated.Host == nil || updated.Host.OS != "linux" || len(updated.Tools) != 1 || updated.Tools[0].ID != "pi" {
+		t.Fatalf("Attach() failed to refresh identity or preserve omitted reports: %+v", updated)
 	}
 
-	got[0].Hostname = "mutated"
-	got[0].LastSeen = time.Time{}
+	r.Detach("agent-a", second)
+	if got, ok := r.Session("agent-a"); ok || got != nil {
+		t.Fatalf("Detach(current) left a session: (%p, %v)", got, ok)
+	}
+	afterDetach, ok := r.Get("agent-a")
+	if !ok || !afterDetach.Stale {
+		t.Fatalf("agent without a session is not stale: %+v, found=%v", afterDetach, ok)
+	}
+}
+
+func TestRegistryAttachStaleDerivation(t *testing.T) {
+	r := NewRegistry()
+	sess, peer := registryTestSession()
+	defer peer.CloseNow()
+	defer sess.Close(stream.CloseNormal, "test complete")
+
+	old := time.Now().Add(-AgentStaleAfter)
+	r.Attach(AgentInfo{AgentID: "agent-a", LastSeen: old}, sess)
 	info, ok := r.Get("agent-a")
-	if !ok {
-		t.Fatal("Get(agent-a) reported missing agent")
+	if !ok || !info.Stale {
+		t.Fatalf("active session with stale LastSeen = %+v, want stale", info)
 	}
-	if info.Hostname != "box-a" || info.LastSeen.IsZero() {
-		t.Fatalf("mutating List result changed registry: %+v", info)
+	r.Touch("agent-a")
+	info, _ = r.Get("agent-a")
+	if info.Stale || !info.LastSeen.After(old) {
+		t.Fatalf("Touch() did not refresh liveness: %+v", info)
+	}
+
+	sess.Close(stream.CloseGoingAway, "test close")
+	info, ok = r.Get("agent-a")
+	if !ok || !info.Stale {
+		t.Fatalf("closed session is not stale before Detach: %+v, found=%v", info, ok)
 	}
 }
 
-func TestRegisterValidation(t *testing.T) {
+func TestRegistryAttachConcurrent(t *testing.T) {
 	r := NewRegistry()
-	tests := []struct {
-		name string
-		info AgentInfo
-	}{
-		{name: "empty agent id", info: AgentInfo{Mode: AgentModeConnect}},
-		{name: "listen without address", info: AgentInfo{AgentID: "listen", Mode: AgentModeListen}},
-		{name: "invalid mode", info: AgentInfo{AgentID: "invalid", Mode: AgentMode("other")}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := r.Register(tt.info); err == nil {
-				t.Fatal("Register() succeeded for invalid agent")
-			}
-		})
-	}
-}
-
-func TestEnqueueUnknownAgentAndFull(t *testing.T) {
-	r := NewRegistry()
-	if err := r.Enqueue("missing", registryTestTask("missing-task")); err == nil {
-		t.Fatal("Enqueue() succeeded for an unknown agent")
-	}
-	if err := r.Register(registryTestAgent("agent-a")); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	for i := 0; i < TaskQueueCapacity; i++ {
-		if err := r.Enqueue("agent-a", registryTestTask(fmt.Sprintf("task-%02d", i))); err != nil {
-			t.Fatalf("Enqueue(%d): %v", i, err)
-		}
-	}
-	if err := r.Enqueue("agent-a", registryTestTask("task-over-capacity")); err == nil {
-		t.Fatal("Enqueue() succeeded after queue reached capacity")
-	}
-}
-
-func TestPollImmediateAndWakes(t *testing.T) {
-	r := NewRegistry()
-	if err := r.Register(registryTestAgent("agent-a")); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	if err := r.Enqueue("agent-a", registryTestTask("immediate")); err != nil {
-		t.Fatalf("enqueue immediate: %v", err)
-	}
-	got, ok := r.Poll("agent-a", 0, context.Background())
-	if !ok || got.TaskID != "immediate" {
-		t.Fatalf("immediate Poll() = (%+v, %v), want immediate task", got, ok)
-	}
-	if gotAgain, ok := r.Poll("agent-a", 0, context.Background()); ok || gotAgain.TaskID != "" {
-		t.Fatalf("task was delivered more than once: (%+v, %v)", gotAgain, ok)
-	}
-
-	started := make(chan struct{})
-	result := make(chan struct {
-		task    Task
-		ok      bool
-		elapsed time.Duration
-	}, 1)
-	go func() {
-		start := time.Now()
-		close(started)
-		task, ok := r.Poll("agent-a", time.Second, context.Background())
-		result <- struct {
-			task    Task
-			ok      bool
-			elapsed time.Duration
-		}{task: task, ok: ok, elapsed: time.Since(start)}
-	}()
-	<-started
-	time.Sleep(10 * time.Millisecond)
-	if err := r.Enqueue("agent-a", registryTestTask("woken")); err != nil {
-		t.Fatalf("enqueue woken: %v", err)
-	}
-	select {
-	case got := <-result:
-		if !got.ok || got.task.TaskID != "woken" {
-			t.Fatalf("woken Poll() = (%+v, %v)", got.task, got.ok)
-		}
-		if got.elapsed > 200*time.Millisecond {
-			t.Fatalf("Poll() wake took %s, want <= 200ms", got.elapsed)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Poll() did not wake after Enqueue()")
-	}
-	if got, ok := r.Poll("agent-a", 0, context.Background()); ok || got.TaskID != "" {
-		t.Fatalf("woken task was delivered more than once: (%+v, %v)", got, ok)
-	}
-}
-
-func TestPollWaitTimeoutAndCtx(t *testing.T) {
-	r := NewRegistry()
-	if err := r.Register(registryTestAgent("agent-a")); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	start := time.Now()
-	if got, ok := r.Poll("agent-a", 40*time.Millisecond, context.Background()); ok || got.TaskID != "" {
-		t.Fatalf("timeout Poll() = (%+v, %v), want no task", got, ok)
-	}
-	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
-		t.Fatalf("Poll() returned after %s, want it to wait for its timeout", elapsed)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	start = time.Now()
-	if got, ok := r.Poll("agent-a", time.Second, ctx); ok || got.TaskID != "" {
-		t.Fatalf("cancelled Poll() = (%+v, %v), want no task", got, ok)
-	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("cancelled Poll() took %s", elapsed)
-	}
-}
-
-func TestSubmitWaitRoundtrip(t *testing.T) {
-	r := NewRegistry()
-	if err := r.Register(registryTestAgent("agent-a")); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	task := registryTestTask("roundtrip")
-	if err := r.Enqueue("agent-a", task); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
-	polled, ok := r.Poll("agent-a", 0, context.Background())
-	if !ok || polled.TaskID != task.TaskID {
-		t.Fatalf("Poll() = (%+v, %v)", polled, ok)
-	}
-
-	result := TaskResult{
-		TaskID:  task.TaskID,
-		AgentID: "agent-a",
-		OK:      true,
-		Kind:    TaskKindStatus,
-		Report:  json.RawMessage(`{"status":"ok"}`),
-	}
-	if err := r.Submit(result); err != nil {
-		t.Fatalf("Submit(): %v", err)
-	}
-	result.Report[0] = 'X'
-	got, err := r.Wait(context.Background(), task.TaskID)
-	if err != nil {
-		t.Fatalf("Wait(): %v", err)
-	}
-	want := TaskResult{
-		TaskID:  task.TaskID,
-		AgentID: "agent-a",
-		OK:      true,
-		Kind:    TaskKindStatus,
-		Report:  json.RawMessage(`{"status":"ok"}`),
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Wait() = %+v, want %+v", got, want)
-	}
-	got.Report[0] = 'Y'
-	gotAgain, err := r.Wait(context.Background(), task.TaskID)
-	if err != nil {
-		t.Fatalf("second Wait(): %v", err)
-	}
-	if !reflect.DeepEqual(gotAgain, want) {
-		t.Fatalf("Wait() result was not copied: %+v, want %+v", gotAgain, want)
-	}
-	if err := r.Submit(result); err == nil {
-		t.Fatal("duplicate Submit() succeeded")
-	}
-	if err := r.Submit(TaskResult{TaskID: "unknown"}); err == nil {
-		t.Fatal("Submit() for unknown task succeeded")
-	}
-}
-
-func TestTaskTTLExpiry(t *testing.T) {
-	r := NewRegistry()
-	if err := r.Register(registryTestAgent("agent-a")); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	task := registryTestTask("expired")
-	task.CreatedAt = time.Now().Add(-TaskTTL - time.Second)
-	if err := r.Enqueue("agent-a", task); err != nil {
-		t.Fatalf("enqueue expired task: %v", err)
-	}
-	if got, ok := r.Poll("agent-a", 0, context.Background()); ok || got.TaskID != "" {
-		t.Fatalf("expired Poll() = (%+v, %v), want no task", got, ok)
-	}
-	if err := r.Submit(TaskResult{TaskID: task.TaskID}); err == nil {
-		t.Fatal("Submit() for expired task succeeded")
-	}
-	if _, err := r.Wait(context.Background(), task.TaskID); err == nil {
-		t.Fatal("Wait() for expired task succeeded")
-	}
-}
-
-func TestTouchAndStale(t *testing.T) {
-	r := NewRegistry()
-	old := time.Now().Add(-AgentStaleAfter - time.Second)
-	if err := r.Register(AgentInfo{
-		AgentID:  "old-agent",
-		Hostname: "old-host",
-		Mode:     AgentModeConnect,
-		LastSeen: old,
-	}); err != nil {
-		t.Fatalf("register old agent: %v", err)
-	}
-	listed := r.List()
-	if len(listed) != 1 || !listed[0].Stale {
-		t.Fatalf("stale List() = %+v, want one stale agent", listed)
-	}
-	r.Touch("old-agent")
-	info, ok := r.Get("old-agent")
-	if !ok {
-		t.Fatal("Get() reported missing touched agent")
-	}
-	if !info.LastSeen.After(old) {
-		t.Fatalf("Touch() LastSeen = %s, want after %s", info.LastSeen, old)
-	}
-	listed = r.List()
-	if listed[0].Stale {
-		t.Fatalf("touched agent remained stale: %+v", listed[0])
-	}
-	r.Touch("missing")
-}
-
-func TestRegistryConcurrent(t *testing.T) {
-	r := NewRegistry()
-	if err := r.Register(registryTestAgent("shared")); err != nil {
-		t.Fatalf("register shared: %v", err)
-	}
-
+	const workers = 40
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := 0; i < workers; i++ {
 		i := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			agentID := "shared"
-			if i%5 == 0 {
-				agentID = fmt.Sprintf("agent-%02d", i)
-				_ = r.Register(registryTestAgent(agentID))
+			sess, peer := registryTestSession()
+			defer peer.CloseNow()
+			previous := r.Attach(AgentInfo{AgentID: "shared", Hostname: "host"}, sess)
+			if previous != nil {
+				previous.Close(stream.CloseSuperseded, "test replacement")
+				r.Detach("shared", previous)
 			}
-			_ = r.Register(registryTestAgent("shared"))
-			_ = r.Enqueue(agentID, registryTestTask(fmt.Sprintf("concurrent-%02d", i)))
-			_ = r.Enqueue("unknown", registryTestTask(fmt.Sprintf("unknown-%02d", i)))
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			task, ok := r.Poll(agentID, 20*time.Millisecond, ctx)
-			cancel()
-			if ok {
-				_ = r.Submit(TaskResult{TaskID: task.TaskID, AgentID: agentID, Kind: task.Kind})
+			if i%2 == 0 {
+				r.Touch("shared")
+				_, _ = r.Get("shared")
 			}
-			_, _ = r.Get(agentID)
-			_ = r.List()
-			if i%3 == 0 {
-				r.Touch(agentID)
-			}
+			r.Detach("shared", sess)
+			sess.Close(stream.CloseNormal, "test complete")
 		}()
 	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("concurrent registry operations did not finish; possible deadlock")
+	wg.Wait()
+	if got := r.List(); len(got) != 1 || got[0].AgentID != "shared" {
+		t.Fatalf("List() = %+v, want the retained agent record", got)
 	}
-
-	got := r.List()
-	if !sort.SliceIsSorted(got, func(i, j int) bool { return got[i].AgentID < got[j].AgentID }) {
-		t.Fatalf("List() returned agents out of order: %+v", got)
+	if _, ok := r.Session("shared"); ok {
+		t.Fatal("all concurrent sessions detached, but one remains current")
 	}
 }
 
-// Remove drops a machine from the registry entirely (vs. Revocation which
-// only kills the credential). Removed agents 404 on the next poll and
-// re-register via the standard recovery path if they still hold a valid
-// credential.
-func TestRegistryRemove(t *testing.T) {
+func TestRegistryListSortsAndReturnsCopies(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(AgentInfo{AgentID: "gone-agent", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"b", "a"} {
+		sess, peer := registryTestSession()
+		r.Attach(AgentInfo{AgentID: id, Hostname: id, Host: &HostSnapshot{OS: "linux"}, Tools: []toolctl.Status{{ID: "pi", Version: "1.0"}}}, sess)
+		defer peer.CloseNow()
+		defer sess.Close(stream.CloseNormal, "test complete")
 	}
-	if ok := r.Remove("gone-agent"); !ok {
-		t.Fatal("remove reported nothing removed")
+	got := r.List()
+	if len(got) != 2 || !sort.SliceIsSorted(got, func(i, j int) bool { return got[i].AgentID < got[j].AgentID }) {
+		t.Fatalf("List() order = %+v", got)
 	}
-	if _, ok := r.Get("gone-agent"); ok {
-		t.Fatal("removed agent still present")
+	got[0].Hostname = "mutated"
+	got[0].Host.OS = "mutated"
+	got[0].Tools[0].Version = "mutated"
+	again, ok := r.Get("a")
+	if !ok || again.Hostname != "a" || again.Host == nil || again.Host.OS != "linux" || again.Tools[0].Version != "1.0" {
+		t.Fatalf("List() returned registry-owned values: %+v", again)
 	}
-	if ok := r.Remove("gone-agent"); ok {
-		t.Fatal("second remove should report nothing")
+}
+
+func TestRegistryUpdatesAndRemove(t *testing.T) {
+	r := NewRegistry()
+	sess, peer := registryTestSession()
+	defer peer.CloseNow()
+	defer sess.Close(stream.CloseNormal, "test complete")
+	r.Attach(AgentInfo{AgentID: "agent-a"}, sess)
+
+	r.UpdateVersion("agent-a", " v2 ")
+	r.UpdateDrift("agent-a", AgentDrift{Pull: 2})
+	r.UpdateHost("agent-a", HostSnapshot{OS: "linux"})
+	r.UpdateTools("agent-a", []toolctl.Status{{ID: "pi", Version: "1.0"}})
+	info, ok := r.Get("agent-a")
+	if !ok || info.Version != "v2" || info.Drift == nil || info.Drift.Pull != 2 || info.Host == nil || info.Host.OS != "linux" || len(info.Tools) != 1 {
+		t.Fatalf("updates = %+v", info)
+	}
+	r.UpdateVersion("missing", "v3")
+	r.UpdateDrift("missing", AgentDrift{})
+	r.UpdateHost("missing", HostSnapshot{OS: "nope"})
+	r.UpdateTools("missing", []toolctl.Status{{ID: "pi"}})
+	r.NoteToolVersion("agent-a", "pi", "1.1")
+	info, _ = r.Get("agent-a")
+	if info.Tools[0].Version != "1.1" {
+		t.Fatalf("NoteToolVersion() = %+v", info.Tools)
+	}
+
+	if !r.Remove("agent-a") || r.Remove("agent-a") {
+		t.Fatal("Remove() did not remove the current agent exactly once")
+	}
+	if _, ok := r.Get("agent-a"); ok {
+		t.Fatal("removed agent remains in the registry")
 	}
 }
 
 func TestNoteWriteOutcomeReplacesFreshMachineMarker(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(AgentInfo{
+	r.Attach(AgentInfo{
 		AgentID: "box",
-		Mode:    AgentModeConnect,
-		Drift:   &AgentDrift{Error: "未找到 homer 配置: /root/.homer/homer.json；请先运行 `homer init`"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+		Drift:   &AgentDrift{Error: "未找到 homer 配置: /home/agent/.homer/homer.json；请先运行 `homer init`"},
+	}, nil)
 	r.NoteWriteOutcome("box", "conflicts-remain", false, 1)
 	info, ok := r.Get("box")
 	if !ok || info.Drift == nil || info.Drift.Conflicts != 1 || info.Drift.Error != "" {
 		t.Fatalf("conflict outcome = %+v", info.Drift)
 	}
 	r.NoteWriteOutcome("box", "resolved", true, 0)
-	info, ok = r.Get("box")
-	if !ok || info.Drift == nil || info.Drift.Conflicts != 0 || info.Drift.Error != "" {
+	info, _ = r.Get("box")
+	if info.Drift == nil || info.Drift.Conflicts != 0 || info.Drift.Error != "" {
 		t.Fatalf("resolved outcome = %+v", info.Drift)
 	}
 	r.NoteWriteOutcome("box", "aborted", false, 0)
 	info, _ = r.Get("box")
 	if info.Drift == nil || info.Drift.Conflicts != 0 {
 		t.Fatalf("aborted outcome changed drift: %+v", info.Drift)
+	}
+}
+
+func TestRegistryNilAndMissingOperations(t *testing.T) {
+	var r *Registry
+	if info, ok := r.Get("missing"); ok || info.AgentID != "" {
+		t.Fatal("nil Registry.Get() returned data")
+	}
+	if got := r.List(); len(got) != 0 {
+		t.Fatalf("nil Registry.List() = %+v", got)
+	}
+	if sess, ok := r.Session("missing"); sess != nil || ok {
+		t.Fatalf("nil Registry.Session() = (%v, %v)", sess, ok)
+	}
+	r.Detach("missing", nil)
+	r.Touch("missing")
+	r.UpdateDrift("missing", AgentDrift{})
+	r.UpdateHost("missing", HostSnapshot{})
+	r.UpdateTools("missing", nil)
+	r.UpdateVersion("missing", "v1")
+	r.NoteWriteOutcome("missing", "resolved", true, 0)
+	r.NoteToolVersion("missing", "pi", "1.0")
+	if r.Remove("missing") {
+		t.Fatal("nil Registry.Remove() = true")
+	}
+
+	if info, ok := NewRegistry().Get("missing"); ok || info.AgentID != "" {
+		t.Fatal("unknown Registry.Get() returned data")
+	}
+}
+
+func TestRegistryStoresToolEmptyAndNilDistinction(t *testing.T) {
+	r := NewRegistry()
+	sess, peer := registryTestSession()
+	defer peer.CloseNow()
+	defer sess.Close(stream.CloseNormal, "test complete")
+	r.Attach(AgentInfo{AgentID: "agent-a", Tools: []toolctl.Status{{ID: "pi"}}}, sess)
+	r.Attach(AgentInfo{AgentID: "agent-a"}, sess)
+	info, _ := r.Get("agent-a")
+	if len(info.Tools) != 1 {
+		t.Fatalf("an omitted tools list erased the previous report: %+v", info.Tools)
+	}
+	r.UpdateTools("agent-a", []toolctl.Status{})
+	info, _ = r.Get("agent-a")
+	if info.Tools == nil || len(info.Tools) != 0 {
+		t.Fatalf("an explicit empty tools list was not retained: %#v", info.Tools)
+	}
+	if !reflect.DeepEqual(cloneTools(info.Tools), []toolctl.Status{}) {
+		t.Fatalf("empty tools clone = %#v", cloneTools(info.Tools))
+	}
+}
+
+func TestRegistryHeartbeatModelsKeepJSONShape(t *testing.T) {
+	// The registry fields exposed to web remain JSON-compatible with the
+	// status data already consumed by the console.
+	r := NewRegistry()
+	session, peer := registryTestSession()
+	defer session.Close(stream.CloseNormal, "test complete")
+	defer peer.CloseNow()
+	r.Attach(AgentInfo{AgentID: "agent-a", Drift: &AgentDrift{Push: 2}}, session)
+	encoded, err := json.Marshal(r.List())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(encoded) {
+		t.Fatalf("agent list is not JSON: %s", encoded)
 	}
 }

@@ -1,44 +1,35 @@
 package hub
 
 import (
-	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/stream"
 	"github.com/zzjcool/homer-cli/internal/toolctl"
 )
 
 type AgentInfo struct {
 	AgentID  string    `json:"agentId"`
 	Hostname string    `json:"hostname"`
-	Mode     AgentMode `json:"mode"`
-	Addr     string    `json:"addr,omitempty"`
 	LastSeen time.Time `json:"lastSeen"`
 	Version  string    `json:"version,omitempty"`
 	Stale    bool      `json:"stale"`
-	// Drift is the machine's last self-reported status summary relative
-	// to the storage it last synced with (uploaded with each poll, or with
-	// a listen agent's registration heartbeat).
+	// Drift is the machine's last self-reported status summary relative to
+	// the storage it last synced with.
 	Drift *AgentDrift `json:"drift,omitempty"`
-	// Host is the machine's last self-reported resource snapshot
-	// (CPU, memory, disks, interfaces), uploaded with each poll.
+	// Host is the machine's last self-reported resource snapshot.
 	Host *HostSnapshot `json:"host,omitempty"`
-	// Tools is the machine's last self-reported list of installed programs
-	// the adapters drive (pi, herdr...), each with its version. A machine
-	// that has none reports an empty, non-nil list; nil means "not reported
-	// yet" and leaves the previous list in place.
+	// Tools is the machine's last self-reported list of installed programs.
+	// Nil means "not reported yet"; an empty list means "none installed".
 	Tools []toolctl.Status `json:"tools,omitempty"`
-	// DialSecret is the per-agent bearer the hub uses when it dials a
-	// listen-mode machine. It never leaves the process.
-	DialSecret string `json:"-"`
+
+	// caps is negotiated by hello and is private because it is used only by
+	// the dispatcher to avoid sending methods an agent did not advertise.
+	caps []string
 }
 
-// AgentDrift is the per-machine status summary the console renders in the
-// machine list: counts of local-only changes, center-only changes, and
-// three-way conflicts.
 type AgentDrift struct {
 	Push      int    `json:"push"`
 	Pull      int    `json:"pull"`
@@ -47,159 +38,145 @@ type AgentDrift struct {
 }
 
 type Registry struct {
-	mu         sync.Mutex
-	agents     map[string]*registryAgent
-	tasks      map[string]*registryTask
-	taskOwners map[string]string
+	mu     sync.Mutex
+	agents map[string]*registryAgent
 }
 
 type registryAgent struct {
-	info   AgentInfo
-	queue  []Task
-	notify chan struct{}
-}
-
-type registryTask struct {
-	task      Task
-	inFlight  bool
-	submitted bool
-	expired   bool
-	result    TaskResult
-	done      chan struct{}
-	// claimedAt is when the machine took the task. Until then it is only
-	// queued.
-	claimedAt time.Time
-}
-
-// taskQueueTTL is how long a task may wait for its machine to take it. It is
-// a variable so tests can shorten it.
-var taskQueueTTL = TaskTTL
-
-// deadline is when the task is dropped.
-//
-// Until a machine takes it, a task lives for taskQueueTTL from being queued.
-// A connect-mode machine polls all the time, so a task nobody has taken after
-// that long belongs to a machine that is gone, and whoever is waiting for it
-// should hear so then, not after the longest the task could ever run.
-//
-// Once taken, a kind of task that runs for minutes (see TaskLifetime) gets
-// its lifetime from that moment. The others keep the limit they have always
-// had, counted from being queued.
-func (s *registryTask) deadline() time.Time {
-	queued := s.task.CreatedAt.Add(taskQueueTTL)
-	if s.claimedAt.IsZero() {
-		return queued
-	}
-	if running := TaskLifetime(s.task.Kind); running > TaskTTL {
-		return s.claimedAt.Add(running)
-	}
-	return queued
+	info    AgentInfo
+	session *stream.Session
 }
 
 func NewRegistry() *Registry {
-	return &Registry{
-		agents:     make(map[string]*registryAgent),
-		tasks:      make(map[string]*registryTask),
-		taskOwners: make(map[string]string),
-	}
+	return &Registry{agents: make(map[string]*registryAgent)}
 }
 
-func (r *Registry) Register(info AgentInfo) error {
+// Attach binds an agent's current WebSocket session. Reattaching an identity
+// replaces its current session and returns the previous one so the hub can
+// close it as superseded. Reports omitted by a reconnect are kept.
+func (r *Registry) Attach(info AgentInfo, sess *stream.Session) (prev *stream.Session) {
+	if r == nil {
+		return nil
+	}
+	info.AgentID = strings.TrimSpace(info.AgentID)
+	if info.AgentID == "" {
+		return nil
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if info.AgentID == "" {
-		return fmt.Errorf("hub: agent ID is required")
-	}
-	switch info.Mode {
-	case AgentModeListen:
-		if info.Addr == "" {
-			return fmt.Errorf("hub: listen agent %q must have an address", info.AgentID)
-		}
-	case AgentModeConnect:
-	default:
-		return fmt.Errorf("hub: invalid mode %q", info.Mode)
-	}
-
 	if info.LastSeen.IsZero() {
 		info.LastSeen = time.Now()
 	}
 	info.Stale = false
 	info.Host = normalizeHost(info.Host)
 	info.Tools = normalizeTools(info.Tools)
-	if agent, ok := r.agents[info.AgentID]; ok {
-		// Re-registration refreshes identity and address. Keep the dial
-		// secret, last drift, last resource report, and last tool list when
-		// this call omitted them, or a listen heartbeat would wipe them.
-		if info.DialSecret == "" {
-			info.DialSecret = agent.info.DialSecret
-		}
+	info.caps = cloneStrings(info.caps)
+	if current, ok := r.agents[info.AgentID]; ok {
+		prev = current.session
 		if info.Host == nil {
-			info.Host = agent.info.Host
+			info.Host = current.info.Host
 		}
 		if info.Tools == nil {
-			info.Tools = agent.info.Tools
+			info.Tools = current.info.Tools
 		}
 		if info.Drift == nil {
-			info.Drift = agent.info.Drift
+			info.Drift = current.info.Drift
 		}
 		if info.Version == "" {
-			info.Version = agent.info.Version
+			info.Version = current.info.Version
 		}
-		agent.info = info
-		return nil
+		// A fresh hello negotiates capabilities anew. This intentionally does
+		// not retain a method the new process no longer advertises.
+		r.agents[info.AgentID] = &registryAgent{info: cloneAgentInfo(info), session: sess}
+		return prev
 	}
-	r.agents[info.AgentID] = &registryAgent{
-		info:   info,
-		notify: make(chan struct{}),
-	}
+	r.agents[info.AgentID] = &registryAgent{info: cloneAgentInfo(info), session: sess}
 	return nil
 }
 
-// SetDialSecret records the bearer the hub should present when it dials
-// this listen-mode machine.
-func (r *Registry) SetDialSecret(agentID, secret string) {
-	if strings.TrimSpace(agentID) == "" || secret == "" {
+// Detach clears an agent's session only if sess is still the current one.
+// A late return from a superseded connection must not detach its replacement.
+func (r *Registry) Detach(agentID string, sess *stream.Session) {
+	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if agent, ok := r.agents[agentID]; ok {
-		agent.info.DialSecret = secret
+	if agent, ok := r.agents[agentID]; ok && agent.session == sess {
+		agent.session = nil
 	}
 }
 
-// UpdateVersion records the program version from a heartbeat. An empty
-// report leaves the previous value in place.
+// Session returns the currently attached, still-live session.
+func (r *Registry) Session(agentID string) (*stream.Session, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, ok := r.agents[agentID]
+	if !ok || agent.session == nil || sessionDone(agent.session) {
+		return nil, false
+	}
+	return agent.session, true
+}
+
 func (r *Registry) UpdateVersion(agentID, version string) {
+	if r == nil {
+		return
+	}
 	version = strings.TrimSpace(version)
 	if version == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	agent, ok := r.agents[agentID]
-	if !ok {
-		return
+	if agent, ok := r.agents[agentID]; ok {
+		agent.info.Version = version
 	}
-	agent.info.Version = version
 }
 
-// UpdateDrift caches a machine's self-reported status summary.
 func (r *Registry) UpdateDrift(agentID string, drift AgentDrift) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	agent, ok := r.agents[agentID]
-	if !ok {
-		return
+	if agent, ok := r.agents[agentID]; ok {
+		copy := drift
+		agent.info.Drift = &copy
 	}
-	agent.info.Drift = &drift
 }
 
-// NoteWriteOutcome updates the cached summary from a push/pull report.
-// Heartbeats are throttled, so without this the console keeps showing
-// "新机器 · 等待下发" until the next drift sample, even though the write
-// already left conflicts the user has to resolve.
+func (r *Registry) UpdateHost(agentID string, host HostSnapshot) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentID]; ok {
+		if normalized := normalizeHost(&host); normalized != nil {
+			agent.info.Host = normalized
+		}
+	}
+}
+
+func (r *Registry) UpdateTools(agentID string, tools []toolctl.Status) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentID]; ok {
+		agent.info.Tools = normalizeTools(tools)
+		if agent.info.Tools == nil {
+			agent.info.Tools = []toolctl.Status{}
+		}
+	}
+}
+
+// NoteWriteOutcome updates the cached drift summary from a push/pull report.
 func (r *Registry) NoteWriteOutcome(agentID, status string, ok bool, conflicts int) {
 	if r == nil {
 		return
@@ -220,9 +197,6 @@ func (r *Registry) NoteWriteOutcome(agentID, status string, ok bool, conflicts i
 		if !ok {
 			return
 		}
-		// A finished write retires the fresh-machine marker and any
-		// conflict count left by the previous report. The next heartbeat
-		// fills in real push/pull numbers.
 		fresh := agent.info.Drift != nil && strings.Contains(agent.info.Drift.Error, "未找到 homer 配置")
 		hadConflicts := agent.info.Drift != nil && agent.info.Drift.Conflicts > 0
 		if agent.info.Drift == nil || fresh || hadConflicts {
@@ -231,38 +205,6 @@ func (r *Registry) NoteWriteOutcome(agentID, status string, ok bool, conflicts i
 	}
 }
 
-// UpdateHost caches a machine's self-reported resource snapshot.
-func (r *Registry) UpdateHost(agentID string, host HostSnapshot) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	agent, ok := r.agents[agentID]
-	if !ok {
-		return
-	}
-	if normalized := normalizeHost(&host); normalized != nil {
-		agent.info.Host = normalized
-	}
-}
-
-// UpdateTools replaces a machine's list of installed programs. An empty
-// list is a statement ("nothing installed"), so it replaces the old one;
-// callers pass nil-pointer reports through Register or skip the call.
-func (r *Registry) UpdateTools(agentID string, tools []toolctl.Status) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	agent, ok := r.agents[agentID]
-	if !ok {
-		return
-	}
-	agent.info.Tools = normalizeTools(tools)
-	if agent.info.Tools == nil {
-		agent.info.Tools = []toolctl.Status{}
-	}
-}
-
-// NoteToolVersion records the version a machine just reported after an
-// upgrade, so the console shows it at once instead of after the next
-// heartbeat (a listen-mode machine heartbeats once a minute).
 func (r *Registry) NoteToolVersion(agentID, toolID, version string) {
 	if r == nil {
 		return
@@ -288,75 +230,45 @@ func (r *Registry) NoteToolVersion(agentID, toolID, version string) {
 	}
 }
 
+// Touch updates LastSeen. AgentHub wraps every session connection's Read so
+// all successfully received frames refresh the timestamp, not just heartbeats.
 func (r *Registry) Touch(agentID string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	if agent, ok := r.agents[agentID]; ok {
 		agent.info.LastSeen = time.Now()
-		agent.info.Stale = false
 	}
 }
 
 func (r *Registry) Get(agentID string) (AgentInfo, bool) {
+	if r == nil {
+		return AgentInfo{}, false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	agent, ok := r.agents[agentID]
 	if !ok {
 		return AgentInfo{}, false
 	}
-	// Staleness is derived from LastSeen at read time — a registered
-	// agent that stopped polling must read as stale even without a
-	// List() pass (fast-fail paths key on this).
-	info := agent.info
-	info.Stale = time.Since(info.LastSeen) >= AgentStaleAfter
-	info.Host = normalizeHost(info.Host)
-	info.Tools = cloneTools(info.Tools)
+	info := cloneAgentInfo(agent.info)
+	info.Stale = agentIsStale(agent, time.Now())
 	return info, true
 }
 
-// taskInfo is a read-only protocol helper used by the report endpoint. It is
-// deliberately unexported so the frozen Registry API remains unchanged.
-func (r *Registry) taskInfo(taskID string) (Task, string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	state, ok := r.tasks[taskID]
-	if !ok || state.expired || state.submitted {
-		return Task{}, "", false
-	}
-	for agentID, agent := range r.agents {
-		for _, queued := range agent.queue {
-			if queued.TaskID == taskID {
-				return state.task, agentID, true
-			}
-		}
-	}
-	// A task is removed from the queue when a poller claims it. At that point
-	// the task state still records enough information for the endpoint to
-	// validate the reporting agent without exposing mutable Registry state.
-	return state.task, stateAgentIDLocked(r, taskID), state.inFlight
-}
-
-// stateAgentIDLocked finds the owner from the immutable queue/agent relation.
-// The task owner is populated by Enqueue through taskOwners; this helper is
-// kept separate to make the read-only lookup easy to audit.
-func stateAgentIDLocked(r *Registry, taskID string) string {
-	return r.taskOwners[taskID]
-}
-
 func (r *Registry) List() []AgentInfo {
+	if r == nil {
+		return []AgentInfo{}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	now := time.Now()
 	agents := make([]AgentInfo, 0, len(r.agents))
 	for _, agent := range r.agents {
-		info := agent.info
-		info.Stale = now.Sub(info.LastSeen) >= AgentStaleAfter
-		info.Host = normalizeHost(info.Host)
-		info.Tools = cloneTools(info.Tools)
+		info := cloneAgentInfo(agent.info)
+		info.Stale = agentIsStale(agent, now)
 		agents = append(agents, info)
 	}
 	sort.Slice(agents, func(i, j int) bool {
@@ -365,229 +277,11 @@ func (r *Registry) List() []AgentInfo {
 	return agents
 }
 
-func (r *Registry) Enqueue(agentID string, task Task) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	agent, ok := r.agents[agentID]
-	if !ok {
-		return fmt.Errorf("hub: unknown agent %q", agentID)
-	}
-
-	r.purgeExpiredQueuedLocked(agent)
-	if len(agent.queue) >= TaskQueueCapacity {
-		return fmt.Errorf("hub: task queue for agent %q is full", agentID)
-	}
-	if _, ok := r.tasks[task.TaskID]; ok {
-		return fmt.Errorf("hub: task %q already exists", task.TaskID)
-	}
-	if task.CreatedAt.IsZero() {
-		task.CreatedAt = time.Now()
-	}
-
-	r.tasks[task.TaskID] = &registryTask{
-		task: task,
-		done: make(chan struct{}),
-	}
-	r.taskOwners[task.TaskID] = agentID
-	agent.queue = append(agent.queue, task)
-	r.notifyAgentLocked(agent)
-	return nil
-}
-
-func (r *Registry) Poll(agentID string, wait time.Duration, ctx context.Context) (Task, bool) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ctx.Err() != nil {
-		return Task{}, false
-	}
-
-	var timer *time.Timer
-	var timerCh <-chan time.Time
-	if wait > 0 {
-		timer = time.NewTimer(wait)
-		timerCh = timer.C
-		defer timer.Stop()
-	}
-
-	for {
-		if ctx.Err() != nil {
-			return Task{}, false
-		}
-
-		r.mu.Lock()
-		agent, ok := r.agents[agentID]
-		if !ok {
-			r.mu.Unlock()
-			return Task{}, false
-		}
-		agent.info.LastSeen = time.Now()
-		agent.info.Stale = false
-
-		for len(agent.queue) > 0 {
-			task := agent.queue[0]
-			agent.queue = agent.queue[1:]
-			state, exists := r.tasks[task.TaskID]
-			if !exists || state.expired || state.submitted {
-				continue
-			}
-			if r.taskExpired(state) {
-				r.expireTaskLocked(task.TaskID, state)
-				continue
-			}
-			state.inFlight = true
-			state.claimedAt = time.Now()
-			r.mu.Unlock()
-			return task, true
-		}
-
-		if wait <= 0 {
-			r.mu.Unlock()
-			return Task{}, false
-		}
-		notify := agent.notify
-		r.mu.Unlock()
-
-		select {
-		case <-notify:
-			continue
-		case <-ctx.Done():
-			return Task{}, false
-		case <-timerCh:
-			return Task{}, false
-		}
-	}
-}
-
-func (r *Registry) Submit(result TaskResult) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	state, ok := r.tasks[result.TaskID]
-	if !ok || state.expired {
-		return fmt.Errorf("hub: unknown or expired task %q", result.TaskID)
-	}
-	if !state.inFlight || state.submitted {
-		return fmt.Errorf("hub: task %q is not awaiting a result", result.TaskID)
-	}
-	if r.taskExpired(state) {
-		r.expireTaskLocked(result.TaskID, state)
-		return fmt.Errorf("hub: task %q has expired", result.TaskID)
-	}
-
-	state.result = cloneTaskResult(result)
-	state.inFlight = false
-	state.submitted = true
-	delete(r.taskOwners, result.TaskID)
-	close(state.done)
-	return nil
-}
-
-func (r *Registry) Wait(ctx context.Context, taskID string) (TaskResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return TaskResult{}, err
-	}
-
-	r.mu.Lock()
-	state, ok := r.tasks[taskID]
-	known := ok && !state.expired
-	r.mu.Unlock()
-	if !known {
-		return TaskResult{}, fmt.Errorf("hub: unknown or expired task %q", taskID)
-	}
-
-	for {
-		r.mu.Lock()
-		if state.submitted {
-			result := cloneTaskResult(state.result)
-			r.mu.Unlock()
-			return result, nil
-		}
-		if state.expired || r.taskExpired(state) {
-			r.expireTaskLocked(taskID, state)
-			r.mu.Unlock()
-			return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
-		}
-		done := state.done
-		remaining := time.Until(state.deadline())
-		r.mu.Unlock()
-
-		// The deadline moves out when the machine takes the task, so a timer
-		// that fires is not yet proof of expiry: go round and look again.
-		timer := time.NewTimer(remaining)
-		select {
-		case <-done:
-			timer.Stop()
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			if state.submitted {
-				return cloneTaskResult(state.result), nil
-			}
-			return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
-		case <-ctx.Done():
-			timer.Stop()
-			return TaskResult{}, ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func (r *Registry) taskExpired(state *registryTask) bool {
-	return !time.Now().Before(state.deadline())
-}
-
-func (r *Registry) purgeExpiredQueuedLocked(agent *registryAgent) {
-	if len(agent.queue) == 0 {
-		return
-	}
-	queue := agent.queue[:0]
-	for _, task := range agent.queue {
-		state, ok := r.tasks[task.TaskID]
-		if !ok || state.expired || state.submitted {
-			continue
-		}
-		if r.taskExpired(state) {
-			r.expireTaskLocked(task.TaskID, state)
-			continue
-		}
-		queue = append(queue, task)
-	}
-	agent.queue = queue
-}
-
-func (r *Registry) notifyAgentLocked(agent *registryAgent) {
-	close(agent.notify)
-	agent.notify = make(chan struct{})
-}
-
-func (r *Registry) expireTaskLocked(taskID string, state *registryTask) {
-	if state.expired || state.submitted {
-		return
-	}
-	state.expired = true
-	state.inFlight = false
-	if current, ok := r.tasks[taskID]; ok && current == state {
-		delete(r.tasks, taskID)
-	}
-	delete(r.taskOwners, taskID)
-	close(state.done)
-}
-
-func cloneTaskResult(result TaskResult) TaskResult {
-	if result.Report != nil {
-		result.Report = append([]byte(nil), result.Report...)
-	}
-	return result
-}
-
-// Remove drops a machine from the registry entirely (revocation only kills
-// the credential). The removed agent 404s on its next poll and re-registers
-// through the standard recovery path if it still holds a valid credential.
+// Remove removes the machine's cached identity and current stream binding.
 func (r *Registry) Remove(agentID string) bool {
+	if r == nil {
+		return false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.agents[agentID]; !ok {
@@ -595,4 +289,38 @@ func (r *Registry) Remove(agentID string) bool {
 	}
 	delete(r.agents, agentID)
 	return true
+}
+
+func agentIsStale(agent *registryAgent, now time.Time) bool {
+	return agent.session == nil || sessionDone(agent.session) || now.Sub(agent.info.LastSeen) >= AgentStaleAfter
+}
+
+func sessionDone(session *stream.Session) bool {
+	if session == nil {
+		return true
+	}
+	select {
+	case <-session.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneAgentInfo(info AgentInfo) AgentInfo {
+	if info.Drift != nil {
+		drift := *info.Drift
+		info.Drift = &drift
+	}
+	info.Host = normalizeHost(info.Host)
+	info.Tools = cloneTools(info.Tools)
+	info.caps = cloneStrings(info.caps)
+	return info
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(values)), values...)
 }

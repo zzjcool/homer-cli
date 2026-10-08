@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/stream"
 )
 
 func TestNormalizeHostClipsAndDropsEmpty(t *testing.T) {
@@ -20,12 +22,10 @@ func TestNormalizeHostClipsAndDropsEmpty(t *testing.T) {
 		nets[i] = HostNet{Name: "eth0", Addrs: []string{"10.0.0.1/24", "\x1b[31mred"}}
 	}
 	got := normalizeHost(&HostSnapshot{
-		OS:     "linux\n",
-		Distro: "Arch\x1b[0m",
+		OS: "linux\n", Distro: "Arch\x1b[0m",
 		CPU:    &HostCPU{Cores: 9000, Usage: &usage, Model: "cpu"},
 		Memory: &HostMemory{Total: 100, Used: 250},
-		Load:   &HostLoad{One: bad, Five: -1, Fifteen: 0.5},
-		Nets:   nets,
+		Load:   &HostLoad{One: bad, Five: -1, Fifteen: 0.5}, Nets: nets,
 	})
 	if got == nil || got.OS != "linux" || got.Distro != "Arch" {
 		t.Fatalf("identity = %+v", got)
@@ -44,20 +44,23 @@ func TestNormalizeHostClipsAndDropsEmpty(t *testing.T) {
 	}
 }
 
-func TestRegisterKeepsReportedHostAndDrift(t *testing.T) {
+func TestRegistryAttachPreservesReportsAndClonesHost(t *testing.T) {
 	r := NewRegistry()
 	usage := 12.5
-	if err := r.Register(AgentInfo{
-		AgentID:  "a",
-		Hostname: "box",
-		Mode:     AgentModeConnect,
-		Host:     &HostSnapshot{OS: "linux", CPU: &HostCPU{Cores: 4, Usage: &usage}},
-		Drift:    &AgentDrift{Pull: 2},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Register(AgentInfo{AgentID: "a", Hostname: "box2", Mode: AgentModeConnect, Version: "v2"}); err != nil {
-		t.Fatal(err)
+	first, firstPeer := registryTestSession()
+	defer first.Close(stream.CloseNormal, "test complete")
+	defer firstPeer.CloseNow()
+	r.Attach(AgentInfo{
+		AgentID: "a", Hostname: "box",
+		Host:  &HostSnapshot{OS: "linux", CPU: &HostCPU{Cores: 4, Usage: &usage}},
+		Drift: &AgentDrift{Pull: 2},
+	}, first)
+
+	second, secondPeer := registryTestSession()
+	defer second.Close(stream.CloseNormal, "test complete")
+	defer secondPeer.CloseNow()
+	if previous := r.Attach(AgentInfo{AgentID: "a", Hostname: "box2", Version: "v2"}, second); previous != first {
+		t.Fatalf("previous session = %p, want %p", previous, first)
 	}
 	info, ok := r.Get("a")
 	if !ok || info.Hostname != "box2" || info.Version != "v2" {
@@ -69,27 +72,29 @@ func TestRegisterKeepsReportedHostAndDrift(t *testing.T) {
 	info.Host.OS = "mutated"
 	again, _ := r.Get("a")
 	if again.Host == nil || again.Host.OS != "linux" {
-		t.Fatalf("Get host is aliased: %+v", again.Host)
+		t.Fatalf("Get() host is aliased: %+v", again.Host)
 	}
 
 	replacement := &HostSnapshot{OS: "fresh", Memory: &HostMemory{Total: 10, Used: 1}}
-	if err := r.Register(AgentInfo{AgentID: "a", Hostname: "box2", Mode: AgentModeConnect, Host: replacement}); err != nil {
-		t.Fatal(err)
-	}
+	third, thirdPeer := registryTestSession()
+	defer third.Close(stream.CloseNormal, "test complete")
+	defer thirdPeer.CloseNow()
+	r.Attach(AgentInfo{AgentID: "a", Hostname: "box2", Host: replacement}, third)
 	info, _ = r.Get("a")
 	if info.Host == nil || info.Host.OS != "fresh" || info.Host.Memory == nil || info.Drift == nil || info.Drift.Pull != 2 || info.Version != "v2" {
 		t.Fatalf("replacement = %+v drift=%+v version=%q", info.Host, info.Drift, info.Version)
 	}
 	if time.Since(info.LastSeen) > time.Minute {
-		t.Fatalf("last seen = %s", info.LastSeen)
+		t.Fatalf("LastSeen = %s", info.LastSeen)
 	}
 }
 
 func TestUpdateHost(t *testing.T) {
 	r := NewRegistry()
-	if err := r.Register(AgentInfo{AgentID: "a", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
-	}
+	session, peer := registryTestSession()
+	defer session.Close(stream.CloseNormal, "test complete")
+	defer peer.CloseNow()
+	r.Attach(AgentInfo{AgentID: "a"}, session)
 	r.UpdateHost("missing", HostSnapshot{OS: "nope"})
 	r.UpdateHost("a", HostSnapshot{})
 	info, _ := r.Get("a")

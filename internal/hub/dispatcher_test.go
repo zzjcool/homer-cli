@@ -4,186 +4,402 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/stream"
+	"github.com/zzjcool/homer-cli/internal/stream/streamtest"
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
-func TestDispatcherListenDirect(t *testing.T) {
-	const token = "dispatcher-token"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/status" {
-			t.Fatalf("path = %s", r.URL.Path)
-		}
-		if r.Header.Get("Authorization") != "Bearer "+token {
-			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"report":{"adapters":[{"id":"pi"}]}}`))
-	}))
-	defer server.Close()
+type dispatcherCall struct {
+	method string
+	params json.RawMessage
+	budget time.Duration
+}
 
+type dispatcherAgent struct {
+	session *stream.Session
+	hub     *stream.Session
+	callsMu sync.Mutex
+	calls   []dispatcherCall
+	once    sync.Once
+}
+
+func newDispatcherAgent(t *testing.T, registry *Registry, agentID string, caps ...string) *dispatcherAgent {
+	t.Helper()
+	hubConn, agentConn := streamtest.Pipe(streamtest.PipeOptions{})
+	hubSession := stream.NewSession(hubConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	agentSession := stream.NewSession(agentConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	registry.Attach(AgentInfo{AgentID: agentID, Hostname: agentID, Version: "v1", caps: caps}, hubSession)
+	t.Cleanup(func() {
+		hubSession.Close(stream.CloseNormal, "test complete")
+		agentSession.Close(stream.CloseNormal, "test complete")
+	})
+	go func() { _ = hubSession.Run(context.Background()) }()
+	return &dispatcherAgent{session: agentSession, hub: hubSession}
+}
+
+func attachDispatcherAgent(registry *Registry, agentID string, caps ...string) (*stream.Session, stream.Conn) {
+	hubConn, agentConn := streamtest.Pipe(streamtest.PipeOptions{})
+	session := stream.NewSession(hubConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	registry.Attach(AgentInfo{AgentID: agentID, caps: caps}, session)
+	go func() { _ = session.Run(context.Background()) }()
+	return session, agentConn
+}
+
+func hasAgentCode(err error, code string, status int) bool {
+	var agentErr *web.AgentError
+	return errors.As(err, &agentErr) && agentErr.Code == code && agentErr.Status == status
+}
+
+func (a *dispatcherAgent) Handle(method string, handler stream.Handler) {
+	a.session.Handle(method, func(ctx context.Context, req *stream.Request) (any, error) {
+		a.callsMu.Lock()
+		a.calls = append(a.calls, dispatcherCall{
+			method: req.Method, params: append(json.RawMessage(nil), req.Params...), budget: req.Budget,
+		})
+		a.callsMu.Unlock()
+		if handler == nil {
+			return map[string]any{"ok": true}, nil
+		}
+		return handler(ctx, req)
+	})
+}
+
+func (a *dispatcherAgent) Run() {
+	a.once.Do(func() {
+		go func() { _ = a.session.Run(context.Background()) }()
+	})
+}
+
+func (a *dispatcherAgent) Calls() []dispatcherCall {
+	a.callsMu.Lock()
+	defer a.callsMu.Unlock()
+	return append([]dispatcherCall(nil), a.calls...)
+}
+
+func TestDispatcherStreamMethodsAndBudgets(t *testing.T) {
 	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "listen-a", Hostname: "box", Mode: AgentModeListen, Addr: server.URL}); err != nil {
-		t.Fatal(err)
+	methods := []string{"status", "diff", "push", "pull", "ssh-key", "secret", "upgrade", "tool-upgrade", MethodInspect}
+	agent := newDispatcherAgent(t, registry, "agent-a", methods...)
+	for _, method := range methods {
+		method := method
+		agent.Handle(method, func(_ context.Context, req *stream.Request) (any, error) {
+			if req.Budget <= 0 {
+				t.Errorf("request %s has no relative deadline budget", method)
+			}
+			switch method {
+			case "diff":
+				return map[string]string{"text": "diff text"}, nil
+			case MethodInspect:
+				req.Progress(web.InspectEvent{Stage: "adapter", Done: 1, Total: 1})
+				return web.InspectResult{Status: commands.StatusReport{Adapters: []commands.StatusAdapterReport{{ID: "pi"}}, Errors: []string{}}}, nil
+			case "tool-upgrade":
+				return json.RawMessage(`{"ok":true,"after":"0.90.2"}`), nil
+			default:
+				return map[string]any{"ok": true, "method": method}, nil
+			}
+		})
 	}
-	dispatcher := NewDispatcher(registry, token)
-	got, err := dispatcher.AgentStatus(context.Background(), "listen-a")
-	if err != nil {
+	agent.Run()
+	dispatcher := NewDispatcher(registry, "unused-shared-token")
+	ctx := context.Background()
+	if _, err := dispatcher.AgentStatus(ctx, "agent-a"); err != nil {
 		t.Fatalf("AgentStatus: %v", err)
 	}
-	if string(got) != `{"adapters":[{"id":"pi"}]}` {
-		t.Fatalf("report = %s", got)
+	if got, err := dispatcher.AgentDiff(ctx, "agent-a", web.DiffParams{Adapter: "pi", Category: "settings", Path: "x.json"}); err != nil || got != "diff text" {
+		t.Fatalf("AgentDiff = %q, %v", got, err)
+	}
+	if _, err := dispatcher.AgentPush(ctx, "agent-a", true, web.SyncScope{Explicit: true, Adapters: []string{"pi"}, AllowSecrets: true}); err != nil {
+		t.Fatalf("AgentPush: %v", err)
+	}
+	if _, err := dispatcher.AgentPull(ctx, "agent-a", true, web.SyncScope{Overwrite: true}); err != nil {
+		t.Fatalf("AgentPull: %v", err)
+	}
+	if _, err := dispatcher.AgentInstallSSHKeys(ctx, "agent-a", "octocat", []string{"ssh-ed25519 key"}); err != nil {
+		t.Fatalf("AgentInstallSSHKeys: %v", err)
+	}
+	if _, err := dispatcher.AgentKey(ctx, "agent-a", keyring.Command{Action: "unlock", ID: "secret", Password: "not-in-response"}); err != nil {
+		t.Fatalf("AgentKey: %v", err)
+	}
+	if _, err := dispatcher.AgentUpgrade(ctx, "agent-a"); err != nil {
+		t.Fatalf("AgentUpgrade: %v", err)
+	}
+	if _, err := dispatcher.AgentToolUpgrade(ctx, "agent-a", "pi"); err != nil {
+		t.Fatalf("AgentToolUpgrade: %v", err)
+	}
+	var events []web.InspectEvent
+	inspect, err := dispatcher.AgentInspect(ctx, "agent-a", web.InspectParams{Adapters: []string{"pi"}, WantKeys: true}, func(event web.InspectEvent) {
+		events = append(events, event)
+	})
+	if err != nil || len(inspect.Status.Adapters) != 1 || len(events) != 1 || events[0].Stage != "adapter" {
+		t.Fatalf("AgentInspect = %+v events=%+v err=%v", inspect, events, err)
+	}
+	if got, err := dispatcher.AgentResolve(ctx, "agent-a", "local"); err != nil || !strings.Contains(string(got), `"ok":true`) {
+		t.Fatalf("AgentResolve = %s, %v", got, err)
 	}
 
-	if _, err := dispatcher.AgentStatus(context.Background(), "missing"); err == nil || !hasAgentCode(err, "agent-not-found", http.StatusNotFound) {
-		t.Fatalf("missing error = %v", err)
+	calls := agent.Calls()
+	if len(calls) != 10 {
+		t.Fatalf("agent received %d calls, want 10: %+v", len(calls), calls)
+	}
+	if got := calls[0]; got.method != "status" || got.budget <= 0 {
+		t.Fatalf("status call = %+v", got)
+	}
+	if got := calls[1]; got.method != "diff" || string(got.params) != `{"adapter":"pi","category":"settings","path":"x.json"}` {
+		t.Fatalf("diff call = %+v", got)
+	}
+	if got := calls[2]; got.method != "push" || !strings.Contains(string(got.params), `"confirm":true`) || !strings.Contains(string(got.params), `"allowSecrets":true`) {
+		t.Fatalf("push call = %+v", got)
+	}
+	if got := calls[3]; got.method != "pull" || got.budget < 11*time.Minute {
+		t.Fatalf("pull budget/method = %+v", got)
+	}
+	if got := calls[4]; got.method != "ssh-key" || !strings.Contains(string(got.params), `"githubUser":"octocat"`) {
+		t.Fatalf("ssh-key call = %+v", got)
+	}
+	if got := calls[5]; got.method != "secret" || !strings.Contains(string(got.params), `"secretPayload"`) || !strings.Contains(string(got.params), "not-in-response") {
+		t.Fatalf("secret call = %+v", got)
+	}
+	if got := calls[6]; got.method != "upgrade" || got.budget < 2*time.Minute {
+		t.Fatalf("upgrade budget/method = %+v", got)
+	}
+	if got := calls[7]; got.method != "tool-upgrade" || got.budget < 6*time.Minute {
+		t.Fatalf("tool-upgrade budget/method = %+v", got)
+	}
+	if got := calls[8]; got.method != MethodInspect || got.budget <= 0 {
+		t.Fatalf("inspect call = %+v", got)
+	}
+	if got := calls[9]; got.method != "push" || !strings.Contains(string(got.params), `"resolve":"local"`) {
+		t.Fatalf("resolve call = %+v", got)
+	}
+	if info, ok := registry.Get("agent-a"); !ok || len(info.Tools) != 0 {
+		t.Fatalf("tool upgrade should not invent an absent tool status: %+v, found=%v", info.Tools, ok)
 	}
 }
 
-func TestDispatcherSecretListenAndConnect(t *testing.T) {
-	const token = "dispatcher-token"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/keys/op" || r.Method != http.MethodPost {
-			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"status":"listed","keys":[]}`))
-	}))
-	defer server.Close()
-
+func TestDispatcherRequiresOnlineForEveryCall(t *testing.T) {
 	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "listen-secret", Mode: AgentModeListen, Addr: server.URL}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, token)
-	got, err := dispatcher.AgentKey(context.Background(), "listen-secret", keyring.Command{Action: "list"})
-	if err != nil || !strings.Contains(string(got), `"listed"`) {
-		t.Fatalf("listen key = %s err=%v", got, err)
-	}
-
-	if err := registry.Register(AgentInfo{AgentID: "connect-secret", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
-	}
-	resultCh := make(chan json.RawMessage, 1)
-	go func() {
-		report, waitErr := dispatcher.AgentKey(context.Background(), "connect-secret", keyring.Command{Action: "unlock", ID: "codebuddy"})
-		if waitErr != nil {
-			t.Errorf("connect key: %v", waitErr)
-		}
-		resultCh <- report
-	}()
-	task, ok := registry.Poll("connect-secret", time.Second, context.Background())
-	if !ok || task.Kind != TaskKindSecret || !strings.Contains(string(task.Options.SecretPayload), `"unlock"`) {
-		t.Fatalf("task = %+v ok=%v", task, ok)
-	}
-	if err := registry.Submit(TaskResult{
-		TaskID: task.TaskID, AgentID: "connect-secret", Kind: task.Kind, OK: true,
-		Report: json.RawMessage(`{"ok":true,"status":"applied"}`),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if report := <-resultCh; string(report) != `{"ok":true,"status":"applied"}` {
-		t.Fatalf("connect report = %s", report)
-	}
-}
-
-func TestDispatcherConnectRoundtrip(t *testing.T) {
-	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "connect-a", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
-	}
+	registry.Attach(AgentInfo{AgentID: "offline", LastSeen: time.Now().Add(-time.Hour)}, nil)
 	dispatcher := NewDispatcher(registry, "")
-	resultCh := make(chan struct {
-		report json.RawMessage
-		err    error
-	}, 1)
-	go func() {
-		report, err := dispatcher.AgentStatus(context.Background(), "connect-a")
-		resultCh <- struct {
-			report json.RawMessage
-			err    error
-		}{report, err}
-	}()
-
-	task, ok := registry.Poll("connect-a", time.Second, context.Background())
-	if !ok || task.Kind != TaskKindStatus {
-		t.Fatalf("Poll = %+v, %v", task, ok)
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{"status", func() error { _, err := dispatcher.AgentStatus(context.Background(), "offline"); return err }},
+		{"diff", func() error {
+			_, err := dispatcher.AgentDiff(context.Background(), "offline", web.DiffParams{})
+			return err
+		}},
+		{"push", func() error {
+			_, err := dispatcher.AgentPush(context.Background(), "offline", true, web.SyncScope{})
+			return err
+		}},
+		{"pull", func() error {
+			_, err := dispatcher.AgentPull(context.Background(), "offline", true, web.SyncScope{})
+			return err
+		}},
+		{"secret", func() error {
+			_, err := dispatcher.AgentKey(context.Background(), "offline", keyring.Command{Action: "list"})
+			return err
+		}},
 	}
-	if err := registry.Submit(TaskResult{
-		TaskID: task.TaskID, AgentID: "connect-a", Kind: task.Kind, OK: true,
-		Report: json.RawMessage(`{"adapters":[]}`),
-	}); err != nil {
-		t.Fatal(err)
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			started := time.Now()
+			err := check.call()
+			if !hasAgentCode(err, "agent-offline", http.StatusServiceUnavailable) {
+				t.Fatalf("call error = %v, want agent-offline", err)
+			}
+			if time.Since(started) > 100*time.Millisecond {
+				t.Fatalf("offline agent did not fail fast: %v", time.Since(started))
+			}
+		})
+	}
+	if _, err := dispatcher.AgentStatus(context.Background(), "missing"); !hasAgentCode(err, "agent-not-found", http.StatusNotFound) {
+		t.Fatalf("unknown agent error = %v", err)
+	}
+}
+
+func TestDispatcherRejectsUnsupportedCapability(t *testing.T) {
+	registry := NewRegistry()
+	agent := newDispatcherAgent(t, registry, "agent-a", string(TaskKindStatus))
+	agent.Handle(string(TaskKindStatus), nil)
+	agent.Run()
+	_, err := NewDispatcher(registry, "").AgentDiff(context.Background(), "agent-a", web.DiffParams{})
+	if !hasAgentCode(err, "agent-unreachable", http.StatusBadGateway) || !strings.Contains(err.Error(), "does not advertise") {
+		t.Fatalf("unsupported capability error = %v", err)
+	}
+	if len(agent.Calls()) != 0 {
+		t.Fatalf("unsupported method was sent to agent: %+v", agent.Calls())
+	}
+}
+
+func TestDispatcherErrorMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		code   string
+		status int
+	}{
+		{"offline session", &stream.SessionClosedError{Cause: &stream.CloseError{Code: stream.CloseSuperseded, Reason: "same agent ID"}}, "agent-offline", http.StatusServiceUnavailable},
+		{"local deadline", context.DeadlineExceeded, "agent-timeout", http.StatusGatewayTimeout},
+		{"caller cancellation", context.Canceled, "agent-timeout", http.StatusGatewayTimeout},
+		{"remote timeout", &stream.Error{Code: stream.CodeTimeout, Message: "agent budget expired"}, "agent-timeout", http.StatusGatewayTimeout},
+		{"bad request", &stream.Error{Code: stream.CodeBadRequest, Message: "missing adapter"}, "bad-request", http.StatusBadRequest},
+		{"exec failed", &stream.Error{Code: stream.CodeExecFailed, Message: "disk error"}, "agent-unreachable", http.StatusBadGateway},
+		{"internal", &stream.Error{Code: stream.CodeInternal, Message: "panic"}, "agent-unreachable", http.StatusBadGateway},
+		{"unknown method", &stream.Error{Code: stream.CodeUnknownMethod, Message: "unknown"}, "agent-unreachable", http.StatusBadGateway},
+		{"unsupported capability", &stream.Error{Code: "unsupported", Message: "not in caps"}, "agent-unreachable", http.StatusBadGateway},
+		{"unsupported version", &stream.Error{Code: stream.CodeUnsupported, Message: "version"}, "agent-unreachable", http.StatusBadGateway},
+		{"overloaded", &stream.Error{Code: stream.CodeOverloaded, Message: "busy"}, "agent-unreachable", http.StatusBadGateway},
+		{"plain transport failure", errors.New("broken socket"), "agent-unreachable", http.StatusBadGateway},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got := mapDispatcherError("agent-a", test.err)
+			var agentErr *web.AgentError
+			if !errors.As(got, &agentErr) || agentErr.Code != test.code || agentErr.Status != test.status {
+				t.Fatalf("mapped error = %T %v, want %s/%d", got, got, test.code, test.status)
+			}
+			if test.name == "offline session" && !strings.Contains(got.Error(), "same agent ID") {
+				t.Fatalf("offline message did not preserve close reason: %v", got)
+			}
+			if test.name == "exec failed" && !strings.Contains(got.Error(), "disk error") {
+				t.Fatalf("remote error message was not passed through: %v", got)
+			}
+		})
+	}
+}
+
+func TestDispatcherCallConcurrencyLimit(t *testing.T) {
+	registry := NewRegistry()
+	const calls = agentCallConcurrency + 1
+	agent := newDispatcherAgent(t, registry, "agent-a", string(TaskKindStatus))
+	var active atomic.Int32
+	var maximum atomic.Int32
+	started := make(chan struct{}, calls)
+	release := make(chan struct{})
+	agent.Handle(string(TaskKindStatus), func(ctx context.Context, _ *stream.Request) (any, error) {
+		current := active.Add(1)
+		for {
+			previous := maximum.Load()
+			if current <= previous || maximum.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		select {
+		case <-release:
+			active.Add(-1)
+			return map[string]any{"ok": true}, nil
+		case <-ctx.Done():
+			active.Add(-1)
+			return nil, ctx.Err()
+		}
+	})
+	agent.Run()
+	dispatcher := NewDispatcher(registry, "")
+	ctxs := make([]context.Context, calls)
+	cancels := make([]context.CancelFunc, calls)
+	for i := range ctxs {
+		ctxs[i], cancels[i] = context.WithTimeout(context.Background(), time.Hour)
+		defer cancels[i]()
+	}
+	type callOutcome struct {
+		index int
+		err   error
+	}
+	outcomes := make(chan callOutcome, calls)
+	var wg sync.WaitGroup
+	for i := range ctxs {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := dispatcher.AgentStatus(ctxs[i], "agent-a")
+			outcomes <- callOutcome{index: i, err: err}
+		}()
+	}
+	for i := 0; i < agentCallConcurrency; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			close(release)
+			wg.Wait()
+			var summary []string
+			for len(outcomes) > 0 {
+				outcome := <-outcomes
+				summary = append(summary, fmt.Sprintf("call[%d]=%v", outcome.index, outcome.err))
+			}
+			t.Fatalf("only %d handlers started; outcomes=%v calls=%+v hubErr=%v hubStats=%+v agentErr=%v agentStats=%+v", i, summary, agent.Calls(), agent.hub.Err(), agent.hub.Stats(), agent.session.Err(), agent.session.Stats())
+		}
 	}
 	select {
-	case result := <-resultCh:
-		if result.err != nil || string(result.report) != `{"adapters":[]}` {
-			t.Fatalf("result = %s, %v", result.report, result.err)
+	case <-started:
+		close(release)
+		wg.Wait()
+		for len(outcomes) > 0 {
+			<-outcomes
 		}
+		t.Fatalf("more than %d concurrent handlers started", agentCallConcurrency)
+	case <-time.After(30 * time.Millisecond):
+	}
+	cancels[calls-1]()
+	close(release)
+	wg.Wait()
+	errs := make([]error, calls)
+	for len(outcomes) > 0 {
+		outcome := <-outcomes
+		errs[outcome.index] = outcome.err
+	}
+	if maximum.Load() != agentCallConcurrency {
+		t.Fatalf("maximum concurrent calls = %d, want %d", maximum.Load(), agentCallConcurrency)
+	}
+	if !hasAgentCode(errs[calls-1], "agent-timeout", http.StatusGatewayTimeout) {
+		t.Fatalf("queued call cancellation = %v, want agent-timeout", errs[calls-1])
+	}
+	for i := 0; i < calls-1; i++ {
+		if errs[i] != nil {
+			t.Errorf("call %d: %v", i, errs[i])
+		}
+	}
+}
+
+func TestDispatcherRemoveKicksAgent(t *testing.T) {
+	registry := NewRegistry()
+	session, peer := attachDispatcherAgent(registry, "agent-a", string(TaskKindStatus))
+	defer peer.CloseNow()
+	dispatcher := NewDispatcher(registry, "")
+	dispatcher.Hub = &AgentHub{registry: registry}
+	if !dispatcher.RemoveAgent("agent-a") {
+		t.Fatal("RemoveAgent() returned false")
+	}
+	select {
+	case <-session.Done():
 	case <-time.After(time.Second):
-		t.Fatal("dispatcher did not receive connect result")
+		t.Fatal("RemoveAgent did not kick the connected session")
 	}
-}
-
-func TestDispatcherConfirmPassthrough(t *testing.T) {
-	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "connect-a", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, "")
-	for _, confirm := range []bool{false, true} {
-		resultCh := make(chan error, 1)
-		go func(confirm bool) {
-			_, err := dispatcher.AgentPush(context.Background(), "connect-a", confirm, web.SyncScope{})
-			resultCh <- err
-		}(confirm)
-		task, ok := registry.Poll("connect-a", time.Second, context.Background())
-		if !ok || task.Kind != TaskKindPush || task.Options.Confirm != confirm {
-			t.Fatalf("task = %+v, ok=%v; confirm=%v", task, ok, confirm)
-		}
-		if err := registry.Submit(TaskResult{TaskID: task.TaskID, AgentID: "connect-a", Kind: task.Kind, OK: true, Report: json.RawMessage(`{"ok":true}`)}); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case err := <-resultCh:
-			if err != nil {
-				t.Fatalf("AgentPush(%v): %v", confirm, err)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("AgentPush(%v) did not finish", confirm)
-		}
-	}
-}
-
-func TestDispatcherDirectFailures(t *testing.T) {
-	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "bad", Mode: AgentModeListen, Addr: "http://127.0.0.1:1"}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, "")
-	dispatcher.Client = &http.Client{Timeout: 20 * time.Millisecond}
-	_, err := dispatcher.AgentStatus(context.Background(), "bad")
-	if err == nil || !hasAgentCode(err, "agent-unreachable", http.StatusBadGateway) {
-		t.Fatalf("unreachable error = %v", err)
+	if _, ok := registry.Get("agent-a"); ok {
+		t.Fatal("RemoveAgent left the agent in the registry")
 	}
 }
 
 func TestDispatcherListAgents(t *testing.T) {
 	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "b", Hostname: "box-b", Mode: AgentModeConnect, LastSeen: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	if err := registry.Register(AgentInfo{AgentID: "a", Hostname: "box-a", Mode: AgentModeListen, Addr: "http://a", Version: "v"}); err != nil {
-		t.Fatal(err)
-	}
+	registry.Attach(AgentInfo{AgentID: "b", Hostname: "box-b", Version: "v1"}, nil)
+	registry.Attach(AgentInfo{AgentID: "a", Hostname: "box-a"}, nil)
 	agents := NewDispatcher(registry, "").ListAgents()
-	if len(agents) != 2 || agents[0].AgentID != "a" || agents[0].Mode != string(AgentModeListen) || agents[1].AgentID != "b" {
+	if len(agents) != 2 || agents[0].AgentID != "a" || agents[0].Hostname != "box-a" || agents[1].AgentID != "b" {
 		t.Fatalf("agents = %+v", agents)
 	}
 }
@@ -191,20 +407,10 @@ func TestDispatcherListAgents(t *testing.T) {
 func TestDispatcherListAgentsHost(t *testing.T) {
 	registry := NewRegistry()
 	usage := 22.0
-	if err := registry.Register(AgentInfo{
-		AgentID:  "box",
-		Hostname: "box",
-		Mode:     AgentModeConnect,
-		Host: &HostSnapshot{
-			OS:     "linux",
-			Arch:   "amd64",
-			Memory: &HostMemory{Total: 2048, Used: 512},
-			CPU:    &HostCPU{Cores: 4, Usage: &usage},
-			Nets:   []HostNet{{Name: "enp3s0", Addrs: []string{"10.0.0.8/24"}, Up: true}},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	registry.Attach(AgentInfo{AgentID: "box", Host: &HostSnapshot{
+		OS: "linux", Arch: "amd64", Memory: &HostMemory{Total: 2048, Used: 512},
+		CPU: &HostCPU{Cores: 4, Usage: &usage}, Nets: []HostNet{{Name: "enp3s0", Addrs: []string{"10.0.0.8/24"}, Up: true}},
+	}}, nil)
 	agents := NewDispatcher(registry, "").ListAgents()
 	if len(agents) != 1 || agents[0].Host == nil {
 		t.Fatalf("agents = %+v", agents)
@@ -218,162 +424,13 @@ func TestDispatcherListAgentsHost(t *testing.T) {
 	}
 }
 
-func hasAgentCode(err error, code string, status int) bool {
-	var agentErr *web.AgentError
-	return errors.As(err, &agentErr) && agentErr.Code == code && agentErr.Status == status
-}
-
-func TestDispatcherListenNonOKMapping(t *testing.T) {
-	// A listen agent answering 5xx or non-JSON maps to agent-unreachable.
-	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer failing.Close()
+func TestDispatcherToolListClone(t *testing.T) {
 	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "err-agent", Mode: AgentModeListen, Addr: failing.URL}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, "")
-	if _, err := dispatcher.AgentStatus(context.Background(), "err-agent"); err == nil || !hasAgentCode(err, "agent-unreachable", http.StatusBadGateway) {
-		t.Fatalf("5xx error = %v", err)
-	}
-
-	// 200 with a non-JSON body also maps to agent-unreachable.
-	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("not json"))
-	}))
-	defer garbage.Close()
-	if err := registry.Register(AgentInfo{AgentID: "garbage", Mode: AgentModeListen, Addr: garbage.URL}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dispatcher.AgentStatus(context.Background(), "garbage"); err == nil || !hasAgentCode(err, "agent-unreachable", http.StatusBadGateway) {
-		t.Fatalf("invalid JSON error = %v", err)
-	}
-}
-
-func TestDispatcherForwardsAdapterScope(t *testing.T) {
-	var adapters, overwrite, confirm, allowSecrets string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		adapters = r.URL.Query().Get("adapters")
-		overwrite = r.URL.Query().Get("overwrite")
-		confirm = r.URL.Query().Get("confirm")
-		allowSecrets = r.URL.Query().Get("allowSecrets")
-		_, _ = w.Write([]byte(`{"ok":true,"status":"pushed"}`))
-	}))
-	defer server.Close()
-	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "listen-scope", Mode: AgentModeListen, Addr: server.URL}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, "")
-	if _, err := dispatcher.AgentPush(context.Background(), "listen-scope", true, web.SyncScope{
-		Explicit: true, Adapters: []string{"vscode", "pad"}, Overwrite: true, AllowSecrets: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if adapters != "vscode,pad" || overwrite != "true" || confirm != "true" || allowSecrets != "true" {
-		t.Fatalf("query adapters=%q overwrite=%q confirm=%q allowSecrets=%q", adapters, overwrite, confirm, allowSecrets)
-	}
-
-	registry = NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "connect-scope", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher = NewDispatcher(registry, "")
-	done := make(chan error, 1)
-	go func() {
-		_, err := dispatcher.AgentPull(context.Background(), "connect-scope", true, web.SyncScope{
-			Explicit: true, Adapters: []string{"pad"},
-		})
-		done <- err
-	}()
-	task, ok := registry.Poll("connect-scope", time.Second, context.Background())
-	if !ok || task.Kind != TaskKindPull || len(task.Options.Adapters) != 1 || task.Options.Adapters[0] != "pad" || task.Options.Overwrite {
-		t.Fatalf("task = %+v ok=%v", task, ok)
-	}
-	if err := registry.Submit(TaskResult{TaskID: task.TaskID, AgentID: "connect-scope", Kind: task.Kind, OK: true, Report: json.RawMessage(`{"ok":true}`)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestDispatcherListenWriteStatusPassthrough(t *testing.T) {
-	// Remote push/pull preserves the agent's 409 (confirm gate) and 422
-	// (command failure) responses instead of remapping them to 502: the web
-	// layer's two-phase confirm for agents depends on this.
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/push", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"ok":false,"status":"aborted"}`))
-	})
-	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = w.Write([]byte(`{"ok":false,"status":"conflicts"}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "write-a", Mode: AgentModeListen, Addr: server.URL}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, "")
-	raw, err := dispatcher.AgentPush(context.Background(), "write-a", false, web.SyncScope{})
-	if err != nil || string(raw) != `{"ok":false,"status":"aborted"}` {
-		t.Fatalf("push 409 passthrough = %q err=%v", raw, err)
-	}
-	if info, ok := registry.Get("write-a"); !ok || info.Drift != nil {
-		t.Fatalf("aborted push changed drift: %+v", info.Drift)
-	}
-	raw, err = dispatcher.AgentPull(context.Background(), "write-a", true, web.SyncScope{})
-	if err != nil || string(raw) != `{"ok":false,"status":"conflicts"}` {
-		t.Fatalf("pull 422 passthrough = %q err=%v", raw, err)
-	}
-	info, ok := registry.Get("write-a")
-	if !ok || info.Drift == nil || info.Drift.Conflicts != 1 {
-		t.Fatalf("conflict pull drift = %+v", info.Drift)
-	}
-}
-
-func TestDispatcherConnectTimeout(t *testing.T) {
-	// A connect agent that never reports back surfaces as agent-timeout (504)
-	// once the caller's context deadline expires.
-	registry := NewRegistry()
-	if err := registry.Register(AgentInfo{AgentID: "slow", Mode: AgentModeConnect}); err != nil {
-		t.Fatal(err)
-	}
-	// Seed the queue with a task but never Submit the result.
-	if err := registry.Enqueue("slow", Task{TaskID: "t-timeout", Kind: TaskKindStatus}); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := NewDispatcher(registry, "")
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	_, err := dispatcher.AgentStatus(ctx, "slow")
-	if err == nil || !hasAgentCode(err, "agent-timeout", http.StatusGatewayTimeout) {
-		t.Fatalf("connect timeout error = %v", err)
-	}
-}
-
-// An OFFLINE machine must fail fast with a clear offline message — not
-// burn the 60s dispatcher timeout before 504. (User story: clicked
-// "查看" on a disconnected machine, waited a minute for nothing.)
-func TestDispatcherStatusOfflineFailsFast(t *testing.T) {
-	registry := NewRegistry()
-	registry.Register(AgentInfo{AgentID: "gone", Hostname: "gone", Mode: AgentModeConnect, LastSeen: time.Now().Add(-10 * time.Minute)})
-	dispatcher := NewDispatcher(registry, "token")
-	started := time.Now()
-	_, err := dispatcher.AgentStatus(context.Background(), "gone")
-	elapsed := time.Since(started)
-	if err == nil {
-		t.Fatal("offline agent must not report success")
-	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("offline agent must fail fast (took %v)", elapsed)
-	}
-	if !strings.Contains(err.Error(), "离线") {
-		t.Fatalf("error must say the machine is offline, got: %v", err)
+	registry.Attach(AgentInfo{AgentID: "box", Tools: []toolctl.Status{{ID: "pi", Version: "1.0"}}}, nil)
+	listed := NewDispatcher(registry, "").ListAgents()
+	listed[0].Tools[0].Version = "mutated"
+	info, _ := registry.Get("box")
+	if info.Tools[0].Version != "1.0" {
+		t.Fatalf("web list aliased registry tools: %+v", info.Tools)
 	}
 }
