@@ -24,8 +24,9 @@ type InspectEvent struct {
 }
 
 type InspectSecret struct {
-	Path, Description string
-	Line              int
+	Path        string `json:"path"`
+	Description string `json:"description"`
+	Line        int    `json:"line"`
 }
 
 type InspectResult struct {
