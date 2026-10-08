@@ -19,7 +19,7 @@
 | P4b agent 数据面 | worker-10 | ws/p4b-data | ✅ 已合并(tag ws/p4b-merged) |
 | I1 集成 | orchestrator | master | ✅ f18141c(tag ws/i1-integrated):CLI 改 --hub/--data-url、serve 装配 AgentHub、删 listen/connect;go build ./... 通过,internal/... -race 全绿 |
 | P5 docker/脚本/文档 | worker-12 | ws/p5-docs | ✅ 已合并 95a3fb0(tag ws/p5-merged);README runbook 已对齐 hw 真实 unit(`--connect <url>` 空格写法) |
-| P6a 集成测试 | worker-11 | ws/p6a-integration | 进行中(tests/integration+tests/bench) |
+| P6a 集成测试 | worker-11 | ws/p6a-integration | ✅ 已合并(tag ws/p6a-merged) |
 | P6b e2e 迁移 | worker-13 | ws/p6b-e2e | ✅ 已合并(tag ws/p6b-merged);orchestrator 独立复验:SOP 三守门员通过,全量 tests/e2e 77s 通过,tagged vet 编译通过 |
 | P7 hw 性能验收 | orchestrator+用户 | - | 待 |
 
@@ -54,3 +54,7 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - P4b 合并。复验发现 TestAgentHubSupersedesPreviousSession 在全量并行下偶发失败:测试等待「任意会话」而非「会话被替换」,是测试竞态非产品缺陷;已修(等待 registry 会话换成非 firstSession),-race -count=200 通过
 - **第二次端到端冒烟(本机回环,P4b 合并后,真 hub+真 agent)**:choices 整包 0.69~0.92s(基线 1.3~1.6s,撞车 3.3~4.75s);4 并发全部 0.73s(基线严格串行 0.13/3.5/5.8s);12 并发按 readSem=4 分三批 0.70/1.41/2.17s(设计如此);stream=1 首字节 0.69s;agent 离线后调用 1ms 返回 503(基线等 60s)
 - 注意:单次 choices ~0.7s 由本机全量扫描决定(homer status 本机 0.78s),这是扫描成本,传输层已不是瓶颈;P7 在 hw 经 tunnel 的真实数字待测
+- P6a 合并。其「I12 HTTP 取消未传播」缺陷报告经核查是测试形态问题:Go net/http 在 handler 不读已发送的请求 body 时,客户端断开不会取消 r.Context();真实控制台的 POST 无 body,无 body 时 agent 约 0.1s 收到取消,15/15。已改测试为无 body 并改为硬失败,报告已更正
+- 全仓验证:gofmt 干净;go build ./... 通过;go vet ./...(含 consolee2e tag、tests/spike)通过;-race 全绿(internal+cmd+tests/integration+tests/bench 34 包 ok;tests/e2e 100s ok)。
+- 发现并修复基线即存在的问题:tests/e2e TestServe* 在 -race 下 strings.Builder 数据竞态(pre-ws-master 上同样失败)已修。internal/cli/commands TestPushUnbornRepositoryCreatesInitialBaseline 在隔离 GIT_CONFIG_GLOBAL 时无提交者身份而失败,基线同样,与本次无关,单独带 git 身份跑通过
+- 下一步:三路 fresh-context 对抗式 review(正确性/回归、测试覆盖、简洁性),再 P7(hw 实测与部署)
