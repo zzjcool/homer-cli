@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -39,9 +40,9 @@ func TestServeSmoke(t *testing.T) {
 
 	serve := exec.Command(binary, "serve", "--home", machineA.homerHome, "--addr", "127.0.0.1:0", "--token", "e2e-serve-token")
 	serve.Env = serveEnv(machineA, global)
-	var serveOut strings.Builder
-	serve.Stdout = &serveOut
-	serve.Stderr = &serveOut
+	serveOut := &lockedBuilder{}
+	serve.Stdout = serveOut
+	serve.Stderr = serveOut
 	if err := serve.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,7 @@ func TestServeSmoke(t *testing.T) {
 		_, _ = serve.Process.Wait()
 	}()
 
-	addr := waitForServeAddr(t, &serveOut)
+	addr := waitForServeAddr(t, serveOut)
 	health := waitHTTP(t, "http://"+addr+"/api/health", http.StatusOK, 10*time.Second)
 	if !strings.Contains(health, `"ok":true`) {
 		t.Fatalf("health body = %q", health)
@@ -182,31 +183,56 @@ func startServeProc(t *testing.T, binary, home, global, addr string) *exec.Cmd {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"PATH=" + os.Getenv("PATH"),
 	}
-	var output strings.Builder
-	command.Stdout = &output
-	command.Stderr = &output
+	output := &lockedBuilder{}
+	command.Stdout = output
+	command.Stderr = output
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	// Attach the buffer through a wrapper the reader can wait on.
-	command.Stdout = &output
-	command.Stderr = &output
 	t.Cleanup(func() {
 		if command.Process != nil {
 			_ = command.Process.Kill()
 		}
 	})
-	serveOutput[command] = &output
+	serveOutputMu.Lock()
+	serveOutput[command] = output
+	serveOutputMu.Unlock()
 	return command
 }
 
-var serveOutput = map[*exec.Cmd]*strings.Builder{}
+var (
+	serveOutputMu sync.Mutex
+	serveOutput   = map[*exec.Cmd]*lockedBuilder{}
+)
+
+// lockedBuilder is a strings.Builder safe for one process-output copier
+// goroutine writing while the test goroutine polls it. Without the lock
+// exec's stdout copier races with String() under -race.
+type lockedBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuilder) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuilder) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
 
 func readServeOutput(t *testing.T, command *exec.Cmd) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if builder, ok := serveOutput[command]; ok {
+		serveOutputMu.Lock()
+		builder, ok := serveOutput[command]
+		serveOutputMu.Unlock()
+		if ok {
 			text := builder.String()
 			if strings.Contains(text, "agent") {
 				return text
@@ -252,7 +278,7 @@ func serveEnv(m machine, global string) []string {
 	}
 }
 
-func waitForServeAddr(t *testing.T, output *strings.Builder) string {
+func waitForServeAddr(t *testing.T, output *lockedBuilder) string {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -334,9 +360,9 @@ func TestServeTokenAuthSmoke(t *testing.T) {
 
 	serve := exec.Command(binary, "serve", "--home", machine.homerHome, "--addr", "127.0.0.1:0")
 	serve.Env = append(serveEnv(machine, global), "HOMER_HUB_TOKEN=e2e-token")
-	var serveOut strings.Builder
-	serve.Stdout = &serveOut
-	serve.Stderr = &serveOut
+	serveOut := &lockedBuilder{}
+	serve.Stdout = serveOut
+	serve.Stderr = serveOut
 	if err := serve.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +371,7 @@ func TestServeTokenAuthSmoke(t *testing.T) {
 		_, _ = serve.Process.Wait()
 	}()
 
-	addr := waitForServeAddr(t, &serveOut)
+	addr := waitForServeAddr(t, serveOut)
 	if code := getHTTPStatus(t, "http://"+addr+"/api/status"); code != http.StatusUnauthorized {
 		t.Fatalf("status without token = %d, want 401", code)
 	}
