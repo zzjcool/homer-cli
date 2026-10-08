@@ -99,6 +99,11 @@ func (p *TCPProxy) forward(source, destination net.Conn) {
 	defer p.removePair(source, destination)
 	buffer := make([]byte, 32*1024)
 	for {
+		select {
+		case <-p.done:
+			return
+		default:
+		}
 		n, err := source.Read(buffer)
 		if n > 0 {
 			mode := p.mode.Load()

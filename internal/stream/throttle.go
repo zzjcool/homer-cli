@@ -24,7 +24,7 @@ func NewThrottledLogger(logger Logger, window time.Duration) *ThrottledLogger {
 // Log prints line if key has not been emitted in the current window. If logger
 // is nil it records the key but emits nothing and still returns false.
 func (t *ThrottledLogger) Log(key, line string) bool {
-	if t == nil {
+	if t == nil || t.logger == nil {
 		return false
 	}
 	now := t.clock.Now()
@@ -36,9 +36,6 @@ func (t *ThrottledLogger) Log(key, line string) bool {
 	}
 	t.last[key] = now
 	t.mu.Unlock()
-	if t.logger == nil {
-		return false
-	}
 	t.logger.Printf("%s", line)
 	return true
 }

@@ -1,20 +1,19 @@
 package wsconn
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/zzjcool/homer-cli/internal/stream"
@@ -23,6 +22,7 @@ import (
 const socketTestTimeout = 4 * time.Second
 
 func TestWebSocketRoundTrip(t *testing.T) {
+	baseline := runtime.NumGoroutine()
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -32,7 +32,10 @@ func TestWebSocketRoundTrip(t *testing.T) {
 		}
 		serverConn <- conn
 	}))
-	defer server.Close()
+	defer func() {
+		server.Close()
+		waitGoroutines(t, baseline)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), socketTestTimeout)
 	defer cancel()
@@ -69,7 +72,8 @@ func TestWebSocketRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCloseCodeReasonRoundTrip(t *testing.T) {
+func TestConcurrentWritesAndCloseCodeReasonRoundTrip(t *testing.T) {
+	trackGoroutineBaseline(t)
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -95,6 +99,25 @@ func TestCloseCodeReasonRoundTrip(t *testing.T) {
 		t.Fatal("Accept did not complete")
 	}
 	defer accepted.CloseNow()
+	var writes sync.WaitGroup
+	for n := 0; n < 32; n++ {
+		writes.Add(1)
+		go func(n int) {
+			defer writes.Done()
+			writeCtx, writeCancel := context.WithTimeout(context.Background(), socketTestTimeout)
+			defer writeCancel()
+			_ = client.Write(writeCtx, []byte("parallel-"+strconv.Itoa(n)))
+		}(n)
+	}
+	writes.Wait()
+	for range 32 {
+		readCtx, readCancel := context.WithTimeout(context.Background(), socketTestTimeout)
+		message, readErr := accepted.Read(readCtx)
+		readCancel()
+		if readErr != nil || !strings.HasPrefix(string(message), "parallel-") {
+			t.Fatalf("concurrent write message = %q, %v", message, readErr)
+		}
+	}
 	if err := accepted.Close(stream.CloseSuperseded, "new agent connected"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -106,6 +129,7 @@ func TestCloseCodeReasonRoundTrip(t *testing.T) {
 }
 
 func TestReadLimit(t *testing.T) {
+	trackGoroutineBaseline(t)
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{MaxMessage: 4})
@@ -141,6 +165,7 @@ func TestReadLimit(t *testing.T) {
 }
 
 func TestDialNon101ReturnsDialError(t *testing.T) {
+	trackGoroutineBaseline(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, "credential rejected")
@@ -160,6 +185,7 @@ func TestDialNon101ReturnsDialError(t *testing.T) {
 }
 
 func TestAcceptRequiresHijacker(t *testing.T) {
+	trackGoroutineBaseline(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wrapped := nonHijacker{ResponseWriter: w}
 		if _, err := Accept(wrapped, r, AcceptOptions{}); err == nil {
@@ -177,13 +203,8 @@ func TestAcceptRequiresHijacker(t *testing.T) {
 
 type nonHijacker struct{ http.ResponseWriter }
 
-type hijackerWrapper struct{ http.ResponseWriter }
-
-func (h hijackerWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	return h.ResponseWriter.(http.Hijacker).Hijack()
-}
-
 func TestHijackClearsWriteTimeout(t *testing.T) {
+	trackGoroutineBaseline(t)
 	accepted := make(chan stream.Conn, 1)
 	server := &http.Server{WriteTimeout: 200 * time.Millisecond, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -224,9 +245,6 @@ func TestHijackClearsWriteTimeout(t *testing.T) {
 		t.Fatal("Accept did not finish")
 	}
 	defer conn.CloseNow()
-	if len := 1 * time.Second; len <= 200*time.Millisecond {
-		t.Fatal("test invariant")
-	}
 	time.Sleep(time.Second)
 	if err := client.Write(ctx, []byte("still alive")); err != nil {
 		t.Fatalf("write after server WriteTimeout elapsed: %v", err)
@@ -240,6 +258,7 @@ func TestHijackClearsWriteTimeout(t *testing.T) {
 }
 
 func TestDialHeaderAndMaxMessageInfo(t *testing.T) {
+	trackGoroutineBaseline(t)
 	var auth atomic.Bool
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +295,7 @@ func TestDialHeaderAndMaxMessageInfo(t *testing.T) {
 }
 
 func TestWsCloseIdempotent(t *testing.T) {
+	trackGoroutineBaseline(t)
 	serverConn := make(chan stream.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := Accept(w, r, AcceptOptions{})
@@ -309,7 +329,28 @@ func TestWsCloseIdempotent(t *testing.T) {
 	_ = accepted.CloseNow()
 }
 
+func trackGoroutineBaseline(t *testing.T) {
+	t.Helper()
+	baseline := runtime.NumGoroutine()
+	t.Cleanup(func() { waitGoroutines(t, baseline) })
+}
+
+func waitGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
+		runtime.GC()
+		select {
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if got := runtime.NumGoroutine(); got > baseline {
+		t.Errorf("goroutines after WebSocket close = %d, baseline %d", got, baseline)
+	}
+}
+
 func TestResponseBodyLimited(t *testing.T) {
+	trackGoroutineBaseline(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, strings.Repeat("x", 8192))
@@ -322,12 +363,4 @@ func TestResponseBodyLimited(t *testing.T) {
 	if !errors.As(err, &dialErr) || len(dialErr.Body) > 4<<10 {
 		t.Fatalf("DialError = %#v, response %#v", dialErr, response)
 	}
-}
-
-func TestCloseReasonUTF8Safe(t *testing.T) {
-	if !utf8.ValidString("reason") {
-		t.Fatal("impossible UTF-8 check")
-	}
-	_ = strconv.Itoa(1)
-	_ = sync.Once{}
 }
