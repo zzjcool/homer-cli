@@ -10,7 +10,7 @@
 ## 阶段状态
 | 阶段 | worker | 分支 | 状态 |
 |---|---|---|---|
-| P0 CF WS spike | worker-5(worker-0 因计划验收命令错误停止) | 主 checkout tests/spike | 进行中(G0 闸口;注意 G0 未过前 P2/P3 已基于 F1 提前开工,风险见下) |
+| P0 CF WS spike | worker-5(worker-0 因计划验收命令错误停止) | 主 checkout tests/spike | ✅ 已合并 c52f6f1(tag ws/g0-passed):G0 通过 |
 | P4a shellenv 缓存 | worker-3(worker-1 因旧测试冲突停止) | ws/p4a-shellenv | ✅ 已合并 2ef7ba9(tag ws/p4a-merged),build/vet/race 通过 |
 | P1 stream 库 | worker-6(worker-2/4 因计划错误停止) | ws/p1-stream-v3 | F1 已合并 master(tag ws/f1-merged=73769a1);补齐阶段进行中 |
 | P2 hub | worker-7 | ws/p2-hub | 进行中 |
@@ -38,3 +38,5 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - P1 F1 检查点到达,orchestrator 独立验证 build/vet/race 全过后合并 master(78ca44f),tag ws/f1-merged
 - 同时在跑 5 个 worker:P0(5) P1 补齐(6) P2(7) P3(8) P4c(9)。P2/P3 在 G0 之前开工是已知风险:若 G0 不过(CF 不透传 WS),要停下来改传输层,Session/协议层仍可复用
 - 注意:P3 分支基于旧 hub 代码,P2 删除旧符号后需 I1 集成统一修复
+- P0 完成,G0 通过。V3:CF 空闲约124s断;R13:经CF的NDJSON被缓冲(推翻增量渲染假设),已写入计划;性能验收只看整包 P95<2s
+- 已关闭 worker 误开的 PR #4 #5 #6

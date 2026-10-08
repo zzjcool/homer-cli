@@ -3,6 +3,18 @@
 **日期**:2026-10-08 · **基线**:master@dd29054(打 tag `pre-ws-master`)· **状态**:待执行
 **取代**:`docs/plan/2026-09-27-hub-plan.md` 的「不做 WebSocket / 长轮询」决策。用户已明确推翻。旧文档顶部加的横幅文本见 B-P5。
 
+## P0 实测结论(2026-10-09,详见 ws-spike-report.md)
+
+- **G0 通过**:V1(101+Authorization+子协议)、V4(25s 应用 ping 保活 15min、0 丢失)、V6(close 4001/4401 及 reason 原样到达)全过。
+- **V3 空闲上限**:60s、100s 存活;完全空闲连接约 **124s** 被 CF 断开(无 close 帧,EOF)。25s/75s 取值不变,但**必须保持应用层心跳**,不得依赖空闲。
+- **R13 结论(推翻原假设)**:经 CF 的 chunked `application/x-ndjson` **被缓冲**,5 行同时到达(首末差 16µs)。因此**浏览器←hub 这一跳不能靠 NDJSON 获得增量渲染**。决策:
+  - `/api/sync/choices?stream=1` 仍实现(本机/内网直连时有效,且协议已定),但**不以它作为性能验收依据**。
+  - 前端必须在流被缓冲、一次性到达时正确渲染(一次性渲染 fallback 是主路径之一,不是降级)。
+  - 真正的提速来自:agent 并发执行、collect.inspect 合并、快照 ETag 缓存、shell PATH 缓存。性能验收只看整包 `stream=0` 的 P95<2s。
+  - agent↔hub 的 WS 不受影响(V4/V10 已证实)。
+- V8:源站侧 blackhole 75.0s 后由应用层 ping 超时发现。V9:重启 cloudflared 后新连接 68s 重连(CF 边缘侧),旧连接 0.04s 断开。V11:Hijack 后 `WriteTimeout=3s` 不影响连接。V12:无 Hijacker 时库返回 501,P2 需转成明确的 500+日志。
+- V2 注意:经 TryCloudflare 的 8MiB 往返 21.8s(带宽受限),大 payload 在真实 tunnel 上慢,`MaxFrame=8MiB` 保留,但 I10 的 7MB 用例只在本地回环断言耗时。
+
 ## 0. 目标与不做的事
 
 **目标**:把 agent↔hub 传输层统一成「WebSocket 上的多路复用 Stream」。列出的 4 个实测瓶颈全部解决:
