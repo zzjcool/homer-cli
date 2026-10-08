@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/adapter"
+	"github.com/zzjcool/homer-cli/internal/shellenv"
 )
 
 // fakeBin writes an executable script. Scripts use only shell builtins and
@@ -224,6 +225,45 @@ func TestReferenceHonorsADeclaredFloor(t *testing.T) {
 	pre := []adapter.Tool{{ID: "x", MinVersion: "3.0.0-rc.1"}}
 	if got := reference(nil, pre)["x"]; got != "3.0.0-rc.1" {
 		t.Fatalf("prerelease floor = %q", got)
+	}
+}
+
+func TestUpgradeInvalidatesCachedLoginPATH(t *testing.T) {
+	shellenv.Invalidate()
+	previousRead := shellenv.ReadLoginPATH
+	previousTTL := shellenv.LoginPATHTTL
+	calls := 0
+	firstLoginPath := t.TempDir()
+	secondLoginPath := t.TempDir()
+	shellenv.LoginPATHTTL = time.Minute
+	shellenv.ReadLoginPATH = func() string {
+		calls++
+		if calls == 1 {
+			return firstLoginPath
+		}
+		return secondLoginPath
+	}
+	t.Cleanup(func() {
+		shellenv.ReadLoginPATH = previousRead
+		shellenv.LoginPATHTTL = previousTTL
+		shellenv.Invalidate()
+	})
+
+	if got := shellenv.Path(); !strings.Contains(got, firstLoginPath) {
+		t.Fatalf("initial PATH = %q, want login PATH %q", got, firstLoginPath)
+	}
+	dir := t.TempDir()
+	fakeBin(t, dir, "pi", piScript(dir))
+	setVersion(t, dir, "pi.version", "0.80.0")
+	setVersion(t, dir, "next", "0.90.2")
+	if result := Upgrade(context.Background(), "pi", dir); !result.OK {
+		t.Fatalf("Upgrade result = %+v, want successful upgrade", result)
+	}
+	if got := shellenv.Path(); !strings.Contains(got, secondLoginPath) {
+		t.Fatalf("PATH after Upgrade = %q, want refreshed login PATH %q", got, secondLoginPath)
+	}
+	if calls != 2 {
+		t.Fatalf("login PATH reads after Upgrade = %d, want 2", calls)
 	}
 }
 

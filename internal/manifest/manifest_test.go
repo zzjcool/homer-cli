@@ -130,9 +130,13 @@ func writeExecutable(t *testing.T, content string) string {
 }
 
 func TestDefaultPortUsesMinimalEnvironment(t *testing.T) {
+	shellenv.Invalidate()
 	previous := shellenv.ReadLoginPATH
 	shellenv.ReadLoginPATH = func() string { return "" }
-	t.Cleanup(func() { shellenv.ReadLoginPATH = previous })
+	t.Cleanup(func() {
+		shellenv.ReadLoginPATH = previous
+		shellenv.Invalidate()
+	})
 	t.Setenv("HOMER_TEST_SECRET", "must-not-cross-boundary")
 	t.Setenv("HOME", "/tmp/homer-manifest-home")
 	t.Setenv("PATH", "/bin")
@@ -302,18 +306,28 @@ func TestParseIDsWithPattern(t *testing.T) {
 	}
 }
 
-func TestCommandEnvReadsLoginPATHEveryCall(t *testing.T) {
+func TestCommandEnvUsesCachedLoginPATH(t *testing.T) {
+	shellenv.Invalidate()
 	previous := shellenv.ReadLoginPATH
 	calls := 0
 	shellenv.ReadLoginPATH = func() string {
 		calls++
 		return "/usr/bin:/bin"
 	}
-	t.Cleanup(func() { shellenv.ReadLoginPATH = previous })
+	t.Cleanup(func() {
+		shellenv.ReadLoginPATH = previous
+		shellenv.Invalidate()
+	})
 	_ = minimalCommandEnv()
+	_ = minimalCommandEnv()
+	if calls != 1 {
+		t.Fatalf("login PATH reads within TTL = %d, want 1", calls)
+	}
+
+	shellenv.Invalidate()
 	_ = minimalCommandEnv()
 	if calls != 2 {
-		t.Fatalf("login PATH reads = %d, want 2", calls)
+		t.Fatalf("login PATH reads after Invalidate = %d, want 2", calls)
 	}
 }
 

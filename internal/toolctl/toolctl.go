@@ -187,6 +187,8 @@ var upgradeSlot = make(chan struct{}, 1)
 
 // Upgrade runs the registered upgrade command for the tool with this ID.
 func Upgrade(ctx context.Context, id, path string) UpgradeResult {
+	defer shellenv.Invalidate()
+
 	tool, ok := adapter.ToolByID(id)
 	if !ok {
 		return UpgradeResult{Status: "unknown-tool", Tool: clip(id, 40), Note: "不认识这个应用：" + clip(id, 40)}
