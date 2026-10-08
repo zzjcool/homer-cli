@@ -13,7 +13,7 @@
 | P0 CF WS spike | worker-5(worker-0 因计划验收命令错误停止) | 主 checkout tests/spike | ✅ 已合并 c52f6f1(tag ws/g0-passed):G0 通过 |
 | P4a shellenv 缓存 | worker-3(worker-1 因旧测试冲突停止) | ws/p4a-shellenv | ✅ 已合并 2ef7ba9(tag ws/p4a-merged),build/vet/race 通过 |
 | P1 stream 库 | worker-6(worker-2/4 因计划错误停止) | ws/p1-stream-v3 | ✅ 完整实现已合并 0a07931(tag ws/p1-merged);orchestrator 独立复验 build/vet/-race/count=30 全过 |
-| P2 hub | worker-7 | ws/p2-hub | 进行中 |
+| P2 hub | worker-7 | ws/p2-hub | ✅ 已合并 b0fb343(tag ws/p2-merged);hub+web+stream 合并后 build/vet/race 全过 |
 | P3 agent | worker-8 | ws/p3-agent | 进行中 |
 | P4c web+UI | worker-9 | ws/p4c-web | ✅ 已合并 37a1a23(tag ws/p4c-merged);复验 web race/闸口矩阵/ETag/ChoicesStream/fanout 通过 |
 | P4b agent 数据面 | - | ws/p4b-data | 待 P3 |
@@ -42,3 +42,4 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - 已关闭 worker 误开的 PR #4 #5 #6
 - P1 合并 0a07931(tag ws/p1-merged)。TestHalfOpenDetectedByPing 属 P6a,不在 P1。P2/P3/P4c 的分支基于 F1 骨架(73769a1),合并时会有 stream 库后续补齐的差异,I1 统一处理
 - P4c 合并 37a1a23。master 全仓暂不能整体编译(预期:web 删 AgentInfo.Mode 等,hub/agentd/cli/tests/e2e 待 P2/P3/I1/P5/P6 修)。tests/e2e 的 dispatch_unlock_ui_test.go、tool_upgrade_ui_test.go 仍引用 web.AgentInfo.Mode,归 P6
+- P2 合并 b0fb343。复验:hub race count=15 稳定;握手/顶替4001/吊销4401/410墓碑/requireOnline 统一都在代码里。测试名与计划略有出入(TestAgentHubSupersedesPreviousSession 等),覆盖的场景齐
