@@ -379,8 +379,10 @@ func (s *statusFlight) waiting() int {
 func TestStatusFlightPanicReturnsError(t *testing.T) {
 	d := New(Config{AgentID: "panic-flight"}, nil)
 	started := make(chan struct{})
+	release := make(chan struct{})
 	scan := func(context.Context) (commands.StatusReport, error) {
 		close(started)
+		<-release
 		panic("scan exploded")
 	}
 	results := make(chan error, 2)
@@ -395,6 +397,8 @@ func TestStatusFlightPanicReturnsError(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("panic scan did not start")
 	}
+	waitFor(t, time.Second, func() bool { return d.statusFlight.waiting() == 2 })
+	close(release)
 	for range 2 {
 		select {
 		case err := <-results:

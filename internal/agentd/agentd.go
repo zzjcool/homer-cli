@@ -210,15 +210,6 @@ func (d *Daemon) hasEnrollCode() bool {
 	return d.enrollCode != ""
 }
 
-func (d *Daemon) clearEnrollCode() {
-	if d == nil {
-		return
-	}
-	d.authMu.Lock()
-	d.enrollCode = ""
-	d.authMu.Unlock()
-}
-
 func (d *Daemon) persistedAgentSecret() string {
 	if d == nil {
 		return ""

@@ -104,7 +104,7 @@ type Frame struct {
 type Error struct {
 	Code      string `json:"code"`
 	Message   string `json:"msg,omitempty"`
-	Retryable bool   `json:"retry,omitempty"`
+	Retryable bool   `json:"retry,omitempty"` // reserved: no reader yet
 }
 
 func (e *Error) Error() string {

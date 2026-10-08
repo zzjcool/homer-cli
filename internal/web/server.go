@@ -219,16 +219,3 @@ func (s *Server) Handler() http.Handler {
 	}
 	return s.handler
 }
-
-func (s *Server) ListenAndServe() error {
-	if s == nil {
-		return errors.New("nil web server")
-	}
-	server := &http.Server{
-		Addr:              s.opts.Addr,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      90 * time.Second,
-	}
-	return server.ListenAndServe()
-}

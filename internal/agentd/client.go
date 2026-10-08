@@ -110,11 +110,6 @@ func (d *Daemon) runConnection(ctx context.Context) (time.Duration, error) {
 	}
 	session := stream.NewSession(conn, d.cfg.Stream)
 	d.registerHandlers(session)
-	session.OnEvent("agent.reexec", func(context.Context, string, json.RawMessage) { d.requestReexec(session) })
-	session.OnEvent("agent.heartbeat-now", func(context.Context, string, json.RawMessage) { d.signalHeartbeat() })
-	session.OnEvent("agent.shutdown", func(context.Context, string, json.RawMessage) {
-		session.Close(stream.CloseGoingAway, "hub restarting")
-	})
 	ready := make(chan struct{})
 	helloErr := make(chan error, 1)
 	helloDone := make(chan struct{})
