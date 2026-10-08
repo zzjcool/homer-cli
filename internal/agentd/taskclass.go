@@ -3,6 +3,7 @@ package agentd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -155,16 +156,6 @@ type statusFlightCall struct {
 	err        error
 }
 
-func (s *statusFlight) waiting() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var total int
-	for _, call := range s.flights {
-		total += call.waiters
-	}
-	return total
-}
-
 func (d *Daemon) beginWriteGen() {
 	d.statusFlight.mu.Lock()
 	// A scan that started before this write cannot be joined once the write
@@ -182,6 +173,13 @@ func (d *Daemon) bumpWriteGen() {
 }
 
 func (d *Daemon) statusReport(ctx context.Context) (commands.StatusReport, error) {
+	return d.statusFlightDo(ctx, d.executorStatus)
+}
+
+// statusFlightDo shares scans only within the same write generation. A
+// completed write increments writeGen, so new readers cannot join an older
+// scan that may have observed pre-write state.
+func (d *Daemon) statusFlightDo(ctx context.Context, scan func(context.Context) (commands.StatusReport, error)) (commands.StatusReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -192,20 +190,19 @@ func (d *Daemon) statusReport(ctx context.Context) (commands.StatusReport, error
 		d.statusFlight.flights = make(map[uint64]*statusFlightCall)
 	}
 	call := d.statusFlight.flights[epoch]
-	if call == nil {
-		call = &statusFlightCall{done: make(chan struct{}), generation: generation}
-		d.statusFlight.flights[epoch] = call
-		go d.runStatusFlight(generation, epoch, call)
-	} else if call.generation != generation {
+	start := call == nil || call.generation != generation
+	if start {
 		// Do not let a post-write reader join a scan from an earlier write
 		// generation, even when both scans share the same begin-write epoch.
 		call = &statusFlightCall{done: make(chan struct{}), generation: generation}
 		d.statusFlight.flights[epoch] = call
-		go d.runStatusFlight(generation, epoch, call)
 	}
 	call.waiters++
 	d.statusFlight.mu.Unlock()
 
+	if start {
+		go d.runStatusFlight(generation, epoch, call, scan)
+	}
 	select {
 	case <-call.done:
 		d.statusFlight.mu.Lock()
@@ -220,36 +217,44 @@ func (d *Daemon) statusReport(ctx context.Context) (commands.StatusReport, error
 	}
 }
 
-func (d *Daemon) runStatusFlight(generation, epoch uint64, call *statusFlightCall) {
+func (d *Daemon) runStatusFlight(generation, epoch uint64, call *statusFlightCall, scan func(context.Context) (commands.StatusReport, error)) {
 	ctx, cancel := context.WithTimeout(context.Background(), DriftTimeout)
 	defer cancel()
-	report, err := d.executorStatus(ctx)
-	if ctx.Err() != nil && err == nil {
-		err = ctx.Err()
-	}
-	if err == nil {
-		drift := driftFromStatus(report)
+	var report commands.StatusReport
+	var err error
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			report = commands.StatusReport{}
+			err = fmt.Errorf("status scan panic: %v", recovered)
+		}
+		if ctx.Err() != nil && err == nil {
+			err = ctx.Err()
+		}
+		if err == nil {
+			drift := driftFromStatus(report)
+			d.statusFlight.mu.Lock()
+			current := d.statusFlight.writeGen == generation && d.statusFlight.scanEpoch == epoch
+			if current {
+				d.driftMu.Lock()
+				d.lastDrift = cloneDrift(drift)
+				d.lastDriftAt = time.Now()
+				d.driftMu.Unlock()
+			}
+			d.statusFlight.mu.Unlock()
+			if current {
+				d.signalHeartbeat()
+			}
+		}
 		d.statusFlight.mu.Lock()
-		current := d.statusFlight.writeGen == generation && d.statusFlight.scanEpoch == epoch
-		if current {
-			d.driftMu.Lock()
-			d.lastDrift = cloneDrift(drift)
-			d.lastDriftAt = time.Now()
-			d.driftMu.Unlock()
+		call.report = cloneStatusReport(report)
+		call.err = err
+		if d.statusFlight.flights[epoch] == call {
+			delete(d.statusFlight.flights, epoch)
 		}
+		close(call.done)
 		d.statusFlight.mu.Unlock()
-		if current {
-			d.signalHeartbeat()
-		}
-	}
-	d.statusFlight.mu.Lock()
-	call.report = cloneStatusReport(report)
-	call.err = err
-	if d.statusFlight.flights[epoch] == call {
-		delete(d.statusFlight.flights, epoch)
-	}
-	close(call.done)
-	d.statusFlight.mu.Unlock()
+	}()
+	report, err = scan(ctx)
 }
 
 func cloneStatusReport(report commands.StatusReport) commands.StatusReport {

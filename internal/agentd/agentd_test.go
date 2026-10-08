@@ -366,6 +366,47 @@ func TestTaskClassWriteGateFIFOAndCancelable(t *testing.T) {
 	}
 }
 
+func (s *statusFlight) waiting() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var total int
+	for _, call := range s.flights {
+		total += call.waiters
+	}
+	return total
+}
+
+func TestStatusFlightPanicReturnsError(t *testing.T) {
+	d := New(Config{AgentID: "panic-flight"}, nil)
+	started := make(chan struct{})
+	scan := func(context.Context) (commands.StatusReport, error) {
+		close(started)
+		panic("scan exploded")
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := d.statusFlightDo(context.Background(), scan)
+			results <- err
+		}()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("panic scan did not start")
+	}
+	for range 2 {
+		select {
+		case err := <-results:
+			if err == nil || !strings.Contains(err.Error(), "scan exploded") {
+				t.Fatalf("panic scan error = %v, want recovered scan error", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("status-flight waiter did not receive a panic error")
+		}
+	}
+}
+
 func TestStatusFlight(t *testing.T) {
 	exec := &flightExecutor{started: make(chan int, 4), releases: make(chan struct{}, 4)}
 	d := New(Config{AgentID: "flight-agent"}, exec)
