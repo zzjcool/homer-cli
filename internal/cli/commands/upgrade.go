@@ -19,7 +19,7 @@ import (
 type UpgradeOptions struct {
 	HomerHome string
 	Home      string
-	Connect   string // hub base URL override (default: agent.json's connectUrl)
+	Connect   string // hub base URL override (default: agent.json's hubUrl)
 	Out       io.Writer
 	ErrOut    io.Writer
 }
@@ -80,7 +80,7 @@ func RunUpgrade(opts UpgradeOptions) UpgradeReport {
 		return UpgradeReport{OK: false, Status: "no-credential", Note: "没有机器凭证（agent.json 的 secret 或 keys/hub-token）——非 hub 接入机器"}
 	}
 	if hubURL == "" {
-		return UpgradeReport{OK: false, Status: "error", Note: "没有 hub 地址：请用 --connect <hub> 或先接入 agent"}
+		return UpgradeReport{OK: false, Status: "error", Note: "没有 hub 地址：请用 --hub <hub> 或先接入 agent"}
 	}
 	hubURL = strings.TrimRight(hubURL, "/")
 
@@ -152,11 +152,10 @@ func readAgentIdentity(home string) (agentIdentity, bool) {
 	}
 	var cfg struct {
 		AgentSecret string `json:"agentSecret"`
-		ConnectURL  string `json:"connectUrl"`
 		HubURL      string `json:"hubUrl"`
 	}
 	if json.Unmarshal(data, &cfg) != nil {
 		return agentIdentity{}, false
 	}
-	return agentIdentity{secret: cfg.AgentSecret, connectURL: cfg.ConnectURL}, true
+	return agentIdentity{secret: cfg.AgentSecret, connectURL: cfg.HubURL}, true
 }

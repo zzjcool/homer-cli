@@ -46,7 +46,7 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		if strings.TrimSpace(options.ID) != "" {
 			return runHubUpgrade(options, out, errOut)
 		}
-		return runUpgrade(options.Force, options.Connect, options.Home, out, errOut)
+		return runUpgrade(options.Force, options.Hub, options.Home, out, errOut)
 	}
 	if parsed.Command == "" {
 		if len(parsed.Rest) > 0 {
@@ -400,21 +400,13 @@ func unsupportedOptions(command Command, options CommandOptions, names ...string
 			if options.Remote != "" {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --remote", command))
 			}
-		case "listen":
-			if options.Listen != "" {
-				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --listen", command))
-			}
-		case "connect":
-			if options.Connect != "" {
-				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --connect", command))
+		case "data-url":
+			if options.DataURL != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --data-url", command))
 			}
 		case "hub":
 			if options.Hub != "" {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --hub", command))
-			}
-		case "advertise":
-			if options.Advertise != "" {
-				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --advertise", command))
 			}
 		case "token":
 			if options.Token != "" {
@@ -506,20 +498,14 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 	case CommandPair:
 		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "host")
 	case CommandServe:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "listen", "connect", "hub", "advertise", "id", "host")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "hub", "data-url", "id", "host")
 	case CommandAgent:
 		if err := unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "addr", "json", "show-join", "host"); err != nil {
 			return err
 		}
-		// Parameters are optional when a prior successful registration was
-		// persisted (agentd.ResolveConfig): `homer agent` with no flags means
+		// --hub is optional when a prior successful registration was persisted
+		// (agentd.ResolveConfig): `homer agent` with no flags means
 		// "restart with the persisted join state".
-		if (options.Listen != "") == (options.Connect != "") && options.Listen == "" && options.Connect == "" {
-			return nil
-		}
-		if (options.Listen != "") == (options.Connect != "") {
-			return usageArgumentError("命令 agent 需要 --listen <addr> 或 --connect <url> 二选一")
-		}
 		return nil
 	case CommandUpgrade:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "adapters", "adapter", "category", "mode", "remote", "json")

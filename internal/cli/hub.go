@@ -72,15 +72,20 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		writeLine(errOut, fmt.Sprintf("homer serve: %s", enrollErr.Error()))
 		return 1
 	}
-	agentAPI := hub.NewAgentAPI(registry, token).SetEnrollment(enrollment)
+	authenticator := &hub.Authenticator{Token: token, Enrollment: enrollment}
+	agentHub := hub.NewAgentHub(registry, authenticator, enrollment, hub.HubOptions{
+		Logger:  stderrLogger{out: errOut},
+		Version: web.Version,
+	})
+	dispatcher.Hub = agentHub
 	server, err := web.NewServer(web.ServeOptions{
 		Addr:                    boundAddr,
 		HomerHome:               options.Home,
 		Token:                   token,
 		Agents:                  dispatcher,
-		AgentEndpoint:           agentAPI,
+		AgentEndpoint:           agentHub,
 		Enrollment:              enrollment,
-		AgentEndpointAuthorized: agentAPI.Authorized,
+		AgentEndpointAuthorized: authenticator.Authorized,
 	})
 	if err != nil {
 		_ = listener.Close()
@@ -98,7 +103,7 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	}
 	// The hub itself owns no machines: even this physical host joins the
 	// fleet through the standard enrollment flow (uniform CS model).
-	writeLine(out, "把本机加入机器列表: 浏览器登录后「接入新机器」复制命令运行（或 homer agent --connect http://"+displayAddr(boundAddr)+"）")
+	writeLine(out, "把本机加入机器列表: 浏览器登录后「接入新机器」复制命令运行（或 homer agent --hub http://"+displayAddr(boundAddr)+"）")
 	if token != "" {
 		writeLine(out, "已启用 agent token 鉴权（keys/hub-token 持久化，--show-join 查看）。")
 	}
@@ -112,14 +117,15 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		writeLine(out, "")
 		writeLine(out, "之后重新查看: homer serve --show-join")
 	} else {
-		writeLine(out, "agent 接入: homer agent --connect http://<本机地址>"+agentPortSuffix(boundAddr))
+		writeLine(out, "agent 接入: homer agent --hub http://<本机地址>"+agentPortSuffix(boundAddr))
 		writeLine(out, "查看含 token 的接入命令: homer serve --show-join")
 	}
 	httpServer := &http.Server{
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Pull can spend several minutes installing plugins. The write
-		// budget has to cover that wait; agent polls finish well inside it.
+		// budget has to cover that wait. Agent streams are hijacked, which
+		// clears this deadline, so it never cuts a live agent connection.
 		WriteTimeout: 13 * time.Minute,
 	}
 	// Graceful shutdown: SIGINT/SIGTERM drains in-flight requests before the
@@ -143,6 +149,9 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		}
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Tell every agent we are going away (close 1001) before the HTTP
+		// server stops, so in-flight calls fail at once and agents reconnect.
+		_ = agentHub.Shutdown(shutdownCtx)
 		_ = httpServer.Shutdown(shutdownCtx)
 		cancel()
 		_ = <-serveDone
@@ -150,8 +159,8 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	return 0
 }
 
-// runAgent runs the agent daemon in listen or connect mode. Mode exclusivity
-// is validated by validateCommandOptions; agentd.Config.Mode re-checks it.
+// runAgent runs the agent daemon. The agent dials the hub over a WebSocket
+// stream and listens on no port.
 func runAgent(options CommandOptions, out, errOut io.Writer) int {
 	token := hubTokenFromEnv(options.Token)
 	paths := ResolveHomerPaths(options.Home)
@@ -185,16 +194,14 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 		}
 	}
 	config := agentd.Config{
-		Home:         paths.Home,
-		HomerHome:    options.Home,
-		Token:        token,
-		AgentSecret:  persisted.AgentSecret,
-		EnrollCode:   enrollCode,
-		ListenAddr:   options.Listen,
-		AdvertiseURL: options.Advertise,
-		ConnectURL:   options.Connect,
-		HubURL:       options.Hub,
-		AgentID:      options.ID,
+		Home:        paths.Home,
+		HomerHome:   options.Home,
+		Token:       token,
+		AgentSecret: persisted.AgentSecret,
+		EnrollCode:  enrollCode,
+		HubURL:      options.Hub,
+		DataURL:     firstNonEmpty(options.DataURL, os.Getenv("HOMER_DATA_URL")),
+		AgentID:     options.ID,
 	}
 	// Fill in gaps from the persisted agent.json: a bare `homer agent`
 	// restarts with the last successfully registered join state; explicit
@@ -205,25 +212,22 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
 		return 1
 	}
-	if _, err := resolved.Mode(); err != nil {
-		writeLine(errOut, fmt.Sprintf("homer agent: %s", err.Error()))
-		return 1
-	}
 	// No-git data plane: the executor pushes/pulls through the hub's
 	// /api/snapshot endpoints with the agent's per-machine credential.
-	hubBase := strings.TrimSpace(resolved.ConnectURL)
-	if hubBase == "" {
-		hubBase = strings.TrimSpace(resolved.HubURL)
+	// DataURL (default: the hub URL) lets a same-host agent skip the tunnel.
+	dataBase := strings.TrimSpace(resolved.DataURL)
+	if dataBase == "" {
+		dataBase = strings.TrimSpace(resolved.HubURL)
 	}
 	credential := resolved.AgentSecret
 	if credential == "" {
 		credential = resolved.Token
 	}
-	daemon := agentd.New(resolved, agentd.NewLocalExecutorWithHub(options.Home, hubBase, credential))
+	daemon := agentd.New(resolved, agentd.NewLocalExecutorWithHub(options.Home, dataBase, credential))
 	// Report the version of pi, herdr and the other programs the adapters
 	// drive, and let the console upgrade them on this machine.
 	daemon.SetToolkit(agentd.LocalToolkit())
-	writeLine(out, fmt.Sprintf("homer agent: %s 模式启动（Ctrl+C 停止）", agentModeLabel(resolved)))
+	writeLine(out, fmt.Sprintf("homer agent: 已启动，正在连接 %s（Ctrl+C 停止）", resolved.HubURL))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := daemon.Run(ctx); err != nil && ctx.Err() == nil {
@@ -233,11 +237,21 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 	return 0
 }
 
-func agentModeLabel(config agentd.Config) string {
-	if mode, err := config.Mode(); err == nil {
-		return string(mode)
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
 	}
-	return "未知"
+	return ""
+}
+
+// stderrLogger adapts an io.Writer to the stream.Logger interface so hub and
+// agent connection events are always visible in the service log.
+type stderrLogger struct{ out io.Writer }
+
+func (l stderrLogger) Printf(format string, args ...any) {
+	writeLine(l.out, fmt.Sprintf(format, args...))
 }
 
 // agentPortSuffix formats the connect hint so users on another machine can
@@ -297,7 +311,7 @@ func hubReadPasswordFile(home string) bool {
 func joinCommand(boundAddr, token string) string {
 	host, port, err := net.SplitHostPort(boundAddr)
 	if err != nil {
-		return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --connect http://%s", token, boundAddr)
+		return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --hub http://%s", token, boundAddr)
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
 		if lan, lanErr := hub.LanIPv4(); lanErr == nil {
@@ -306,7 +320,7 @@ func joinCommand(boundAddr, token string) string {
 			host = "<本机局域网 IP>"
 		}
 	}
-	return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --connect http://%s", token, net.JoinHostPort(host, port))
+	return fmt.Sprintf("HOMER_HUB_TOKEN=%s homer agent --hub http://%s", token, net.JoinHostPort(host, port))
 }
 
 // showJoinCommand backs `homer serve --show-join`: resolve the persisted

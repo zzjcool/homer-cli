@@ -60,11 +60,10 @@ func TestServeRejectsForeignOptions(t *testing.T) {
 	}
 }
 
-func TestAgentCommandParsesListen(t *testing.T) {
+func TestAgentCommandParsesHub(t *testing.T) {
 	options, err := parseOptions(CommandAgent, []string{
-		"--listen", "0.0.0.0:7761",
-		"--advertise", "http://agent-a:7761",
 		"--hub", "http://hub:7760",
+		"--data-url", "http://127.0.0.1:7760",
 		"--token", "t",
 		"--home", "/tmp/x",
 		"--id", "agent-a",
@@ -72,7 +71,7 @@ func TestAgentCommandParsesListen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.Listen != "0.0.0.0:7761" || options.Advertise != "http://agent-a:7761" || options.Hub != "http://hub:7760" || options.ID != "agent-a" {
+	if options.Hub != "http://hub:7760" || options.DataURL != "http://127.0.0.1:7760" || options.ID != "agent-a" {
 		t.Fatalf("agent options = %#v", options)
 	}
 	if err := validateCommandOptions(CommandAgent, options); err != nil {
@@ -80,43 +79,25 @@ func TestAgentCommandParsesListen(t *testing.T) {
 	}
 }
 
-func TestAgentCommandParsesConnect(t *testing.T) {
-	options, err := parseOptions(CommandAgent, []string{"--connect", "http://hub:7760", "--token", "t"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if options.Connect != "http://hub:7760" {
-		t.Fatalf("connect = %q", options.Connect)
-	}
-	if err := validateCommandOptions(CommandAgent, options); err != nil {
-		t.Fatal(err)
+// listen and connect were removed with the stream transport. They must be
+// plain unknown-option errors, never silently accepted.
+func TestAgentCommandRejectsRemovedModeFlags(t *testing.T) {
+	for _, flag := range []string{"--listen", "--connect", "--advertise"} {
+		if _, err := parseOptions(CommandAgent, []string{flag, "x"}, false); err == nil {
+			t.Fatalf("%s should be rejected now that listen/connect modes are gone", flag)
+		}
 	}
 }
 
-func TestAgentCommandRequiresExactlyOneMode(t *testing.T) {
-	both, err := parseOptions(CommandAgent, []string{"--listen", ":1", "--connect", "http://x"}, false)
+// Bare `homer agent` restarts from the persisted join state;
+// agentd.ResolveConfig errors when nothing was ever persisted.
+func TestAgentCommandBareRestartIsLegal(t *testing.T) {
+	bare, err := parseOptions(CommandAgent, []string{"--token", "t"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateCommandOptions(CommandAgent, both); err == nil {
-		t.Fatal("listen+connect should be a usage error")
-	}
-	// Bare `homer agent` (no mode flags) is now legal: it restarts from the
-	// persisted join state; agentd.ResolveConfig errors when nothing was
-	// ever persisted. Explicit mode flags keep the either-or rule.
-	neither, err := parseOptions(CommandAgent, []string{"--token", "t"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateCommandOptions(CommandAgent, neither); err != nil {
+	if err := validateCommandOptions(CommandAgent, bare); err != nil {
 		t.Fatalf("persisted-restart invocation should parse: %v", err)
-	}
-	listenOnly, err := parseOptions(CommandAgent, []string{"--listen", "127.0.0.1:7761"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateCommandOptions(CommandAgent, listenOnly); err != nil {
-		t.Fatalf("listen only should be valid: %v", err)
 	}
 }
 
@@ -126,8 +107,11 @@ func TestServeUsageText(t *testing.T) {
 		t.Fatalf("serve usage = %q", usage)
 	}
 	usage = commandUsage(CommandAgent)
-	if !strings.Contains(usage, "--listen") || !strings.Contains(usage, "--connect") {
+	if !strings.Contains(usage, "--hub") || !strings.Contains(usage, "--data-url") {
 		t.Fatalf("agent usage = %q", usage)
+	}
+	if strings.Contains(usage, "--listen") || strings.Contains(usage, "--connect") {
+		t.Fatalf("agent usage still mentions removed modes: %q", usage)
 	}
 }
 
@@ -143,7 +127,7 @@ func TestServeShowJoinFlagParses(t *testing.T) {
 		t.Fatalf("show-join should be valid for serve: %v", err)
 	}
 	// agent must reject show-join (it belongs to serve).
-	agentOptions, err := parseOptions(CommandAgent, []string{"--listen", ":1", "--show-join"}, false)
+	agentOptions, err := parseOptions(CommandAgent, []string{"--hub", "http://x", "--show-join"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,12 +186,12 @@ func TestResolveServeTokenLifecycle(t *testing.T) {
 
 func TestJoinCommandHidesTokenFromProcessList(t *testing.T) {
 	line := joinCommand("192.168.1.5:7760", "sekret")
-	if !strings.Contains(line, "HOMER_HUB_TOKEN=sekret homer agent --connect http://192.168.1.5:7760") {
+	if !strings.Contains(line, "HOMER_HUB_TOKEN=sekret homer agent --hub http://192.168.1.5:7760") {
 		t.Fatalf("join command = %q", line)
 	}
 	// Wildcard binds resolve through LanIPv4 or degrade to a placeholder.
 	wild := joinCommand("0.0.0.0:7760", "sekret")
-	if !strings.Contains(wild, "homer agent --connect http://") {
+	if !strings.Contains(wild, "homer agent --hub http://") {
 		t.Fatalf("wildcard join = %q", wild)
 	}
 }

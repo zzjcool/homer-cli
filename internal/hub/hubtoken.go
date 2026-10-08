@@ -154,7 +154,7 @@ func requiresAdvertiseHint(addr string) bool {
 // outbound NIC — docker0/bridges never carry the default route), then a
 // unique global IPv4, and an error otherwise: guessing between multiple
 // NICs silently registers an address the hub cannot reach, so the
-// multi-homed case must be resolved by an explicit --advertise.
+// multi-homed case is reported to the caller.
 func LanIPv4() (net.IP, error) {
 	if ip := defaultRouteIPv4(); ip != nil {
 		return ip, nil
@@ -188,9 +188,9 @@ func LanIPv4() (net.IP, error) {
 	case 1:
 		return candidates[0], nil
 	case 0:
-		return nil, fmt.Errorf("未找到全局 IPv4 地址；请用 --advertise 显式指定")
+		return nil, fmt.Errorf("未找到全局 IPv4 地址；请手动填写本机地址")
 	default:
-		return nil, fmt.Errorf("本机有 %d 个全局 IPv4 地址（%s）；请用 --advertise 显式指定", len(candidates), joinIPs(candidates))
+		return nil, fmt.Errorf("本机有 %d 个全局 IPv4 地址（%s）；请手动填写本机地址", len(candidates), joinIPs(candidates))
 	}
 }
 

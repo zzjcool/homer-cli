@@ -169,14 +169,12 @@ type CommandOptions struct {
 	Positionals  []string
 	// Hub-form options (serve/agent, plan §2.6): shared struct keeps the
 	// strict command-local whitelist pattern.
-	Addr      string
-	Listen    string
-	Connect   string
-	Hub       string
-	Advertise string
-	Token     string
-	ID        string
-	ShowJoin  bool
+	Addr     string
+	Hub      string
+	DataURL  string
+	Token    string
+	ID       string
+	ShowJoin bool
 	// Host is the hub this client talks to, like Docker's --host.
 	Host string
 }
@@ -343,30 +341,18 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 				return options, err
 			}
 			options.Addr = value
-		case "--listen":
-			value, err := takeOptionValue(args, &index, name, inline, hasInline)
-			if err != nil {
-				return options, err
-			}
-			options.Listen = value
-		case "--connect":
-			value, err := takeOptionValue(args, &index, name, inline, hasInline)
-			if err != nil {
-				return options, err
-			}
-			options.Connect = value
 		case "--hub":
 			value, err := takeOptionValue(args, &index, name, inline, hasInline)
 			if err != nil {
 				return options, err
 			}
 			options.Hub = value
-		case "--advertise":
+		case "--data-url":
 			value, err := takeOptionValue(args, &index, name, inline, hasInline)
 			if err != nil {
 				return options, err
 			}
-			options.Advertise = value
+			options.DataURL = value
 		case "--token":
 			value, err := takeOptionValue(args, &index, name, inline, hasInline)
 			if err != nil {
@@ -401,7 +387,7 @@ func commandUsage(command Command) string {
 	case CommandServe:
 		return "用法: homer serve [options]\n\n启动本地 hub：HTTP API + 网页控制台（浏览器访问）。\n\n选项:\n  --addr <addr>       监听地址（默认 127.0.0.1:7760）\n  --home <dir>        homer 工作区\n  --token <t>         hub 鉴权 token（非回环地址必须提供；未提供时自动生成并落盘 keys/hub-token）\n  --show-join         打印含 token 的机器接入命令后退出\n  -h, --help          显示本帮助"
 	case CommandAgent:
-		return "用法: homer agent [--listen <addr> | --connect <url>] [options]\n\n把本机作为 agent 接入 hub。无参数时用上次注册成功的持久化配置重启。\n\n选项:\n  --listen <addr>      监听地址，等 hub 直连采集（机器可达时用）\n  --connect <url>      主动拨出连接 hub（NAT 后机器用）\n\n选项:\n  --hub <url>          listen 模式注册用的 hub 地址\n  --advertise <url>    listen 模式自报的可达地址（0.0.0.0 监听时自动用唯一全局 IPv4）\n  --token <t>          hub token（默认读 HOMER_HUB_TOKEN）\n  --home <dir>         homer 工作区\n  --id <agentId>       覆盖默认 agent ID\n  -h, --help           显示本帮助"
+		return "用法: homer agent [--hub <url>] [options]\n\n把本机作为 agent 接入 hub（agent 主动用 WebSocket 连 hub，本机不监听任何端口）。无参数时用上次注册成功的持久化配置重启。\n\n选项:\n  --hub <url>          hub 地址（首次接入必填）\n  --data-url <url>     快照与下载走的地址，默认等于 --hub（hub 与 agent 同机时可指向回环地址绕开隧道）\n  --token <t>          hub token 或一次性接入码（默认读 HOMER_HUB_TOKEN）\n  --home <dir>         homer 工作区\n  --id <agentId>       覆盖默认 agent ID\n  -h, --help           显示本帮助"
 	case CommandRemote:
 		return "用法: homer remote <url> [options]\n\n配置 origin，不自动推送。\n\n选项: --home <dir> --json -h, --help"
 	case CommandStatus:

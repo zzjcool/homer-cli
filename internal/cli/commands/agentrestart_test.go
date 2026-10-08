@@ -6,7 +6,7 @@ import (
 )
 
 func TestIsHomerAgentArgs(t *testing.T) {
-	if !isHomerAgentArgs([]string{"/home/user/.local/bin/homer", "agent", "--connect", "http://127.0.0.1:7760"}) {
+	if !isHomerAgentArgs([]string{"/home/user/.local/bin/homer", "agent", "--hub", "http://127.0.0.1:7760"}) {
 		t.Fatal("agent argv should match")
 	}
 	if isHomerAgentArgs([]string{"/home/user/.local/bin/homer", "serve"}) {
@@ -26,8 +26,8 @@ func TestPlanAgentRestartLeavesStoppedAgentAlone(t *testing.T) {
 
 func TestPlanAgentRestartUsesSystemdForTheUnit(t *testing.T) {
 	procs := []agentProc{
-		{PID: 10, Args: []string{"/usr/bin/homer", "agent", "--connect", "http://127.0.0.1:7760"}},
-		{PID: 11, Args: []string{"/usr/bin/homer", "agent", "--connect", "https://example"}},
+		{PID: 10, Args: []string{"/usr/bin/homer", "agent", "--hub", "http://127.0.0.1:7760"}},
+		{PID: 11, Args: []string{"/usr/bin/homer", "agent", "--hub", "https://example"}},
 		{PID: 12, Args: []string{"/usr/bin/homer", "serve"}},
 	}
 	plan := planAgentRestart(1, 10, true, procs)
