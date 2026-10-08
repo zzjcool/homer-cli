@@ -69,7 +69,7 @@ ok   github.com/zzjcool/homer-cli/tests/integration	9.626s
 
 ## MR link
 
-Not applicable: task instruction expressly prohibits push and PR/MR creation. Commit is local to `ws/p6a-integration`.
+https://github.com/zzjcool/homer-cli/pull/14 (branch `ws/p6a-integration`, base `master`).
 
 ## Open issues
 
