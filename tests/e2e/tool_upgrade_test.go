@@ -310,8 +310,8 @@ func wantTool(t *testing.T, got map[string]map[string]hubTool, agentID, id, vers
 // TestToolVersionsAndUpgradeThroughHub is the whole path with real processes:
 // agents report the versions of the programs their adapters drive, the hub
 // marks the ones that fall behind the fleet, and one request upgrades a
-// program on a machine, over both the listen and the connect transport. The
-// programs are stand-ins; nothing real is touched.
+// program on a machine over the outbound WebSocket stream. The programs are
+// stand-ins; nothing real is touched.
 func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	skipIfARealToolCouldBeFound(t)
 	root := t.TempDir()
@@ -321,21 +321,21 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	bin := hermeticBin(t)
 
 	hubMachine := makeMachine(t, root, "H", global, false)
-	listen := makeMachine(t, root, "L", global, false)  // listen mode, behind on pi and herdr
-	connect := makeMachine(t, root, "C", global, false) // connect mode, behind on pi and opencode
-	newest := makeMachine(t, root, "X", global, false)  // connect mode, runs the newest of everything
-	bare := makeMachine(t, root, "Z", global, false)    // connect mode, has none of the programs
+	streamA := makeMachine(t, root, "A", global, false) // behind on pi and herdr
+	streamB := makeMachine(t, root, "B", global, false) // behind on pi and opencode
+	newest := makeMachine(t, root, "X", global, false)  // runs the newest of everything
+	bare := makeMachine(t, root, "Z", global, false)    // has none of the programs
 
-	standInPi.install(t, listen, "0.80.0", "0.90.2")
-	standInHerdr.install(t, listen, "0.9.0", "0.9.1")
-	standInPi.install(t, connect, "0.70.0", "0.90.2")
-	standInOpencode.install(t, connect, "1.2.0", "1.4.0")
+	standInPi.install(t, streamA, "0.80.0", "0.90.2")
+	standInHerdr.install(t, streamA, "0.9.0", "0.9.1")
+	standInPi.install(t, streamB, "0.70.0", "0.90.2")
+	standInOpencode.install(t, streamB, "1.2.0", "1.4.0")
 	standInPi.install(t, newest, "0.90.2", "0.90.2")
 	standInHerdr.install(t, newest, "0.9.1", "0.9.1")
 	standInOpencode.install(t, newest, "1.4.0", "1.4.0")
 	// A program the registry has never heard of. If a request could name any
 	// command, this is the one it would run.
-	for _, m := range []machine{listen, connect} {
+	for _, m := range []machine{streamA, streamB} {
 		script := "#!/bin/sh\ntouch \"$(dirname \"$0\")/.evil-ran\"\n"
 		if err := os.WriteFile(filepath.Join(standInPi.dir(m), "evil"), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
@@ -353,36 +353,33 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	defer stopProc(t, hubProc)
 	hub := toolHub{t: t, url: hubURL, auth: map[string]string{"Authorization": "Bearer " + token}}
 
-	listenPort := freePort(t)
-	startHermetic(t, binary, listen, global, bin,
-		"agent", "--listen", fmt.Sprintf("127.0.0.1:%d", listenPort),
-		"--advertise", fmt.Sprintf("http://127.0.0.1:%d", listenPort),
-		"--hub", hubURL, "--token", token, "--id", "agent-l", "--home", listen.homerHome)
-	for id, m := range map[string]machine{"agent-c": connect, "agent-x": newest, "agent-z": bare} {
+	startHermetic(t, binary, streamA, global, bin,
+		"agent", "--hub", hubURL, "--token", token, "--id", "agent-a", "--home", streamA.homerHome)
+	for id, m := range map[string]machine{"agent-b": streamB, "agent-x": newest, "agent-z": bare} {
 		startHermetic(t, binary, m, global, bin,
-			"agent", "--connect", hubURL, "--token", token, "--id", id, "--home", m.homerHome)
+			"agent", "--hub", hubURL, "--token", token, "--id", id, "--home", m.homerHome)
 	}
-	for _, id := range []string{"agent-l", "agent-c", "agent-x", "agent-z"} {
+	for _, id := range []string{"agent-a", "agent-b", "agent-x", "agent-z"} {
 		waitRegistered(t, hubURL, hub.auth, hubProc, id)
 	}
 	hub.waitFor("every machine to report its programs", 30*time.Second, func() bool {
 		got := hub.tools()
-		return len(got["agent-l"]) == 2 && len(got["agent-c"]) == 2 && len(got["agent-x"]) == 3
+		return len(got["agent-a"]) == 2 && len(got["agent-b"]) == 2 && len(got["agent-x"]) == 3
 	})
 
 	t.Run("versions are reported and compared with the fleet", func(t *testing.T) {
 		got := hub.tools()
-		wantTool(t, got, "agent-l", "pi", "0.80.0", "0.90.2", true)
-		wantTool(t, got, "agent-l", "herdr", "0.9.0", "0.9.1", true)
-		wantTool(t, got, "agent-c", "pi", "0.70.0", "0.90.2", true)
-		wantTool(t, got, "agent-c", "opencode", "1.2.0", "1.4.0", true)
+		wantTool(t, got, "agent-a", "pi", "0.80.0", "0.90.2", true)
+		wantTool(t, got, "agent-a", "herdr", "0.9.0", "0.9.1", true)
+		wantTool(t, got, "agent-b", "pi", "0.70.0", "0.90.2", true)
+		wantTool(t, got, "agent-b", "opencode", "1.2.0", "1.4.0", true)
 		wantTool(t, got, "agent-x", "pi", "0.90.2", "0.90.2", false)
 		wantTool(t, got, "agent-x", "herdr", "0.9.1", "0.9.1", false)
 		wantTool(t, got, "agent-x", "opencode", "1.4.0", "1.4.0", false)
 		if len(got["agent-z"]) != 0 {
 			t.Errorf("a machine with none of the programs reports %v", got["agent-z"])
 		}
-		for _, id := range []string{"agent-l", "agent-c", "agent-x"} {
+		for _, id := range []string{"agent-a", "agent-b", "agent-x"} {
 			if _, ok := got[id]["evil"]; ok {
 				t.Errorf("%s reports a program that is not in the registry", id)
 			}
@@ -426,18 +423,18 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	})
 
 	t.Run("requests that are not allowed", func(t *testing.T) {
-		if status, _ := hub.do(http.MethodPost, "/api/agents/agent-l/tool-upgrade", nil, map[string]string{"tool": "pi"}); status != http.StatusUnauthorized {
+		if status, _ := hub.do(http.MethodPost, "/api/agents/agent-a/tool-upgrade", nil, map[string]string{"tool": "pi"}); status != http.StatusUnauthorized {
 			t.Errorf("without the token = %d, want 401", status)
 		}
 		for _, bad := range []string{"", "PI", "pi;reboot", "../pi", "pi update --self", "-rf", strings.Repeat("a", 80)} {
-			if status, _ := hub.upgrade("agent-l", bad); status != http.StatusBadRequest {
+			if status, _ := hub.upgrade("agent-a", bad); status != http.StatusBadRequest {
 				t.Errorf("tool %q = %d, want 400", bad, status)
 			}
 		}
 		if status, _ := hub.upgrade("agent-nowhere", "pi"); status != http.StatusNotFound {
 			t.Errorf("unknown machine = %d, want 404", status)
 		}
-		for _, m := range []machine{listen, connect, newest} {
+		for _, m := range []machine{streamA, streamB, newest} {
 			for _, tool := range []standIn{standInPi, standInHerdr, standInOpencode} {
 				if n := tool.upgrades(t, m); n != 0 {
 					t.Errorf("%s on %s was upgraded %d times by requests that should have been refused", tool.name, m.name, n)
@@ -447,7 +444,7 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	})
 
 	t.Run("only registered programs run", func(t *testing.T) {
-		for _, id := range []string{"agent-l", "agent-c"} {
+		for _, id := range []string{"agent-a", "agent-b"} {
 			status, body := hub.upgrade(id, "evil")
 			if status != http.StatusUnprocessableEntity {
 				t.Errorf("%s: unregistered program = %d %v, want 422", id, status, body)
@@ -456,7 +453,7 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 				t.Errorf("%s: report status = %v, want unknown-tool", id, got)
 			}
 		}
-		for _, m := range []machine{listen, connect} {
+		for _, m := range []machine{streamA, streamB} {
 			if _, err := os.Stat(filepath.Join(standInPi.dir(m), ".evil-ran")); err == nil {
 				t.Errorf("an unregistered program ran on %s", m.name)
 			}
@@ -469,8 +466,8 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 		for _, tc := range []struct {
 			agent, tool, manual string
 		}{
-			{"agent-z", "pi", pi.Install},             // connect transport
-			{"agent-l", "opencode", opencode.Install}, // listen transport
+			{"agent-z", "pi", pi.Install},             // outbound stream
+			{"agent-a", "opencode", opencode.Install}, // outbound stream
 		} {
 			status, body := hub.upgrade(tc.agent, tc.tool)
 			if status != http.StatusUnprocessableEntity {
@@ -489,7 +486,7 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 		}
 	})
 
-	t.Run("upgrading over the listen transport", func(t *testing.T) {
+	t.Run("upgrading agent A over its WebSocket stream", func(t *testing.T) {
 		for _, tc := range []struct {
 			tool          standIn
 			before, after string
@@ -497,26 +494,26 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 			{standInPi, "0.80.0", "0.90.2"},
 			{standInHerdr, "0.9.0", "0.9.1"},
 		} {
-			status, body := hub.upgrade("agent-l", tc.tool.name)
+			status, body := hub.upgrade("agent-a", tc.tool.name)
 			if status != http.StatusOK || field(t, body, "ok") != true || field(t, body, "status") != "upgraded" {
-				t.Fatalf("upgrade agent-l/%s = %d %v", tc.tool.name, status, body)
+				t.Fatalf("upgrade agent-a/%s = %d %v", tc.tool.name, status, body)
 			}
 			if field(t, body, "before") != tc.before || field(t, body, "after") != tc.after {
-				t.Errorf("agent-l/%s went %v → %v, want %s → %s", tc.tool.name, field(t, body, "before"), field(t, body, "after"), tc.before, tc.after)
+				t.Errorf("agent-a/%s went %v → %v, want %s → %s", tc.tool.name, field(t, body, "before"), field(t, body, "after"), tc.before, tc.after)
 			}
-			if got := tc.tool.version(t, listen); got != tc.after {
+			if got := tc.tool.version(t, streamA); got != tc.after {
 				t.Errorf("the program on the machine is at %s, want %s", got, tc.after)
 			}
-			if n := tc.tool.upgrades(t, listen); n != 1 {
+			if n := tc.tool.upgrades(t, streamA); n != 1 {
 				t.Errorf("%s ran its upgrade %d times, want once", tc.tool.name, n)
 			}
 		}
 		got := hub.tools()
-		wantTool(t, got, "agent-l", "pi", "0.90.2", "0.90.2", false)
-		wantTool(t, got, "agent-l", "herdr", "0.9.1", "0.9.1", false)
+		wantTool(t, got, "agent-a", "pi", "0.90.2", "0.90.2", false)
+		wantTool(t, got, "agent-a", "herdr", "0.9.1", "0.9.1", false)
 	})
 
-	t.Run("upgrading over the connect transport", func(t *testing.T) {
+	t.Run("upgrading agent B over its WebSocket stream", func(t *testing.T) {
 		for _, tc := range []struct {
 			tool          standIn
 			before, after string
@@ -524,23 +521,23 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 			{standInPi, "0.70.0", "0.90.2"},
 			{standInOpencode, "1.2.0", "1.4.0"},
 		} {
-			status, body := hub.upgrade("agent-c", tc.tool.name)
+			status, body := hub.upgrade("agent-b", tc.tool.name)
 			if status != http.StatusOK || field(t, body, "ok") != true || field(t, body, "status") != "upgraded" {
-				t.Fatalf("upgrade agent-c/%s = %d %v", tc.tool.name, status, body)
+				t.Fatalf("upgrade agent-b/%s = %d %v", tc.tool.name, status, body)
 			}
 			if field(t, body, "before") != tc.before || field(t, body, "after") != tc.after {
-				t.Errorf("agent-c/%s went %v → %v, want %s → %s", tc.tool.name, field(t, body, "before"), field(t, body, "after"), tc.before, tc.after)
+				t.Errorf("agent-b/%s went %v → %v, want %s → %s", tc.tool.name, field(t, body, "before"), field(t, body, "after"), tc.before, tc.after)
 			}
-			if got := tc.tool.version(t, connect); got != tc.after {
+			if got := tc.tool.version(t, streamB); got != tc.after {
 				t.Errorf("the program on the machine is at %s, want %s", got, tc.after)
 			}
-			if n := tc.tool.upgrades(t, connect); n != 1 {
+			if n := tc.tool.upgrades(t, streamB); n != 1 {
 				t.Errorf("%s ran its upgrade %d times, want once", tc.tool.name, n)
 			}
 		}
 		got := hub.tools()
-		wantTool(t, got, "agent-c", "pi", "0.90.2", "0.90.2", false)
-		wantTool(t, got, "agent-c", "opencode", "1.4.0", "1.4.0", false)
+		wantTool(t, got, "agent-b", "pi", "0.90.2", "0.90.2", false)
+		wantTool(t, got, "agent-b", "opencode", "1.4.0", "1.4.0", false)
 		for id, tools := range got {
 			for name, tool := range tools {
 				if tool.Outdated {
@@ -557,8 +554,8 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 			m     machine
 			tool  standIn
 		}{
-			{"agent-x", newest, standInPi},    // connect transport
-			{"agent-l", listen, standInHerdr}, // listen transport
+			{"agent-x", newest, standInPi},     // outbound stream
+			{"agent-a", streamA, standInHerdr}, // outbound stream
 		} {
 			tc.tool.failUpgrades(t, tc.m, true)
 			before := tc.tool.version(t, tc.m)

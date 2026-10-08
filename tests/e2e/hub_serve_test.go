@@ -135,7 +135,7 @@ func TestServeNonLoopbackAutoToken(t *testing.T) {
 	first := startServeProc(t, binary, home, global, "0.0.0.0:17790")
 	output := readServeOutput(t, first)
 	stopServe(t, first)
-	if !strings.Contains(output, "HOMER_HUB_TOKEN=") || !strings.Contains(output, "homer agent --connect") {
+	if !strings.Contains(output, "HOMER_HUB_TOKEN=") || !strings.Contains(output, "homer agent --hub") {
 		t.Fatalf("first boot missing join command: %q", output)
 	}
 	if !strings.Contains(output, "仅本次显示") {

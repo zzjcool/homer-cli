@@ -2,9 +2,11 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,8 +18,8 @@ import (
 )
 
 func TestKeyringConsoleClicksCreateEncryptUnlock(t *testing.T) {
-	if _, err := os.Stat("/usr/bin/chromium"); err != nil {
-		t.Skip("chromium is not installed")
+	if _, err := chromiumExecutable(t); err != nil {
+		t.Skipf("chromium is not installed: %v", err)
 	}
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -112,8 +114,12 @@ func TestKeyringConsoleClicksCreateEncryptUnlock(t *testing.T) {
 
 func newKeyBrowser(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
+	chromium, err := chromiumExecutable(t)
+	if err != nil {
+		t.Skipf("chromium is not installed: %v", err)
+	}
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.ExecPath("/usr/bin/chromium"),
+		chromedp.ExecPath(chromium),
 		chromedp.Flag("headless", "new"),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
@@ -125,6 +131,16 @@ func newKeyBrowser(t *testing.T) (context.Context, context.CancelFunc) {
 		cancel()
 		allocCancel()
 	}
+}
+
+func chromiumExecutable(t *testing.T) (string, error) {
+	t.Helper()
+	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("looked for chromium, chromium-browser, google-chrome, google-chrome-stable in PATH")
 }
 
 func browserText(ctx context.Context) string {
