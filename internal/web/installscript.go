@@ -20,14 +20,11 @@ HUB={{.HUB}}
 GOOS_EXPECT={{.GOOS}}
 GOARCH_EXPECT={{.GOARCH}}
 TOKEN=
-LISTEN=
-ADVERTISE=
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
-    --listen) LISTEN="$2"; shift 2 ;;
-    --advertise) ADVERTISE="$2"; shift 2 ;;
+    --listen) echo "listen 模式已移除" >&2; exit 1 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
 done
@@ -134,16 +131,8 @@ fi
 AGENT_BIN=""
 if [ -x "$BIN_DIR/homer" ]; then AGENT_BIN="$BIN_DIR/homer"; fi
 if [ -z "$AGENT_BIN" ] && command -v homer >/dev/null 2>&1; then AGENT_BIN="$(command -v homer)"; fi
-if [ -n "$LISTEN" ] && [ -z "$ADVERTISE" ]; then
-  echo "缺少 --advertise <hub 能访问的地址>（中心直连需要告诉 hub 往哪连）" >&2
-  exit 1
-fi
 if [ -n "$AGENT_BIN" ]; then
-  if [ -n "$LISTEN" ]; then
-    AGENT_ARGS="agent --listen $LISTEN --advertise $ADVERTISE --hub $HUB"
-  else
-    AGENT_ARGS="agent --connect $HUB"
-  fi
+  AGENT_ARGS="agent --hub $HUB"
   started=0
   if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     if [ "$(id -u)" -eq 0 ]; then
@@ -210,11 +199,7 @@ EOF
   echo ">> 停止: systemctl stop homer-agent，或 pkill -f 'homer agent'"
 else
   echo ">> homer agent 未在 PATH，token 已保存；装好后运行:"
-  if [ -n "$LISTEN" ]; then
-    echo ">>   nohup homer agent --listen $LISTEN --advertise $ADVERTISE --hub $HUB >>$HOMER_HOME/agent.log 2>&1 &"
-  else
-    echo ">>   nohup homer agent --connect $HUB >>$HOMER_HOME/agent.log 2>&1 &"
-  fi
+  echo ">>   nohup homer agent --hub $HUB >>$HOMER_HOME/agent.log 2>&1 &"
 fi
 `
 

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/keyring"
 )
 
 const (
@@ -432,6 +434,14 @@ func parseStatusReport(raw json.RawMessage) (commands.StatusReport, error) {
 	return report, nil
 }
 
+type syncChoicesResponse struct {
+	OK        bool            `json:"ok"`
+	Direction string          `json:"direction"`
+	AgentID   string          `json:"agentId"`
+	Hint      string          `json:"hint"`
+	Adapters  []AdapterChoice `json:"adapters"`
+}
+
 func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 	direction := r.URL.Query().Get("direction")
 	agentID := strings.TrimSpace(r.URL.Query().Get("agent"))
@@ -449,6 +459,10 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
 		return
 	}
+	if direction == "collect" {
+		s.handleCollectChoices(w, r, agentID, r.URL.Query().Get("stream") == "1")
+		return
+	}
 	raw, err := s.opts.Agents.AgentStatus(r.Context(), agentID)
 	if err != nil {
 		writeErrorValue(w, err)
@@ -459,17 +473,22 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "agent-unreachable", err.Error(), nil)
 		return
 	}
+	response, err := s.buildSyncChoicesResponse(direction, agentID, report)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "storage-read", "读取存储内容失败: "+err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) buildSyncChoicesResponse(direction, agentID string, report commands.StatusReport) (syncChoicesResponse, error) {
 	choices := []AdapterChoice{}
 	hint := ""
 	switch direction {
-	case "collect":
-		choices = BuildCollectChoices(report.Adapters)
-		hint = collectChoiceHint(report, choices)
 	case "dispatch":
 		ids, published, err := s.centerAdapterIDs()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "storage-read", "读取存储内容失败: "+err.Error(), nil)
-			return
+			return syncChoicesResponse{}, err
 		}
 		if !published {
 			hint = "中心还没有任何内容。先从一台机器收取。"
@@ -499,13 +518,89 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 	if choices == nil {
 		choices = []AdapterChoice{}
 	}
-	writeJSON(w, http.StatusOK, struct {
-		OK        bool            `json:"ok"`
-		Direction string          `json:"direction"`
-		AgentID   string          `json:"agentId"`
-		Hint      string          `json:"hint"`
-		Adapters  []AdapterChoice `json:"adapters"`
-	}{true, direction, agentID, hint, choices})
+	return syncChoicesResponse{OK: true, Direction: direction, AgentID: agentID, Hint: hint, Adapters: choices}, nil
+}
+
+func (s *Server) handleCollectChoices(w http.ResponseWriter, r *http.Request, agentID string, streaming bool) {
+	inspector, supportsInspect := s.opts.Agents.(InspectSource)
+	if streaming {
+		s.handleCollectChoicesStream(w, r, agentID, inspector, supportsInspect)
+		return
+	}
+
+	var report commands.StatusReport
+	var present map[string]bool
+	var secrets []InspectSecret
+	if supportsInspect {
+		result, err := inspector.AgentInspect(r.Context(), agentID, collectInspectParams(), nil)
+		if err != nil {
+			writeErrorValue(w, err)
+			return
+		}
+		report, present, secrets = result.Status, result.Present, result.Secrets
+	} else {
+		raw, err := s.opts.Agents.AgentStatus(r.Context(), agentID)
+		if err != nil {
+			writeErrorValue(w, err)
+			return
+		}
+		var parseErr error
+		report, parseErr = parseStatusReport(raw)
+		if parseErr != nil {
+			writeError(w, http.StatusBadGateway, "agent-unreachable", parseErr.Error(), nil)
+			return
+		}
+	}
+	response := s.buildCollectChoicesResponse(agentID, report, present, secrets)
+	writeJSON(w, http.StatusOK, response)
+}
+
+func collectInspectParams() InspectParams {
+	paths := make([]string, 0)
+	for _, rule := range credentialRules() {
+		paths = append(paths, rule.Destination)
+	}
+	return InspectParams{Credentials: paths, WantKeys: true}
+}
+
+func (s *Server) buildCollectChoicesResponse(agentID string, report commands.StatusReport, present map[string]bool, secrets []InspectSecret) syncChoicesResponse {
+	choices := BuildCollectChoices(report.Adapters)
+	s.enrichCollectChoices(choices, present, secrets)
+	if choices == nil {
+		choices = []AdapterChoice{}
+	}
+	return syncChoicesResponse{
+		OK:        true,
+		Direction: "collect",
+		AgentID:   agentID,
+		Hint:      collectChoiceHint(report, choices),
+		Adapters:  choices,
+	}
+}
+
+func (s *Server) enrichCollectChoices(choices []AdapterChoice, present map[string]bool, secrets []InspectSecret) {
+	applyCredentialProbe(choices, present)
+	config, _ := core.LoadConfig(s.paths())
+	hits := inspectSecretHits(config, secrets)
+	for i := range choices {
+		choices[i].SecretHits = append([]SecretHit(nil), hits[choices[i].ID]...)
+	}
+}
+
+func inspectSecretHits(config *core.HomerConfig, secrets []InspectSecret) map[string][]SecretHit {
+	hits := make(map[string][]SecretHit)
+	seen := make(map[string]struct{}, len(secrets))
+	for _, secret := range secrets {
+		if _, ok := seen[secret.Path]; ok {
+			continue
+		}
+		seen[secret.Path] = struct{}{}
+		adapterID, destination := secretDestination(config, secret.Path)
+		hits[adapterID] = append(hits[adapterID], SecretHit{
+			Path: secret.Path, Destination: destination, Reason: secret.Description, Line: secret.Line,
+		})
+	}
+	return hits
 }
 
 func collectChoiceHint(report commands.StatusReport, choices []AdapterChoice) string {
@@ -520,54 +615,184 @@ func collectChoiceHint(report commands.StatusReport, choices []AdapterChoice) st
 	return "只会把勾选的适配器写入中心。没勾选的适配器保持中心现有内容。绑在适配器上的密钥会跟着走。"
 }
 
-// handleCollectPrecheck answers what a collect would run into, before the
-// user commits to it: credential files that would stay behind, and files the
-// machine's secret scanner would refuse. Each is a queued task on the machine,
-// so this is a second request the dialog fills in after the adapter list is
-// already on screen. Nothing is written.
-func (s *Server) handleCollectPrecheck(w http.ResponseWriter, r *http.Request) {
-	agentID := strings.TrimSpace(r.URL.Query().Get("agent"))
-	if agentID == "" {
-		writeError(w, http.StatusBadRequest, "bad-request", "缺少 agent 参数", nil)
+func (s *Server) handleCollectChoicesStream(w http.ResponseWriter, r *http.Request, agentID string, inspector InspectSource, supportsInspect bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "stream-unavailable", "服务器不支持流式响应", nil)
 		return
 	}
-	if s.opts.Agents == nil {
-		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
-		return
-	}
-	actor, _ := s.opts.Agents.(KeyAgentSource)
-	var credPaths []string
-	for _, rule := range credentialRules() {
-		credPaths = append(credPaths, rule.Destination)
-	}
-	var found map[string]bool
-	var hits map[string][]SecretHit
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); found = probeCredentials(r.Context(), actor, agentID, credPaths) }()
-	go func() { defer wg.Done(); hits = s.preflightSecrets(r.Context(), agentID, nil) }()
-	wg.Wait()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
 
-	byAdapter := map[string][]CredentialRule{}
-	holder := []AdapterChoice{}
-	for _, rule := range credentialRules() {
-		holder = append(holder, AdapterChoice{ID: rule.Adapter})
-	}
-	seen := map[string]bool{}
-	unique := holder[:0]
-	for _, item := range holder {
-		if !seen[item.ID] {
-			seen[item.ID] = true
-			unique = append(unique, item)
+	var mu sync.Mutex
+	var writeErr error
+	writeLine := func(value any) bool {
+		data, err := json.Marshal(value)
+		if err != nil {
+			writeErr = err
+			cancel()
+			return false
 		}
+		if ctx.Err() != nil || writeErr != nil {
+			return false
+		}
+		data = append(data, '\n')
+		if _, err := w.Write(data); err != nil {
+			writeErr = err
+			cancel()
+			return false
+		}
+		flusher.Flush()
+		return ctx.Err() == nil
 	}
-	applyCredentialProbe(unique, found)
-	for _, item := range unique {
-		byAdapter[item.ID] = item.Credentials
+	writeErrorEvent := func(err error) {
+		_, code := errorStatusCode(err)
+		message := errorMessage(code)
+		if code == "internal" && err != nil {
+			message = err.Error()
+		}
+		writeLine(map[string]any{"type": "error", "code": code, "message": message})
 	}
-	writeJSON(w, http.StatusOK, struct {
-		OK          bool                        `json:"ok"`
-		Credentials map[string][]CredentialRule `json:"credentials"`
-		SecretHits  map[string][]SecretHit      `json:"secretHits"`
-	}{true, byAdapter, hits})
+	if !supportsInspect {
+		raw, err := s.opts.Agents.AgentStatus(ctx, agentID)
+		if err != nil {
+			writeErrorEvent(err)
+			return
+		}
+		report, err := parseStatusReport(raw)
+		if err != nil {
+			writeErrorEvent(&AgentError{Code: "agent-unreachable", Status: http.StatusBadGateway, Err: err})
+			return
+		}
+		response := s.buildCollectChoicesResponse(agentID, report, nil, nil)
+		for i, adapter := range response.Adapters {
+			if !writeLine(map[string]any{"type": "adapter", "adapter": adapter, "done": i + 1, "total": len(response.Adapters)}) {
+				return
+			}
+		}
+		writeLine(map[string]any{"type": "keys", "keys": []any{}})
+		writeLine(map[string]any{"type": "done", "hint": response.Hint, "adapters": response.Adapters})
+		return
+	}
+
+	var currentChoices []AdapterChoice
+	var present map[string]bool
+	var secrets []InspectSecret
+	var lastKeys *keyring.Result
+	writePrecheck := func() bool {
+		credentials := make(map[string][]CredentialRule, len(currentChoices))
+		secretHits := make(map[string][]SecretHit, len(currentChoices))
+		for _, choice := range currentChoices {
+			credentials[choice.ID] = choice.Credentials
+			secretHits[choice.ID] = choice.SecretHits
+		}
+		return writeLine(map[string]any{"type": "precheck", "credentials": credentials, "secretHits": secretHits})
+	}
+	writeKeys := func(result *keyring.Result) bool {
+		keys := []keyring.Summary{}
+		if result != nil && result.Keys != nil {
+			keys = result.Keys
+		}
+		return writeLine(map[string]any{"type": "keys", "keys": keys})
+	}
+
+	result, err := inspector.AgentInspect(ctx, agentID, collectInspectParams(), func(event InspectEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ctx.Err() != nil || writeErr != nil {
+			return
+		}
+		switch event.Stage {
+		case "adapter":
+			if event.Adapter == nil {
+				return
+			}
+			rows := BuildCollectChoices([]commands.StatusAdapterReport{*event.Adapter})
+			if len(rows) == 0 {
+				return
+			}
+			s.enrichCollectChoices(rows, present, secrets)
+			updated := false
+			for i := range currentChoices {
+				if currentChoices[i].ID == rows[0].ID {
+					currentChoices[i] = rows[0]
+					updated = true
+					break
+				}
+			}
+			if !updated {
+				currentChoices = append(currentChoices, rows[0])
+			}
+			_ = writeLine(map[string]any{
+				"type": "adapter", "adapter": rows[0], "done": event.Done, "total": event.Total,
+			})
+		case "credentials":
+			if event.Present != nil {
+				if present == nil {
+					present = make(map[string]bool)
+				}
+				for path, exists := range event.Present {
+					present[path] = exists
+				}
+			}
+			s.enrichCollectChoices(currentChoices, present, secrets)
+			_ = writePrecheck()
+		case "secrets":
+			secrets = appendInspectSecrets(secrets, event.Secrets)
+			s.enrichCollectChoices(currentChoices, present, secrets)
+			_ = writePrecheck()
+		case "keys":
+			if event.Keys != nil {
+				lastKeys = event.Keys
+				_ = writeKeys(lastKeys)
+			}
+		}
+	})
+	if err != nil {
+		mu.Lock()
+		defer mu.Unlock()
+		if ctx.Err() == nil && writeErr == nil {
+			writeErrorEvent(err)
+		}
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if ctx.Err() != nil || writeErr != nil {
+		return
+	}
+	if result.Present != nil {
+		present = result.Present
+	}
+	if result.Secrets != nil {
+		secrets = result.Secrets
+	}
+	if result.Keys != nil {
+		lastKeys = result.Keys
+	}
+	response := s.buildCollectChoicesResponse(agentID, result.Status, present, secrets)
+	if result.Present != nil || result.Secrets != nil {
+		currentChoices = append([]AdapterChoice(nil), response.Adapters...)
+		_ = writePrecheck()
+	}
+	_ = writeKeys(lastKeys)
+	writeLine(map[string]any{"type": "done", "hint": response.Hint, "adapters": response.Adapters})
+}
+
+func appendInspectSecrets(existing, next []InspectSecret) []InspectSecret {
+	seen := make(map[string]struct{}, len(existing)+len(next))
+	for _, item := range existing {
+		seen[item.Path] = struct{}{}
+	}
+	for _, item := range next {
+		if _, ok := seen[item.Path]; ok {
+			continue
+		}
+		seen[item.Path] = struct{}{}
+		existing = append(existing, item)
+	}
+	return existing
 }

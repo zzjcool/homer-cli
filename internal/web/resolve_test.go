@@ -71,7 +71,7 @@ func TestResolveLocalKeepsMachineContent(t *testing.T) {
 func TestResolveCenterAppliesCenterContent(t *testing.T) {
 	fixture := conflictFixture(t)
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "online-1", Hostname: "box", Mode: "listen"}},
+		list:    []AgentInfo{{AgentID: "online-1", Hostname: "box"}},
 		pullRaw: []byte(`{"ok":true}`),
 	}
 	server := newWebServer(t, fixture, "test-token", source, nil)
@@ -94,7 +94,7 @@ func TestResolveCenterAppliesCenterContent(t *testing.T) {
 func TestResolveLocalFanoutsToOnlineAgents(t *testing.T) {
 	fixture := conflictFixture(t)
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "online-1", Hostname: "box", Mode: "listen"}},
+		list:    []AgentInfo{{AgentID: "online-1", Hostname: "box"}},
 		pullRaw: []byte(`{"ok":true}`),
 	}
 	server := newWebServer(t, fixture, "test-token", source, nil)

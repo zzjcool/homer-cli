@@ -3,11 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/zzjcool/homer-cli/internal/toolctl"
 )
@@ -53,10 +51,6 @@ func annotateTools(agents []AgentInfo) {
 // table, so a machine on a newer release can still be asked about a program
 // this hub has never heard of.
 var toolIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,39}$`)
-
-// toolUpgradeWindow is how long a machine may keep one upgrade request open:
-// the version check, the upgrade command, and the version check after it.
-const toolUpgradeWindow = toolctl.UpgradeTimeout + 2*toolctl.ProbeTimeout + 30*time.Second
 
 func (s *Server) handleAgentToolUpgrade(w http.ResponseWriter, r *http.Request, agentID string) {
 	var payload struct {
@@ -121,37 +115,4 @@ func writeToolUpgradeReport(w http.ResponseWriter, raw json.RawMessage) {
 		Error:  errorBody{Code: "tool-upgrade-failed", Message: message, Details: details},
 		Report: raw,
 	}))
-}
-
-// handleLocalToolUpgrade is the listen-mode agent's side: the hub dials it
-// with {"tool": "<id>"} and gets the report back. It answers 200 even when the
-// upgrade failed, because the failure is the report; the hub turns it into an
-// error for the console.
-func (s *Server) handleLocalToolUpgrade(w http.ResponseWriter, r *http.Request) {
-	if s.opts.LocalToolUpgrade == nil {
-		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
-		return
-	}
-	var payload struct {
-		Tool string `json:"tool"`
-	}
-	if err := readJSONBody(r, &payload); err != nil {
-		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
-		return
-	}
-	// The server's ordinary write timeout is shorter than an upgrade.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(toolUpgradeWindow)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		writeError(w, http.StatusInternalServerError, "internal", "无法延长这次请求的时限", []string{err.Error()})
-		return
-	}
-	raw, err := s.opts.LocalToolUpgrade(r.Context(), strings.TrimSpace(payload.Tool))
-	if err != nil {
-		writeErrorValue(w, err)
-		return
-	}
-	if len(raw) == 0 || !json.Valid(raw) {
-		writeError(w, http.StatusInternalServerError, "internal", "机器没有返回升级结果", nil)
-		return
-	}
-	writeJSONBytes(w, http.StatusOK, raw)
 }

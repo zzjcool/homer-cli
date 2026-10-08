@@ -108,8 +108,8 @@ func TestSyncToOthersPushesThenPullsOnlineAgents(t *testing.T) {
 	setGitIdentity(t, fixture.home)
 	source := &sourceStub{
 		list: []AgentInfo{
-			{AgentID: "online-1", Hostname: "box-online", Mode: "listen"},
-			{AgentID: "offline-1", Hostname: "box-offline", Mode: "listen", Stale: true},
+			{AgentID: "online-1", Hostname: "box-online"},
+			{AgentID: "offline-1", Hostname: "box-offline", Stale: true},
 		},
 		pullRaw: json.RawMessage(`{"ok":true}`),
 	}
@@ -139,7 +139,7 @@ func TestSyncToOthersPushesThenPullsOnlineAgents(t *testing.T) {
 func TestSyncToOthersDoesNotPullWhenPushRejected(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890\n")
 	setGitIdentity(t, fixture.home)
-	source := &sourceStub{list: []AgentInfo{{AgentID: "online-1", Hostname: "box", Mode: "listen"}}}
+	source := &sourceStub{list: []AgentInfo{{AgentID: "online-1", Hostname: "box"}}}
 	server := newWebServer(t, fixture, "test-token", source, nil)
 	response := syncPost(t, server.Handler(), "direction=to-others&confirm=true")
 	if response.Code != http.StatusUnprocessableEntity {
@@ -171,7 +171,7 @@ func TestSyncFromCenterDoesNotFanout(t *testing.T) {
 	}, []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
-	source := &sourceStub{list: []AgentInfo{{AgentID: "online-1", Hostname: "box", Mode: "listen"}}}
+	source := &sourceStub{list: []AgentInfo{{AgentID: "online-1", Hostname: "box"}}}
 	server := newWebServer(t, fixture, "test-token", source, nil)
 	response := syncPost(t, server.Handler(), "direction=from-center&confirm=true")
 	if response.Code != http.StatusOK {
@@ -358,7 +358,7 @@ func TestSyncCollectFromMachine(t *testing.T) {
 	home := t.TempDir()
 	fixture := makeFixtureAtHome(t, home, "base\n")
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "box-a", Hostname: "box-a", Mode: "listen"}},
+		list:    []AgentInfo{{AgentID: "box-a", Hostname: "box-a"}},
 		pushRaw: json.RawMessage(`{"ok":true,"status":"synced"}`),
 	}
 	// The machine's own executor uploads into the hub storage (the real
@@ -388,7 +388,7 @@ func TestSyncCollectSecretsAskBeforeWriting(t *testing.T) {
 	home := t.TempDir()
 	fixture := makeFixtureAtHome(t, home, "base\n")
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "box-a", Hostname: "box-a", Mode: "listen"}},
+		list:    []AgentInfo{{AgentID: "box-a", Hostname: "box-a"}},
 		pushRaw: json.RawMessage(`{"ok":false,"status":"secrets-rejected","secrets":[{"path":"pi/models/models.json","patternId":"generic-secret-assignment"}]}`),
 	}
 	server := newWebServer(t, fixture, "test-token", source, nil)
@@ -421,8 +421,8 @@ func TestSyncDispatchSkipsOffline(t *testing.T) {
 	}
 	source := &sourceStub{
 		list: []AgentInfo{
-			{AgentID: "on-1", Hostname: "on-1", Mode: "listen"},
-			{AgentID: "off-1", Hostname: "off-1", Mode: "listen", Stale: true},
+			{AgentID: "on-1", Hostname: "on-1"},
+			{AgentID: "off-1", Hostname: "off-1", Stale: true},
 		},
 		pullRaw: []byte(`{"ok":true,"status":"applied"}`),
 	}
@@ -452,7 +452,7 @@ func TestResolveDelegatesToMachine(t *testing.T) {
 	}
 	mergedOnAgent := false
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "box-c", Hostname: "box-c", Mode: "listen", Drift: &AgentDrift{Conflicts: 1}}},
+		list:    []AgentInfo{{AgentID: "box-c", Hostname: "box-c", Drift: &AgentDrift{Conflicts: 1}}},
 		pushRaw: json.RawMessage(`{"ok":true,"status":"resolved"}`),
 		pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`),
 	}
@@ -477,7 +477,7 @@ func TestResolveLocalSurfacesSecretsRejected(t *testing.T) {
 	home := t.TempDir()
 	fixture := makeFixtureAtHome(t, home, "base\n")
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "box-c", Hostname: "box-c", Mode: "listen", Drift: &AgentDrift{Conflicts: 1}}},
+		list:    []AgentInfo{{AgentID: "box-c", Hostname: "box-c", Drift: &AgentDrift{Conflicts: 1}}},
 		pushRaw: json.RawMessage(`{"ok":false,"status":"secrets-rejected","secrets":[{"path":"pi/files/web-search.json"}]}`),
 	}
 	server := newWebServer(t, fixture, "test-token", source, nil)

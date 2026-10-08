@@ -331,7 +331,7 @@ func TestCollectAndDispatchForwardSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := &sourceStub{
-		list:    []AgentInfo{{AgentID: "box", Hostname: "box", Mode: "listen"}},
+		list:    []AgentInfo{{AgentID: "box", Hostname: "box"}},
 		pushRaw: []byte(`{"ok":true,"status":"pushed"}`),
 		pullRaw: []byte(`{"ok":true,"status":"applied"}`),
 	}

@@ -4,13 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/zzjcool/homer-cli/internal/adapter"
 	"github.com/zzjcool/homer-cli/internal/toolctl"
@@ -308,107 +305,18 @@ func TestAgentToolUpgradeRouteRefusesAnEmptyReport(t *testing.T) {
 	}
 }
 
-func newToolServer(t *testing.T, upgrade func(ctx context.Context, tool string) (json.RawMessage, error)) *Server {
-	t.Helper()
-	server, err := NewServer(ServeOptions{
-		Addr:             "127.0.0.1:0",
-		HomerHome:        t.TempDir(),
-		Token:            "test-token",
-		Identity:         &AgentIdentity{AgentID: "box", Hostname: "box"},
-		LocalToolUpgrade: upgrade,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return server
-}
-
-func TestLocalToolUpgradeRoute(t *testing.T) {
-	var got []string
-	failure := `{"ok":false,"status":"failed","tool":"pi","note":"pi 升级没有成功：exit status 1"}`
-	server := newToolServer(t, func(_ context.Context, tool string) (json.RawMessage, error) {
-		got = append(got, tool)
-		return json.RawMessage(failure), nil
-	})
-
-	// The hub learns of a failure from the report, not from the status code:
-	// a 4xx here would hide the note behind a generic message.
-	response := request(t, server.Handler(), http.MethodPost, "/api/tools/upgrade", `{"tool":" pi "}`)
-	if response.Code != http.StatusOK || response.Body.String() != failure {
-		t.Fatalf("local upgrade = %d %s, want 200 and the report as is", response.Code, response.Body)
-	}
-	if len(got) != 1 || got[0] != "pi" {
-		t.Fatalf("callback saw %q, want one call for pi", got)
-	}
-	if response := request(t, server.Handler(), http.MethodGet, "/api/tools/upgrade"); response.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET = %d, want 405", response.Code)
-	}
-	if response := request(t, server.Handler(), http.MethodPost, "/api/tools/upgrade", `nope`); response.Code != http.StatusBadRequest {
-		t.Fatalf("bad body = %d, want 400", response.Code)
-	}
-}
-
-func TestLocalToolUpgradeRouteIsAbsentOnAHub(t *testing.T) {
+func TestListenModeRoutesAreRemoved(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
 	server := newWebServer(t, fixture, "test-token", nil, nil)
-	response := request(t, server.Handler(), http.MethodPost, "/api/tools/upgrade", `{"tool":"pi"}`)
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("a process that is not an agent answered %d %s", response.Code, response.Body)
-	}
-}
-
-func TestLocalToolUpgradeRouteRequiresCredentials(t *testing.T) {
-	called := false
-	server := newToolServer(t, func(context.Context, string) (json.RawMessage, error) {
-		called = true
-		return json.RawMessage(`{"ok":true}`), nil
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/tools/upgrade", strings.NewReader(`{"tool":"pi"}`))
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusUnauthorized || called {
-		t.Fatalf("anonymous request = %d, upgrade ran = %v", recorder.Code, called)
-	}
-}
-
-func TestLocalToolUpgradeRouteMapsFailures(t *testing.T) {
-	server := newToolServer(t, func(context.Context, string) (json.RawMessage, error) {
-		return nil, &AgentError{Code: "agent-unreachable", Status: http.StatusBadGateway, Err: errors.New("boom")}
-	})
-	if response := request(t, server.Handler(), http.MethodPost, "/api/tools/upgrade", `{"tool":"pi"}`); response.Code != http.StatusBadGateway {
-		t.Fatalf("callback error = %d %s", response.Code, response.Body)
-	}
-	empty := newToolServer(t, func(context.Context, string) (json.RawMessage, error) { return nil, nil })
-	if response := request(t, empty.Handler(), http.MethodPost, "/api/tools/upgrade", `{"tool":"pi"}`); response.Code != http.StatusInternalServerError {
-		t.Fatalf("empty report = %d %s, want 500", response.Code, response.Body)
-	}
-}
-
-// An agent's server cuts a response off 90 seconds after the request arrives.
-// An upgrade runs longer than that, so the handler must lift the limit; this
-// uses a real server with a short limit to prove it does.
-func TestLocalToolUpgradeOutlivesTheServersWriteTimeout(t *testing.T) {
-	server := newToolServer(t, func(context.Context, string) (json.RawMessage, error) {
-		time.Sleep(500 * time.Millisecond)
-		return json.RawMessage(`{"ok":true,"status":"upgraded","tool":"pi"}`), nil
-	})
-	httpServer := httptest.NewUnstartedServer(server.Handler())
-	httpServer.Config.WriteTimeout = 150 * time.Millisecond
-	httpServer.Start()
-	defer httpServer.Close()
-
-	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/tools/upgrade", strings.NewReader(`{"tool":"pi"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer test-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("the response was cut off by the server's write timeout: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"upgraded"`) {
-		t.Fatalf("response = %d %s", resp.StatusCode, body)
+	for _, path := range []struct {
+		name   string
+		method string
+	}{{"/api/ssh-key", http.MethodPost}, {"/api/upgrade", http.MethodPost}, {"/api/tools/upgrade", http.MethodPost}} {
+		t.Run(path.name, func(t *testing.T) {
+			response := request(t, server.Handler(), path.method, path.name)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("removed route = %d %s", response.Code, response.Body)
+			}
+		})
 	}
 }

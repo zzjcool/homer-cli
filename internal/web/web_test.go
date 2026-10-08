@@ -69,14 +69,13 @@ func makeFixture(t *testing.T, base, local string) webFixture {
 	return webFixture{home: home, paths: paths, tool: tool}
 }
 
-func newWebServer(t *testing.T, fixture webFixture, token string, source AgentsSource, identity *AgentIdentity) *Server {
+func newWebServer(t *testing.T, fixture webFixture, token string, source AgentsSource, _ *AgentIdentity) *Server {
 	t.Helper()
 	server, err := NewServer(ServeOptions{
 		Addr:      "127.0.0.1:0",
 		HomerHome: fixture.home,
 		Token:     token,
 		Agents:    source,
-		Identity:  identity,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -515,28 +514,43 @@ func TestAgentsRouteP1(t *testing.T) {
 }
 
 type sourceStub struct {
-	list        []AgentInfo
-	removed     []string
-	statusRaw   json.RawMessage
-	diffText    string
-	pushRaw     json.RawMessage
-	pullRaw     json.RawMessage
-	statusErr   error
-	diffErr     error
-	pushErr     error
-	pullErr     error
-	pushValues  []bool
-	pullValues  []bool
-	pushScopes  []SyncScope
-	pullScopes  []SyncScope
-	pulledAgent []string
+	list              []AgentInfo
+	removed           []string
+	statusRaw         json.RawMessage
+	diffText          string
+	pushRaw           json.RawMessage
+	pullRaw           json.RawMessage
+	statusErr         error
+	diffErr           error
+	pushErr           error
+	pullErr           error
+	pushValues        []bool
+	pullValues        []bool
+	pushScopes        []SyncScope
+	pullScopes        []SyncScope
+	pulledAgent       []string
+	inspect           *InspectResult
+	inspectErr        error
+	inspectEvents     []InspectEvent
+	inspectBlock      bool
+	inspectStarted    chan struct{}
+	inspectCanceled   chan struct{}
+	inspectStartOnce  sync.Once
+	inspectParams     InspectParams
+	inspectAgentID    string
+	inspectCalls      int
+	inspectContextErr error
 	// onPush runs inside AgentPush — tests simulate a machine whose own
 	// executor uploads into the hub storage here.
 	onPush func()
 	mu     sync.Mutex
 }
 
-func (s *sourceStub) ListAgents() []AgentInfo { return append([]AgentInfo(nil), s.list...) }
+func (s *sourceStub) ListAgents() []AgentInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AgentInfo(nil), s.list...)
+}
 
 func (s *sourceStub) RemoveAgent(agentID string) bool {
 	found := false
@@ -556,6 +570,53 @@ func (s *sourceStub) RemoveAgent(agentID string) bool {
 }
 func (s *sourceStub) AgentStatus(_ context.Context, _ string) (json.RawMessage, error) {
 	return s.statusRaw, s.statusErr
+}
+func (s *sourceStub) AgentInspect(ctx context.Context, agentID string, params InspectParams, onEvent func(InspectEvent)) (InspectResult, error) {
+	s.mu.Lock()
+	s.inspectCalls++
+	s.inspectAgentID = agentID
+	s.inspectParams = params
+	result := s.inspect
+	err := s.inspectErr
+	events := append([]InspectEvent(nil), s.inspectEvents...)
+	block := s.inspectBlock
+	started := s.inspectStarted
+	canceled := s.inspectCanceled
+	s.mu.Unlock()
+
+	if started != nil {
+		s.inspectStartOnce.Do(func() { close(started) })
+	}
+	if onEvent != nil {
+		for _, event := range events {
+			onEvent(event)
+		}
+	}
+	if block {
+		<-ctx.Done()
+		s.mu.Lock()
+		s.inspectContextErr = ctx.Err()
+		s.mu.Unlock()
+		if canceled != nil {
+			close(canceled)
+		}
+		return InspectResult{}, ctx.Err()
+	}
+	if err != nil {
+		return InspectResult{}, err
+	}
+	if result == nil {
+		raw, statusErr := s.AgentStatus(ctx, agentID)
+		if statusErr != nil {
+			return InspectResult{}, statusErr
+		}
+		status, parseErr := parseStatusReport(raw)
+		if parseErr != nil {
+			return InspectResult{}, parseErr
+		}
+		result = &InspectResult{Status: status}
+	}
+	return *result, nil
 }
 func (s *sourceStub) AgentDiff(_ context.Context, _ string, _ DiffParams) (string, error) {
 	return s.diffText, s.diffErr
@@ -583,7 +644,7 @@ func (s *sourceStub) AgentPull(_ context.Context, agentID string, confirm bool, 
 func TestAgentsRouteWithSource(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
 	source := &sourceStub{
-		list:      []AgentInfo{{AgentID: "a", Hostname: "box", Mode: "listen"}},
+		list:      []AgentInfo{{AgentID: "a", Hostname: "box"}},
 		statusRaw: json.RawMessage(`{"adapters":[]}`),
 		diffText:  "diff",
 		pushRaw:   json.RawMessage(`{"ok":true,"status":"pushed"}`),
@@ -748,17 +809,11 @@ func TestStaticIndexServed(t *testing.T) {
 	}
 }
 
-func TestAgentInfoRoute(t *testing.T) {
+func TestAgentInfoRouteRemoved(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
-	identity := &AgentIdentity{AgentID: "agent-a", Hostname: "box-a", Version: "v1"}
-	server := newWebServer(t, fixture, "secret", nil, identity)
+	server := newWebServer(t, fixture, "secret", nil, nil)
 	response := requestWithToken(t, server.Handler(), http.MethodGet, "/agent/v1/info", "secret")
-	if response.Code != http.StatusOK {
-		t.Fatalf("info = %d, body=%s", response.Code, response.Body)
-	}
-	body := decodeBody(t, response)
-	got := body["identity"].(map[string]any)
-	if got["agentId"] != identity.AgentID || got["hostname"] != identity.Hostname || got["version"] != identity.Version {
-		t.Fatalf("identity = %#v", got)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("removed info route = %d, body=%s", response.Code, response.Body)
 	}
 }

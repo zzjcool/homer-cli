@@ -23,7 +23,7 @@ func TestRenderInstallScript(t *testing.T) {
 		"-C -",
 		"--connect-timeout 20",
 		"keys/hub-token",
-		"homer agent --connect",
+		"AGENT_ARGS=\"agent --hub $HUB\"",
 		"systemctl enable --now homer-agent.service",
 		"setsid \"$AGENT_BIN\" $AGENT_ARGS",
 		"chmod 600",
@@ -37,6 +37,17 @@ func TestRenderInstallScript(t *testing.T) {
 	if strings.Contains(script, "HOMER_HUB_TOKEN=") {
 		t.Fatal("install script must not embed the token")
 	}
+	for _, removed := range []string{"--advertise", "LISTEN=", "ADVERTISE=", "agent --connect", "agent --listen"} {
+		if strings.Contains(script, removed) {
+			t.Fatalf("install script retains removed listen/connect syntax %q", removed)
+		}
+	}
+	if !strings.Contains(script, `--listen) echo "listen 模式已移除"`) {
+		t.Fatal("install script must explicitly reject --listen with its removal message")
+	}
+	if !strings.Contains(script, `nohup "$AGENT_BIN" $AGENT_ARGS >>"$LOG" 2>&1 &`) || !strings.Contains(script, `setsid "$AGENT_BIN" $AGENT_ARGS >>"$LOG" 2>&1 < /dev/null &`) {
+		t.Fatal("agent must remain a background daemon with the existing detached startup paths")
+	}
 	file, err := os.CreateTemp(t.TempDir(), "install-*.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +60,10 @@ func TestRenderInstallScript(t *testing.T) {
 	}
 	if out, err := exec.Command("sh", "-n", file.Name()).CombinedOutput(); err != nil {
 		t.Fatalf("sh -n install script: %v\n%s", err, out)
+	}
+	removedListen := exec.Command("sh", file.Name(), "--listen", "0.0.0.0:7761")
+	if out, err := removedListen.CombinedOutput(); err == nil || !strings.Contains(string(out), "listen 模式已移除") {
+		t.Fatalf("--listen should fail with the removal message: err=%v output=%s", err, out)
 	}
 }
 

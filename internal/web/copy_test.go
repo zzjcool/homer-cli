@@ -12,6 +12,7 @@ func TestConsoleUserCopy(t *testing.T) {
 	html := string(staticIndex)
 	for _, banned := range []string{
 		"homer merge", "homer push", "homer pull", "homer init",
+		"join-listen", "btn-copy-listen", "listenCommand", "loadCollectPrecheck", "precheckToken", "/api/sync/precheck",
 		"可推送", "可拉取", "确认推送", "确认拉取",
 		"allow-secrets", "commit", "bare", "仓库",
 		"/api/push", "/api/pull", "查看状态", "查看差异", "处理漂移", "推送", "拉取",
@@ -40,6 +41,8 @@ func TestConsoleUserCopy(t *testing.T) {
 		"更新程序", "全部更新", "a.outdated",
 		"但有插件没有装上",
 		"正在下发并解开…",
+		"stream=1", "splitNDJSONLines", "AbortController", "scopeStreamFailed", "已读取 ",
+		"读取收取选项失败（尚未完成）", "没有收到完整的机器检查结果，不能继续收取。",
 		"缺的会逐个下载安装，请留在这个窗口，装完才会结束。",
 		"item.id === \"keyring\" && app.scopeDirection !== \"resolve\"",
 		"以这台机器为准", "以中心为准", "/api/resolve?",

@@ -57,16 +57,14 @@ func (s *Server) authorized(r *http.Request) bool {
 	}
 	// A live one-time enrollment code authorizes the binary download
 	// (a fresh machine has nothing else). The code is only CHECKED
-	// here, never burned — redemption stays strictly one-shot at
-	// /agent/v1/enroll.
+	// here, never burned — redemption stays strictly one-shot in the
+	// authenticated agent stream hello.
 	if s.opts.Enrollment != nil && s.opts.Enrollment.ValidCode(provided) {
 		return true
 	}
-	// An enrolled machine's per-agent secret authorizes its OWN upgrade
-	// path (`homer upgrade`): keys/hub-token still holds the burned hr_
-	// code from install time, so the machine presents agent.json's
-	// secret instead. Delegated to the agent API's machine-credential
-	// authority (the same check /agent/v1/* uses).
+	// An enrolled machine's per-agent secret authorizes /api/snapshot and
+	// /dl/* for data-plane downloads and the agent's own upgrade path.
+	// Delegated to the agent endpoint's machine-credential authority.
 	if s.opts.AgentEndpointAuthorized != nil && s.opts.AgentEndpointAuthorized(r) {
 		return true
 	}
