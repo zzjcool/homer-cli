@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/zzjcool/homer-cli/internal/stream"
@@ -125,6 +126,70 @@ func TestConcurrentWritesAndCloseCodeReasonRoundTrip(t *testing.T) {
 	var closeErr *stream.CloseError
 	if !errors.As(err, &closeErr) || closeErr.Code != stream.CloseSuperseded || closeErr.Reason != "new agent connected" || !closeErr.Remote {
 		t.Fatalf("Read close error = %T %v", err, err)
+	}
+}
+
+func TestCloseReasonByteLimit(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{
+			name:   "overlong UTF-8 reason is truncated",
+			reason: strings.Repeat("测", 48),
+			want:   strings.Repeat("测", 40) + "…",
+		},
+		{
+			name:   "exactly 123 bytes is unchanged",
+			reason: strings.Repeat("x", maxCloseReasonBytes),
+			want:   strings.Repeat("x", maxCloseReasonBytes),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			trackGoroutineBaseline(t)
+			serverConn := make(chan stream.Conn, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := Accept(w, r, AcceptOptions{})
+				if err != nil {
+					t.Errorf("Accept: %v", err)
+					return
+				}
+				serverConn <- conn
+			}))
+			defer server.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), socketTestTimeout)
+			defer cancel()
+			client, _, err := Dial(ctx, server.URL, DialOptions{})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer client.CloseNow()
+			var accepted stream.Conn
+			select {
+			case accepted = <-serverConn:
+			case <-time.After(socketTestTimeout):
+				t.Fatal("Accept did not complete")
+			}
+			defer accepted.CloseNow()
+
+			if err := accepted.Close(stream.CloseRevoked, test.reason); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			_, err = client.Read(ctx)
+			var closeErr *stream.CloseError
+			if !errors.As(err, &closeErr) || closeErr.Code != stream.CloseRevoked || !closeErr.Remote {
+				t.Fatalf("Read close error = %T %v, want remote close code %d", err, err, stream.CloseRevoked)
+			}
+			if closeErr.Reason != test.want {
+				t.Fatalf("close reason = %q, want %q", closeErr.Reason, test.want)
+			}
+			if len(closeErr.Reason) > maxCloseReasonBytes || !utf8.ValidString(closeErr.Reason) {
+				t.Fatalf("close reason is not a valid UTF-8 string within %d bytes: %d bytes %q", maxCloseReasonBytes, len(closeErr.Reason), closeErr.Reason)
+			}
+		})
 	}
 }
 

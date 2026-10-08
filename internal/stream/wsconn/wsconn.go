@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	defaultMaxMessage = 8<<20 + 4096
-	closeWait         = 250 * time.Millisecond
+	defaultMaxMessage   = 8<<20 + 4096
+	maxCloseReasonBytes = 123
+	closeWait           = 250 * time.Millisecond
 )
 
 type DialOptions struct {
@@ -197,8 +198,22 @@ func (c *wsConn) Write(ctx context.Context, message []byte) error {
 }
 
 func (c *wsConn) Close(code stream.CloseCode, reason string) error {
+	reason = truncateCloseReason(reason)
 	done := c.startClose(func() error { return c.conn.Close(websocket.StatusCode(code), reason) })
 	return waitClose(done)
+}
+
+func truncateCloseReason(reason string) string {
+	if len(reason) <= maxCloseReasonBytes {
+		return reason
+	}
+
+	const suffix = "…"
+	prefix := reason[:maxCloseReasonBytes-len(suffix)]
+	for !utf8.ValidString(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix + suffix
 }
 
 func (c *wsConn) CloseNow() error {
