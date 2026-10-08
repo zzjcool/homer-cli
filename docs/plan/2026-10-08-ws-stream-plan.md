@@ -442,7 +442,11 @@ type InspectEvent struct {
 	Secrets     []InspectSecret                `json:"secrets,omitempty"`
 	Keys        *keyring.Result                `json:"keys,omitempty"`
 }
-type InspectSecret struct{ Path, Description string; Line int }
+type InspectSecret struct {
+	Path        string `json:"path"`
+	Description string `json:"description"`
+	Line        int    `json:"line"`
+}
 type InspectResult struct {
 	Status  commands.StatusReport `json:"status"`
 	Present map[string]bool       `json:"present,omitempty"`
