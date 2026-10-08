@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 )
@@ -29,6 +30,51 @@ func syncPost(t *testing.T, handler http.Handler, query string) *httptest.Respon
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder
+}
+
+func TestCategoryDestination(t *testing.T) {
+	root := "~/.pi/agent"
+	files := core.CategoryConfig{Paths: []string{"./"}, Mode: core.SyncModeMirror}
+	if got := categoryDestination(root, files, "notes/todo.md"); got != "~/.pi/agent/notes/todo.md" {
+		t.Fatalf("catch-all destination = %q", got)
+	}
+	skills := core.CategoryConfig{Paths: []string{"skills/"}, Mode: core.SyncModeMirror}
+	if got := categoryDestination(root, skills, "foo/SKILL.md"); got != "~/.pi/agent/skills/foo/SKILL.md" {
+		t.Fatalf("directory destination = %q", got)
+	}
+	settings := core.CategoryConfig{Paths: []string{"settings.json", "mcp.json"}, Mode: core.SyncModeMerge}
+	if got := categoryDestination(root, settings, "mcp.json"); got != "~/.pi/agent/mcp.json" {
+		t.Fatalf("file destination = %q", got)
+	}
+}
+
+func TestStorageListsPiSecretRules(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "local\n")
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/storage", nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("storage = %d %s", recorder.Code, recorder.Body)
+	}
+	var payload struct {
+		Secrets []struct {
+			Adapter     string `json:"adapter"`
+			Name        string `json:"name"`
+			Destination string `json:"destination"`
+			Encrypted   bool   `json:"encrypted"`
+		} `json:"secrets"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Secrets) != 2 || payload.Secrets[0].Name != "auth.json" || payload.Secrets[0].Encrypted || payload.Secrets[0].Destination != "~/.pi/agent/auth.json" {
+		t.Fatalf("secrets = %+v", payload.Secrets)
+	}
+	if payload.Secrets[1].Name != "mcp-auth.json" || payload.Secrets[1].Adapter != "pi" {
+		t.Fatalf("secrets = %+v", payload.Secrets)
+	}
 }
 
 func TestSyncRequiresConfirm(t *testing.T) {

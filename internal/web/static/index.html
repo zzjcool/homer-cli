@@ -145,6 +145,20 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 .agent-facts { margin: 8px 0 0 22px; display: grid; gap: 4px; }
 .view-body .agent-facts { margin-left: 0; }
 .agent-summary { margin: 4px 0 0 22px; font-size: var(--fs-small); color: var(--ink-dim); }
+/* 应用版本：pi / herdr / opencode… */
+.agent-tools { margin: 6px 0 0 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; font-size: var(--fs-small); }
+.agent-tools > .label { color: var(--ink-dim); }
+.tool-chip { display: inline-flex; align-items: center; gap: 6px; }
+.tool-chip .name { font-weight: 600; }
+.tool-chip .ver, .tool-row .ver { font-family: var(--mono); }
+.tool-chip .hint { color: var(--ink-dim); }
+.tool-chip.behind .ver, .tool-row.behind .ver { color: var(--danger); font-weight: 650; }
+.tool-chip button.small-btn { min-height: 26px; padding: 0 8px; }
+.agent-tool-list { display: grid; gap: 4px; }
+.tool-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: var(--fs-small); }
+.tool-row .name { font-weight: 600; min-width: 6em; }
+.tool-row .state { color: var(--ink-dim); flex: 1 1 12em; }
+.tool-row.behind .state { color: var(--danger); }
 .meters { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .meter { display: flex; align-items: center; gap: 6px; font-size: var(--fs-small); min-width: 210px; flex: 1 1 220px; max-width: 340px; }
 .meter .label { width: 2.75em; color: var(--ink-dim); flex: none; }
@@ -417,6 +431,8 @@ async function api(path, opts = {}) {
     const err = data.error || {};
     const e = new Error(err.message || ("请求失败（" + res.status + "）"));
     e.status = res.status; e.code = err.code; e.errors = err.details || [];
+    // 机器已经回话、只是没做成（例如应用升级失败）：整份回执一并带上。
+    if (data.report) e.report = data.report;
     // 写操作失败信封（ok:false + status + errors，HTTP 409/422）。
     // errors 可能缺省，status 仍然说明这是冲突而不是请求本身失败。
     if (!err.message && (data.errors || data.status)) {
@@ -659,6 +675,7 @@ function renderHostFacts(a) {
       facts.append(block);
     }
   }
+  facts.append(renderToolRows(a));
   facts.append(el("div", "agent-sys", machineMeta(a)));
   return facts;
 }
@@ -834,12 +851,15 @@ function renderAgents(agents, disabledFeature) {
       } catch (e) { toast("移除失败：" + e.message); }
     });
     actions.append(revoke, removeBtn);
-    card.append(head, summary, identity, actions);
+    const toolChips = renderToolChips(a);
+    if (toolChips) card.append(head, summary, identity, toolChips, actions);
+    else card.append(head, summary, identity, actions);
     list.append(card);
   });
   const joinBtn = el("button", "small-btn", "＋ 接入新机器");
   joinBtn.type = "button"; joinBtn.addEventListener("click", openJoin);
   const foot = el("div"); foot.style.padding = "10px 4px 0"; foot.append(joinBtn);
+  foot.style.display = "flex"; foot.style.flexWrap = "wrap"; foot.style.gap = "8px";
   const outdated = agents.filter(a => a.outdated && !a.stale);
   if (outdated.length) {
     const upgradeAll = el("button", "small-btn", "全部更新");
@@ -847,6 +867,14 @@ function renderAgents(agents, disabledFeature) {
     upgradeAll.title = "让版本比中心旧的在线机器换成现在这份 homer";
     upgradeAll.addEventListener("click", () => upgradeAgents(outdated));
     foot.append(upgradeAll);
+  }
+  const behindTools = outdatedTools(agents);
+  if (behindTools.length) {
+    const upgradeAllTools = el("button", "small-btn", "全部升级应用");
+    upgradeAllTools.type = "button";
+    upgradeAllTools.title = "让版本落后的应用在各自的机器上升级到当前最新";
+    upgradeAllTools.addEventListener("click", () => upgradeBehindTools(behindTools));
+    foot.append(upgradeAllTools);
   }
   list.append(foot);
 }
@@ -880,6 +908,123 @@ async function upgradeAgents(list) {
     return;
   }
   showAlert("有机器没有更新", failed, "还在用旧程序的机器不认识这个指令，需要在那台机器上执行一次 homer upgrade，之后就能从这里更新。");
+}
+
+/* ---------- 应用版本：机器上的 pi / herdr / opencode… ---------- */
+function toolTitle(t) { return t.label || t.id; }
+function toolVersionText(t) { return t.version || "版本未知"; }
+// 能在控制台升级、并且确实落后的应用（离线机器不算：它们收不到指令）。
+function outdatedTools(agents) {
+  const items = [];
+  agents.forEach(a => {
+    if (a.stale) return;
+    (a.tools || []).forEach(t => {
+      if (t.outdated && t.upgradable) items.push({ agent: a, tool: t });
+    });
+  });
+  return items;
+}
+function toolStateText(t) {
+  const parts = [];
+  if (!t.version) parts.push(t.error || "读不出版本");
+  else if (t.outdated) parts.push("落后，最新 " + t.latest);
+  else if (t.latest && t.latest === t.version) parts.push("已是已知最新版本");
+  if (!t.upgradable) parts.push("要用这台机器的包管理器更新");
+  return parts.join(" · ");
+}
+function toolUpgradeButton(a, t, closeDialog) {
+  const btn = el("button", "small-btn", "升级");
+  btn.type = "button";
+  btn.disabled = !!a.stale;
+  btn.title = "在这台机器上升级 " + toolTitle(t) + "（运行它自己的升级命令）";
+  btn.addEventListener("click", () => upgradeTool(a, t, closeDialog));
+  return btn;
+}
+// 机器卡片上的一行：每个应用的名字和版本；落后的标红，并就地给「升级」。
+function renderToolChips(a) {
+  const tools = a.tools || [];
+  if (!tools.length) return null;
+  const row = el("div", "agent-tools");
+  row.append(el("span", "label", "应用"));
+  tools.forEach(t => {
+    const chip = el("span", "tool-chip" + (t.outdated ? " behind" : ""));
+    chip.append(el("span", "name", toolTitle(t)), el("span", "ver", toolVersionText(t)));
+    if (!t.version && t.error) chip.title = t.error;
+    if (t.outdated && t.latest) chip.append(el("span", "hint", "最新 " + t.latest));
+    if (t.outdated && t.upgradable) chip.append(toolUpgradeButton(a, t, false));
+    row.append(chip);
+  });
+  return row;
+}
+// 详情里的「应用版本」：全部应用一行一个，随时可以升级（一台机器单独在线时没有对照，不会被标成落后）。
+function renderToolRows(a) {
+  const box = el("div", "agent-tool-list");
+  box.append(el("div", "agent-sys", "应用版本"));
+  const tools = a.tools || [];
+  if (!tools.length) {
+    box.append(el("div", "agent-sys", "这台机器没有上报应用版本：可能没装这些应用，或它的 homer 还是旧版本"));
+    return box;
+  }
+  tools.forEach(t => {
+    const row = el("div", "tool-row" + (t.outdated ? " behind" : ""));
+    row.append(el("span", "name", toolTitle(t)), el("span", "ver", toolVersionText(t)), el("span", "state", toolStateText(t)));
+    if (t.upgradable) row.append(toolUpgradeButton(a, t, true));
+    box.append(row);
+  });
+  return box;
+}
+function copyCommand(text) {
+  const ask = () => window.prompt("复制这条命令，到那台机器的终端里运行：", text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast("已复制，到那台机器的终端里粘贴运行"), ask);
+  } else {
+    ask();
+  }
+}
+async function upgradeTool(agent, tool, closeDialog) {
+  const name = agent.hostname || agent.agentId;
+  const now = tool.version ? "现在是 " + tool.version : "现在的版本读不出来";
+  const latest = tool.outdated && tool.latest ? "，最新 " + tool.latest : "";
+  if (!confirm("在「" + name + "」上升级 " + toolTitle(tool) + "？\n" + now + latest + "。\n升级在那台机器上进行，可能要几十秒到几分钟，请留在这个窗口。")) return;
+  if (closeDialog) $("dlg-view").close();
+  await upgradeTools([{ agent: agent, tool: tool }]);
+}
+async function upgradeBehindTools(items) {
+  if (!items.length) { toast("没有需要升级的应用"); return; }
+  if (!confirm("升级 " + items.length + " 个落后的应用？每个都在各自的机器上运行它自己的升级命令，可能要几分钟，请留在这个窗口。")) return;
+  await upgradeTools(items);
+}
+async function upgradeTools(items) {
+  if (!items.length) { toast("没有需要升级的应用"); return; }
+  const done = [];
+  const failed = [];
+  let detail = [];
+  let manual = "";
+  for (const item of items) {
+    const name = item.agent.hostname || item.agent.agentId;
+    const title = toolTitle(item.tool);
+    setBusy("正在升级 " + name + " 上的 " + title + "…（可能要几分钟）");
+    try {
+      const d = await api("/api/agents/" + encodeURIComponent(item.agent.agentId) + "/tool-upgrade", { method: "POST", body: { tool: item.tool.id } });
+      done.push(d.note || (name + "：" + title + " 已升级"));
+    } catch (e) {
+      failed.push(name + " · " + title + "：" + upgradeFailure(e));
+      // 只有一个应用失败时，把它最后几行输出一起给出来，方便看原因。
+      if (items.length === 1) detail = (e.errors || []).slice(-6);
+      if (!manual && e.report && e.report.manual) manual = e.report.manual;
+    } finally {
+      clearBusy();
+    }
+  }
+  try { await refresh(); } catch (_) {}
+  if (!failed.length) {
+    toast(done.length === 1 ? done[0] : "已升级 " + done.length + " 个应用");
+    return;
+  }
+  const lines = detail.length ? failed.concat(["它的输出："], detail) : failed;
+  const actions = manual ? [{ label: "复制安装命令", onClick: () => copyCommand(manual) }] : [];
+  const hint = manual ? "也可以到那台机器的终端里运行官方安装命令：" + manual : "";
+  showAlert("有应用没有升级成功", lines, hint, actions);
 }
 
 function renderAgentsError(msg) {
@@ -1661,6 +1806,7 @@ async function openStorageView() {
   try {
     const d = await api("/api/storage");
     clear(body);
+    renderSecretRules(body, d.secrets);
     if (!d.adapters || !d.adapters.length) {
       body.append(el("div", "muted", "存储是空的（还没有收取过任何机器）"));
       return;
@@ -1822,12 +1968,61 @@ function outlineLeaf(name, file, opts, plugin) {
     row.append(el("span", null, name));
   }
   if (file.keys && file.keys.length) row.append(el("span", "muted small", file.keys.join("、")));
+  if (opts.preview && file.destination && !plugin) {
+    const enc = el("button", "small-btn", "转为加密");
+    enc.type = "button";
+    enc.title = "用密钥加密这份文件，明文不再留在中心";
+    enc.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      encryptDestination(file.destination, opts.adapterId);
+    });
+    row.append(enc);
+  }
   if (file.size) row.append(el("span", "size", file.size + " B"));
   if (opts.drift && file.status && FILE_STATUS[file.status]) {
     const tone = file.status === "conflict" ? "c-conflict" : (file.status === "push" || file.status === "pull" ? "c-drift" : "muted");
     row.append(el("span", "view-counts " + tone, FILE_STATUS[file.status]));
   }
   return row;
+}
+function renderSecretRules(container, secrets) {
+  if (!secrets || !secrets.length) return;
+  const node = makeCollapsible("默认加密", secrets.length + " 个密钥文件", true);
+  node.setFill(kids => {
+    secrets.forEach(secret => {
+      const row = el("div", "view-file");
+      row.append(el("span", null, secret.name));
+      row.append(el("span", "muted small", secret.encrypted ? "已加密" : "待加密"));
+      if (!secret.encrypted) {
+        const enc = el("button", "small-btn", "加密");
+        enc.type = "button";
+        enc.addEventListener("click", ev => {
+          ev.preventDefault();
+          encryptDestination(secret.destination, secret.adapter);
+        });
+        row.append(enc);
+      }
+      kids.append(row);
+    });
+  });
+  node.open();
+  container.append(node.block);
+}
+function encryptDestination(destination, adapterId) {
+  if (!app.keys || !app.keys.length) {
+    toast("先新建一把密钥，再用它加密这个文件");
+    openKeyForm(null, "create", null);
+    return;
+  }
+  openKeyForm(null, "encrypt", app.keys[0]);
+  const path = $("key-path");
+  const select = $("key-adapter");
+  if (path) path.value = destination;
+  if (select) {
+    select.value = adapterId || adapterForPath(destination);
+    select.dataset.touched = "1";
+  }
 }
 function toggleStoragePreview(row, adapterId, fullPath) {
   const existing = row.nextElementSibling;

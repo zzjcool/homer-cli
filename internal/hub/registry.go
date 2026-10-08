@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 )
 
 type AgentInfo struct {
@@ -24,6 +26,11 @@ type AgentInfo struct {
 	// Host is the machine's last self-reported resource snapshot
 	// (CPU, memory, disks, interfaces), uploaded with each poll.
 	Host *HostSnapshot `json:"host,omitempty"`
+	// Tools is the machine's last self-reported list of installed programs
+	// the adapters drive (pi, herdr...), each with its version. A machine
+	// that has none reports an empty, non-nil list; nil means "not reported
+	// yet" and leaves the previous list in place.
+	Tools []toolctl.Status `json:"tools,omitempty"`
 	// DialSecret is the per-agent bearer the hub uses when it dials a
 	// listen-mode machine. It never leaves the process.
 	DialSecret string `json:"-"`
@@ -59,6 +66,34 @@ type registryTask struct {
 	expired   bool
 	result    TaskResult
 	done      chan struct{}
+	// claimedAt is when the machine took the task. Until then it is only
+	// queued.
+	claimedAt time.Time
+}
+
+// taskQueueTTL is how long a task may wait for its machine to take it. It is
+// a variable so tests can shorten it.
+var taskQueueTTL = TaskTTL
+
+// deadline is when the task is dropped.
+//
+// Until a machine takes it, a task lives for taskQueueTTL from being queued.
+// A connect-mode machine polls all the time, so a task nobody has taken after
+// that long belongs to a machine that is gone, and whoever is waiting for it
+// should hear so then, not after the longest the task could ever run.
+//
+// Once taken, a kind of task that runs for minutes (see TaskLifetime) gets
+// its lifetime from that moment. The others keep the limit they have always
+// had, counted from being queued.
+func (s *registryTask) deadline() time.Time {
+	queued := s.task.CreatedAt.Add(taskQueueTTL)
+	if s.claimedAt.IsZero() {
+		return queued
+	}
+	if running := TaskLifetime(s.task.Kind); running > TaskTTL {
+		return s.claimedAt.Add(running)
+	}
+	return queued
 }
 
 func NewRegistry() *Registry {
@@ -91,15 +126,19 @@ func (r *Registry) Register(info AgentInfo) error {
 	}
 	info.Stale = false
 	info.Host = normalizeHost(info.Host)
+	info.Tools = normalizeTools(info.Tools)
 	if agent, ok := r.agents[info.AgentID]; ok {
 		// Re-registration refreshes identity and address. Keep the dial
-		// secret, last drift, and last resource report when this call
-		// omitted them, or a listen heartbeat would wipe them.
+		// secret, last drift, last resource report, and last tool list when
+		// this call omitted them, or a listen heartbeat would wipe them.
 		if info.DialSecret == "" {
 			info.DialSecret = agent.info.DialSecret
 		}
 		if info.Host == nil {
 			info.Host = agent.info.Host
+		}
+		if info.Tools == nil {
+			info.Tools = agent.info.Tools
 		}
 		if info.Drift == nil {
 			info.Drift = agent.info.Drift
@@ -205,6 +244,50 @@ func (r *Registry) UpdateHost(agentID string, host HostSnapshot) {
 	}
 }
 
+// UpdateTools replaces a machine's list of installed programs. An empty
+// list is a statement ("nothing installed"), so it replaces the old one;
+// callers pass nil-pointer reports through Register or skip the call.
+func (r *Registry) UpdateTools(agentID string, tools []toolctl.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, ok := r.agents[agentID]
+	if !ok {
+		return
+	}
+	agent.info.Tools = normalizeTools(tools)
+	if agent.info.Tools == nil {
+		agent.info.Tools = []toolctl.Status{}
+	}
+}
+
+// NoteToolVersion records the version a machine just reported after an
+// upgrade, so the console shows it at once instead of after the next
+// heartbeat (a listen-mode machine heartbeats once a minute).
+func (r *Registry) NoteToolVersion(agentID, toolID, version string) {
+	if r == nil {
+		return
+	}
+	version = clipText(version, maxToolText)
+	if version == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	agent, ok := r.agents[agentID]
+	if !ok {
+		return
+	}
+	updated := append([]toolctl.Status(nil), agent.info.Tools...)
+	for i := range updated {
+		if updated[i].ID == toolID {
+			updated[i].Version = version
+			updated[i].Error = ""
+			agent.info.Tools = updated
+			return
+		}
+	}
+}
+
 func (r *Registry) Touch(agentID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -229,6 +312,7 @@ func (r *Registry) Get(agentID string) (AgentInfo, bool) {
 	info := agent.info
 	info.Stale = time.Since(info.LastSeen) >= AgentStaleAfter
 	info.Host = normalizeHost(info.Host)
+	info.Tools = cloneTools(info.Tools)
 	return info, true
 }
 
@@ -272,6 +356,7 @@ func (r *Registry) List() []AgentInfo {
 		info := agent.info
 		info.Stale = now.Sub(info.LastSeen) >= AgentStaleAfter
 		info.Host = normalizeHost(info.Host)
+		info.Tools = cloneTools(info.Tools)
 		agents = append(agents, info)
 	}
 	sort.Slice(agents, func(i, j int) bool {
@@ -347,11 +432,12 @@ func (r *Registry) Poll(agentID string, wait time.Duration, ctx context.Context)
 			if !exists || state.expired || state.submitted {
 				continue
 			}
-			if r.taskExpired(task) {
+			if r.taskExpired(state) {
 				r.expireTaskLocked(task.TaskID, state)
 				continue
 			}
 			state.inFlight = true
+			state.claimedAt = time.Now()
 			r.mu.Unlock()
 			return task, true
 		}
@@ -385,7 +471,7 @@ func (r *Registry) Submit(result TaskResult) error {
 	if !state.inFlight || state.submitted {
 		return fmt.Errorf("hub: task %q is not awaiting a result", result.TaskID)
 	}
-	if r.taskExpired(state.task) {
+	if r.taskExpired(state) {
 		r.expireTaskLocked(result.TaskID, state)
 		return fmt.Errorf("hub: task %q has expired", result.TaskID)
 	}
@@ -408,52 +494,50 @@ func (r *Registry) Wait(ctx context.Context, taskID string) (TaskResult, error) 
 
 	r.mu.Lock()
 	state, ok := r.tasks[taskID]
-	if !ok || state.expired {
-		r.mu.Unlock()
+	known := ok && !state.expired
+	r.mu.Unlock()
+	if !known {
 		return TaskResult{}, fmt.Errorf("hub: unknown or expired task %q", taskID)
 	}
-	if state.submitted {
-		result := cloneTaskResult(state.result)
-		r.mu.Unlock()
-		return result, nil
-	}
-	if r.taskExpired(state.task) {
-		r.expireTaskLocked(taskID, state)
-		r.mu.Unlock()
-		return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
-	}
 
-	done := state.done
-	remaining := time.Until(state.task.CreatedAt.Add(TaskTTL))
-	r.mu.Unlock()
-
-	timer := time.NewTimer(remaining)
-	defer timer.Stop()
-	select {
-	case <-done:
+	for {
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		if state.submitted {
-			return cloneTaskResult(state.result), nil
+			result := cloneTaskResult(state.result)
+			r.mu.Unlock()
+			return result, nil
 		}
-		return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
-	case <-ctx.Done():
-		return TaskResult{}, ctx.Err()
-	case <-timer.C:
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if state.submitted {
-			return cloneTaskResult(state.result), nil
-		}
-		if !state.expired {
+		if state.expired || r.taskExpired(state) {
 			r.expireTaskLocked(taskID, state)
+			r.mu.Unlock()
+			return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
 		}
-		return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
+		done := state.done
+		remaining := time.Until(state.deadline())
+		r.mu.Unlock()
+
+		// The deadline moves out when the machine takes the task, so a timer
+		// that fires is not yet proof of expiry: go round and look again.
+		timer := time.NewTimer(remaining)
+		select {
+		case <-done:
+			timer.Stop()
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if state.submitted {
+				return cloneTaskResult(state.result), nil
+			}
+			return TaskResult{}, fmt.Errorf("hub: task %q has expired", taskID)
+		case <-ctx.Done():
+			timer.Stop()
+			return TaskResult{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
-func (r *Registry) taskExpired(task Task) bool {
-	return !time.Now().Before(task.CreatedAt.Add(TaskTTL))
+func (r *Registry) taskExpired(state *registryTask) bool {
+	return !time.Now().Before(state.deadline())
 }
 
 func (r *Registry) purgeExpiredQueuedLocked(agent *registryAgent) {
@@ -466,7 +550,7 @@ func (r *Registry) purgeExpiredQueuedLocked(agent *registryAgent) {
 		if !ok || state.expired || state.submitted {
 			continue
 		}
-		if r.taskExpired(task) {
+		if r.taskExpired(state) {
 			r.expireTaskLocked(task.TaskID, state)
 			continue
 		}

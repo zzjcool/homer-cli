@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -72,9 +73,21 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 			}
 		}
 		agent.Host = webHost(info.Host)
+		agent.Tools = webTools(info.Tools)
 		agents = append(agents, agent)
 	}
 	return agents
+}
+
+func webTools(tools []toolctl.Status) []web.AgentTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]web.AgentTool, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, web.AgentTool{Status: tool})
+	}
+	return out
 }
 
 func webHost(host *HostSnapshot) *web.HostSnapshot {
@@ -161,7 +174,7 @@ func (d *Dispatcher) AgentPush(ctx context.Context, agentID string, confirm bool
 }
 
 func (d *Dispatcher) AgentPull(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
-	return d.writeAgentFor(ctx, agentID, TaskKindPull, taskOptionsForScope(confirm, scope), 12*time.Minute)
+	return d.writeAgentFor(ctx, agentID, TaskKindPull, taskOptionsForScope(confirm, scope), PullWait)
 }
 
 func taskOptionsForScope(confirm bool, scope web.SyncScope) TaskOptions {
@@ -216,7 +229,72 @@ func (d *Dispatcher) AgentUpgrade(ctx context.Context, agentID string) (json.Raw
 		}
 		return body, nil
 	}
-	return d.enqueueAndWaitFor(ctx, info.AgentID, TaskKindUpgrade, TaskOptions{Confirm: true}, 3*time.Minute)
+	return d.enqueueAndWaitFor(ctx, info.AgentID, TaskKindUpgrade, TaskOptions{Confirm: true}, UpgradeWait)
+}
+
+// AgentToolUpgrade asks one machine to upgrade one program an adapter
+// drives (pi, herdr, opencode...). The request names the program; the
+// machine looks up the command in its own table, so nothing the hub or the
+// console sends can become a command line.
+//
+// The reply is the machine's report as is, including a report that says the
+// upgrade did not work: the console shows its note and output.
+func (d *Dispatcher) AgentToolUpgrade(ctx context.Context, agentID, tool string) (json.RawMessage, error) {
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		return nil, newAgentError("bad-request", http.StatusBadRequest, errors.New("tool is required"))
+	}
+	if err := d.requireOnline(agentID); err != nil {
+		return nil, err
+	}
+	info, err := d.agentInfo(agentID)
+	if err != nil {
+		return nil, err
+	}
+	var raw json.RawMessage
+	switch info.Mode {
+	case AgentModeListen:
+		payload, err := json.Marshal(struct {
+			Tool string `json:"tool"`
+		}{tool})
+		if err != nil {
+			return nil, err
+		}
+		// An upgrade runs for minutes; the ordinary dispatcher timeout
+		// would abandon it while the machine is still working.
+		longCtx, cancel := context.WithTimeout(ctx, ToolUpgradeWait)
+		defer cancel()
+		body, err := d.directWith(longCtx, d.longClient(), info, http.MethodPost, "tools/upgrade", nil, payload, true)
+		if err != nil {
+			return nil, d.directError(err)
+		}
+		raw = body
+	case AgentModeConnect:
+		body, err := d.enqueueAndWaitFor(ctx, info.AgentID, TaskKindToolUpgrade, TaskOptions{Tool: tool}, ToolUpgradeWait)
+		if err != nil {
+			return nil, err
+		}
+		raw = body
+	default:
+		return nil, newAgentError("agent-unreachable", http.StatusBadGateway, fmt.Errorf("agent %q has invalid mode %q", agentID, info.Mode))
+	}
+	d.noteToolUpgrade(agentID, tool, raw)
+	return raw, nil
+}
+
+// noteToolUpgrade shows the version the machine just measured without
+// waiting for its next heartbeat.
+func (d *Dispatcher) noteToolUpgrade(agentID, tool string, raw json.RawMessage) {
+	if d == nil || d.Registry == nil || len(raw) == 0 {
+		return
+	}
+	var report struct {
+		After string `json:"after"`
+	}
+	if json.Unmarshal(raw, &report) != nil || report.After == "" {
+		return
+	}
+	d.Registry.NoteToolVersion(agentID, tool, report.After)
 }
 
 // AgentKey runs a keyring command on one machine. The password stays inside
@@ -390,6 +468,20 @@ func (d *Dispatcher) enqueueAndWaitFor(ctx context.Context, agentID string, kind
 }
 
 func (d *Dispatcher) direct(ctx context.Context, info AgentInfo, method string, endpoint string, query url.Values, payload []byte, writeOperation bool) ([]byte, error) {
+	return d.directWith(ctx, d.httpClient(), info, method, endpoint, query, payload, writeOperation)
+}
+
+// longClient is the dispatcher's client without its overall timeout, for the
+// requests that legitimately run for minutes. It keeps the Transport, so a
+// test double or proxy setting still applies; the caller bounds the wait with
+// a context deadline instead.
+func (d *Dispatcher) longClient() *http.Client {
+	client := *d.httpClient()
+	client.Timeout = 0
+	return &client
+}
+
+func (d *Dispatcher) directWith(ctx context.Context, client *http.Client, info AgentInfo, method string, endpoint string, query url.Values, payload []byte, writeOperation bool) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -418,7 +510,6 @@ func (d *Dispatcher) direct(ctx context.Context, info AgentInfo, method string, 
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := d.httpClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

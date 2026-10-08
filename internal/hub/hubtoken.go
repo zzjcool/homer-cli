@@ -57,6 +57,25 @@ func EnsureHubToken(home, flagToken string) (token string, created bool, err err
 	return generated, true, nil
 }
 
+// CreateHubToken returns the persisted hub token, generating one when the
+// file is missing. force replaces it. The running hub keeps the previous
+// value until it is restarted.
+func CreateHubToken(home string, force bool) (token string, created bool, err error) {
+	if !force {
+		if existing, ok := ReadHubToken(home); ok {
+			return existing, false, nil
+		}
+	}
+	generated, genErr := generateHubToken()
+	if genErr != nil {
+		return "", false, genErr
+	}
+	if err := writeHubToken(home, generated); err != nil {
+		return "", false, err
+	}
+	return generated, true, nil
+}
+
 // ReadHubToken returns the persisted token without generating one. Used by
 // paths that must never rotate (e.g. --show-join).
 func ReadHubToken(home string) (string, bool) {

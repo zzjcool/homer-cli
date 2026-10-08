@@ -136,6 +136,8 @@ type OutlineFile struct {
 	Size   int      `json:"size,omitempty"`
 	Status string   `json:"status,omitempty"`
 	Keys   []string `json:"keys,omitempty"`
+	// Destination is the tool path (~/...) a review action encrypts.
+	Destination string `json:"destination,omitempty"`
 }
 
 // OutlineCategory is one folder under an adapter. Manifest categories

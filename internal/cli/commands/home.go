@@ -99,6 +99,8 @@ type HomeDeps struct {
 	Git      any
 	Commands manifest.CommandPort
 	Clone    func(repoURL, destDir string) error
+	// Look resolves a tool CLI before dispatch. Nil reads the login-shell PATH.
+	Look func(string) (string, error)
 }
 
 const HOME_USAGE = `用法: homer home <repo-url> [options]
@@ -647,6 +649,12 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		warnings = append(warnings, fmt.Sprintf("已按 --yes 确认执行远端声明的 manifest 命令（%d 条）", len(manifestTasks)))
 	}
 	manifestScanConfirmed := options.Yes || !manifestScanDeferred
+	if missing := missingToolErrors(*config, applyAdapterIDs(remainingPlan, manifestTasks), homeLook(deps)); len(missing) > 0 {
+		report.Errors = missing
+		report.Warnings = warnings
+		report.FirstContact = &HomeFirstContactReport{Mode: mode, Applied: emptyApplyResult(), Conflicts: []syncx.PullConflictAction{}}
+		return report
+	}
 	if !options.Yes && (len(plan.Actions) > 0 || len(names) > 0 || len(manifestTasks) > 0) {
 		if !promptConfirm(depsHomeUI(deps), homeConfirmationPreviewWithScanState(*config, plan, manifestTasks, names, manifestScanDeferred), false) {
 			if depsHomeUI(deps) == nil && !isTTY() {
@@ -689,6 +697,13 @@ func RunHome(options HomeOptions, deps *HomeDeps) (report HomeReport) {
 		if len(manifestTasks) > 0 {
 			manifestReport = emptyManifestApplyReport()
 		}
+	}
+	if missing := missingToolErrors(*config, applyAdapterIDs(syncx.PullPlan{Actions: plan.Actions}, manifestTasks), homeLook(deps)); len(missing) > 0 {
+		report.Errors = missing
+		report.Warnings = warnings
+		report.Manifest = manifestReport
+		report.FirstContact = &HomeFirstContactReport{Mode: mode, Applied: emptyApplyResult(), Conflicts: []syncx.PullConflictAction{}}
+		return report
 	}
 
 	applied := emptyApplyResult()

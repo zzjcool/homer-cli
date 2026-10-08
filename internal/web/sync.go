@@ -15,9 +15,11 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/zzjcool/homer-cli/internal/adapter/pi"
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
+	"github.com/zzjcool/homer-cli/internal/keyring"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
 
@@ -678,10 +680,15 @@ func (s *Server) handleStorageListing(w http.ResponseWriter, _ *http.Request) {
 	if adapters == nil {
 		adapters = []storageAdapter{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"generation": generation, "adapters": adapters})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"generation": generation,
+		"adapters":   adapters,
+		"secrets":    piSecretRules(s.opts.HomerHome),
+	})
 }
 
 func (s *Server) readStorageOutline() (int, []storageAdapter, error) {
+	config, _ := core.LoadConfig(s.paths())
 	head, ok := gens.New(s.opts.HomerHome).Read()
 	if !ok {
 		return 0, []storageAdapter{}, nil
@@ -736,7 +743,15 @@ func (s *Server) readStorageOutline() (int, []storageAdapter, error) {
 		if statErr == nil {
 			size = int(info.Size())
 		}
-		cat.entry.Files = append(cat.entry.Files, OutlineFile{Path: category + "/" + fileRel, Size: size})
+		file := OutlineFile{Path: category + "/" + fileRel, Size: size}
+		if config != nil {
+			if adapter, ok := config.Adapters[adapterID]; ok {
+				if categoryConfig, ok := adapter.Categories[category]; ok {
+					file.Destination = categoryDestination(adapter.Root, categoryConfig, fileRel)
+				}
+			}
+		}
+		cat.entry.Files = append(cat.entry.Files, file)
 		return nil
 	})
 	if err != nil {
@@ -773,6 +788,53 @@ func (s *Server) readStorageOutline() (int, []storageAdapter, error) {
 		out = append(out, *adapter)
 	}
 	return head.Generation, out, nil
+}
+
+// categoryDestination is the tool path the console encrypts. A directory
+// category stores paths relative to that directory; a file list stores
+// basenames; the pi catch-all walks the adapter root.
+func categoryDestination(root string, category core.CategoryConfig, fileRel string) string {
+	rel := fileRel
+	for _, path := range category.Paths {
+		if !strings.HasSuffix(path, "/") {
+			continue
+		}
+		dir := strings.TrimSuffix(path, "/")
+		if dir == "." || dir == "" {
+			rel = fileRel
+		} else {
+			rel = dir + "/" + fileRel
+		}
+		break
+	}
+	root = strings.TrimRight(strings.ReplaceAll(root, "\\", "/"), "/")
+	if root == "" {
+		return rel
+	}
+	return root + "/" + rel
+}
+
+// piSecretRules is the credential files Pi stores in the agent directory.
+// They are absent from the plaintext generation. Encrypted is true once a
+// keyring file points at that path.
+func piSecretRules(homerHome string) []map[string]any {
+	encrypted := map[string]bool{}
+	listed := keyring.Apply(homerHome, keyring.Command{Action: "list"})
+	for _, key := range listed.Keys {
+		for _, file := range key.Files {
+			encrypted[filepath.Base(file.Destination)] = true
+		}
+	}
+	out := make([]map[string]any, 0, len(pi.SecretFiles))
+	for _, name := range pi.SecretFiles {
+		out = append(out, map[string]any{
+			"adapter":     pi.PIAdapterID,
+			"name":        name,
+			"destination": pi.SecretDestination(name),
+			"encrypted":   encrypted[name],
+		})
+	}
+	return out
 }
 
 func presentPluginList(cat *OutlineCategory, content string) {

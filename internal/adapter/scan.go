@@ -380,7 +380,7 @@ func scanCategory(adapterID, root, rootReal string, category string, cfg core.Ca
 // in lexical order. Status reuses this same ordering for disabled summaries.
 func CategoryOrder(adapterID string, categories map[string]core.CategoryConfig) []string {
 	preferred := map[string][]string{
-		"pi":       {"settings", "skills", "agents", "models", "prompts", "themes"},
+		"pi":       {"settings", "context", "skills", "extensions", "agents", "models", "prompts", "themes", "files"},
 		"herdr":    {"config"},
 		"opencode": {"config", "plugins", "locks"},
 		"vscode":   {"settings", "keybindings", "extensions"},

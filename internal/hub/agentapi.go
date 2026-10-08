@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 )
 
 const agentHeartbeatSeconds = 60
@@ -119,6 +121,21 @@ type registerRequest struct {
 	Version  string        `json:"version"`
 	Drift    *AgentDrift   `json:"drift,omitempty"`
 	Host     *HostSnapshot `json:"host,omitempty"`
+	// Tools is a pointer so "no report" (absent) and "nothing installed"
+	// (an empty list) stay different things on the wire.
+	Tools *[]toolctl.Status `json:"tools,omitempty"`
+}
+
+// reportedTools turns the optional wire field into the Registry.Register
+// convention: nil leaves the stored list alone, a non-nil list replaces it.
+func reportedTools(tools *[]toolctl.Status) []toolctl.Status {
+	if tools == nil {
+		return nil
+	}
+	if *tools == nil {
+		return []toolctl.Status{}
+	}
+	return *tools
 }
 
 // enrollRequest is the Tailscale-style onboarding payload: an agent
@@ -133,6 +150,8 @@ type enrollRequest struct {
 	Version  string        `json:"version"`
 	Drift    *AgentDrift   `json:"drift,omitempty"`
 	Host     *HostSnapshot `json:"host,omitempty"`
+
+	Tools *[]toolctl.Status `json:"tools,omitempty"`
 }
 
 func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +183,7 @@ func (a *AgentAPI) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		Addr:     request.Addr,
 		Version:  request.Version,
 		Host:     request.Host,
+		Tools:    reportedTools(request.Tools),
 	}); err != nil {
 		// Registration validates mode/addr shape; the code stays burned —
 		// a malformed agent should not get a second try with the same code.
@@ -195,6 +215,7 @@ func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Addr:     request.Addr,
 		Version:  request.Version,
 		Host:     request.Host,
+		Tools:    reportedTools(request.Tools),
 	}); err != nil {
 		writeAgentError(w, http.StatusBadRequest, "bad-request", "请求参数无效")
 		return
@@ -215,11 +236,12 @@ func (a *AgentAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 type pollRequest struct {
-	AgentID     string        `json:"agentId"`
-	WaitSeconds *int          `json:"waitSeconds"`
-	Version     string        `json:"version,omitempty"`
-	Drift       *AgentDrift   `json:"drift,omitempty"`
-	Host        *HostSnapshot `json:"host,omitempty"`
+	AgentID     string            `json:"agentId"`
+	WaitSeconds *int              `json:"waitSeconds"`
+	Version     string            `json:"version,omitempty"`
+	Drift       *AgentDrift       `json:"drift,omitempty"`
+	Host        *HostSnapshot     `json:"host,omitempty"`
+	Tools       *[]toolctl.Status `json:"tools,omitempty"`
 }
 
 type pollResponse struct {
@@ -254,6 +276,9 @@ func (a *AgentAPI) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Host != nil {
 		a.Registry.UpdateHost(request.AgentID, *request.Host)
+	}
+	if request.Tools != nil {
+		a.Registry.UpdateTools(request.AgentID, *request.Tools)
 	}
 	a.Registry.UpdateVersion(request.AgentID, request.Version)
 	task, ok := a.Registry.Poll(request.AgentID, time.Duration(waitSeconds)*time.Second, r.Context())

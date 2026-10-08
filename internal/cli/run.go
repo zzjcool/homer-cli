@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -41,6 +42,9 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		}
 		if validationErr := validateCommandOptions(parsed.Command, options); validationErr != nil {
 			return usageError(parsed.Command, validationErr.Error(), out, errOut)
+		}
+		if strings.TrimSpace(options.ID) != "" {
+			return runHubUpgrade(options, out, errOut)
 		}
 		return runUpgrade(options.Force, options.Connect, options.Home, out, errOut)
 	}
@@ -132,6 +136,9 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		return report.ExitCode()
 
 	case CommandStatus:
+		if hubRequested(options) {
+			return runHubStatus(options, out, errOut)
+		}
 		report, err := commands.RunStatus(commands.StatusOptions{
 			HomerHome: options.Home,
 			JSON:      options.JSON,
@@ -145,10 +152,12 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		} else {
 			writeLine(out, RenderStatus(report, RenderStatusOptions{Verbose: options.Verbose}))
 		}
-		// Drift is information, not a failing process status.
 		return 0
 
 	case CommandDiff:
+		if hubRequested(options) {
+			return runHubDiff(options, out, errOut)
+		}
 		text, err := commands.RunDiff(commands.DiffOptions{
 			HomerHome: options.Home,
 			Adapter:   options.Adapter,
@@ -163,6 +172,9 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		return 0
 
 	case CommandPush:
+		if hubRequested(options) {
+			return runHubPush(options, out, errOut)
+		}
 		report := commands.RunPush(commands.PushOptions{
 			HomerHome: options.Home,
 			JSON:      options.JSON,
@@ -177,6 +189,9 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 		return report.ExitCode()
 
 	case CommandPull:
+		if hubRequested(options) {
+			return runHubPull(options, out, errOut)
+		}
 		report := commands.RunPull(commands.PullOptions{
 			HomerHome: options.Home,
 			JSON:      options.JSON,
@@ -188,6 +203,18 @@ func runWithIO(args []string, out, errOut io.Writer) int {
 			writeLine(out, commands.RenderPullReport(report))
 		}
 		return report.ExitCode()
+
+	case CommandPS:
+		return runHubPS(options, out, errOut)
+
+	case CommandToken:
+		return runToken(options, out, errOut)
+
+	case CommandJoin:
+		return runHubJoin(options, out, errOut)
+
+	case CommandResolve:
+		return runHubResolve(options, out, errOut)
 
 	case CommandMerge:
 		report := commands.RunMerge(commands.MergeOptions{
@@ -405,6 +432,10 @@ func unsupportedOptions(command Command, options CommandOptions, names ...string
 			if options.ShowJoin {
 				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --show-join", command))
 			}
+		case "host":
+			if options.Host != "" {
+				return usageArgumentError(fmt.Sprintf("命令 %s 不支持选项 --host", command))
+			}
 		}
 	}
 	return nil
@@ -413,9 +444,9 @@ func unsupportedOptions(command Command, options CommandOptions, names ...string
 func validateCommandOptions(command Command, options CommandOptions) error {
 	switch command {
 	case CommandInit:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "adapter", "category", "mode")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "verbose", "adapter", "category", "mode", "host")
 	case CommandRemote:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "host")
 	case CommandStatus:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "force", "adapters", "adapter", "category", "mode", "remote")
 	case CommandDiff:
@@ -426,9 +457,23 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 		}
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "mode", "remote")
 	case CommandPush:
-		return unsupportedOptions(command, options, "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapter", "category", "mode", "remote")
 	case CommandPull:
-		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapter", "category", "mode", "remote")
+	case CommandPS:
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+	case CommandToken:
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "adapters", "adapter", "category", "mode", "remote", "json", "host")
+	case CommandJoin:
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json")
+	case CommandResolve:
+		if options.AcceptLocal && options.AcceptRemote {
+			return usageArgumentError("--accept-local 与 --accept-remote 不能同时使用")
+		}
+		if !options.AcceptLocal && !options.AcceptRemote {
+			return usageArgumentError("homer resolve 需要 --accept-local 或 --accept-remote")
+		}
+		return unsupportedOptions(command, options, "no-push", "offline", "all", "verbose", "force", "adapter", "category", "mode", "remote")
 	case CommandMerge:
 		if options.All {
 			return usageArgumentError("命令 merge 不支持选项 --all")
@@ -448,22 +493,22 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 		if options.Force {
 			return usageArgumentError("命令 merge 不支持选项 --force")
 		}
-		if len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" || options.Remote != "" {
+		if len(options.Adapters) > 0 || options.Adapter != "" || options.Category != "" || options.Mode != "" || options.Remote != "" || options.Host != "" {
 			return usageArgumentError("命令 merge 不支持该选项")
 		}
 		if options.AcceptLocal && options.AcceptRemote {
 			return usageArgumentError("--accept-local 与 --accept-remote 不能同时使用")
 		}
 	case CommandHome:
-		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "remote")
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "remote", "host")
 	case CommandDoctor:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "host")
 	case CommandPair:
-		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote")
+		return unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "host")
 	case CommandServe:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "listen", "connect", "hub", "advertise", "id")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "listen", "connect", "hub", "advertise", "id", "host")
 	case CommandAgent:
-		if err := unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "addr", "json", "show-join"); err != nil {
+		if err := unsupportedOptions(command, options, "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "addr", "json", "show-join", "host"); err != nil {
 			return err
 		}
 		// Parameters are optional when a prior successful registration was
@@ -479,7 +524,7 @@ func validateCommandOptions(command Command, options CommandOptions) error {
 	case CommandUpgrade:
 		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "adapters", "adapter", "category", "mode", "remote", "json")
 	case CommandVersion:
-		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json")
+		return unsupportedOptions(command, options, "yes", "no-push", "accept-local", "accept-remote", "offline", "all", "verbose", "force", "adapters", "adapter", "category", "mode", "remote", "json", "host")
 	default:
 		return usageArgumentError(fmt.Sprintf("未知命令: %s", command))
 	}

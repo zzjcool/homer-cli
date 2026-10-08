@@ -86,8 +86,11 @@ func TestFrozenDefaultAdapters(t *testing.T) {
 		Root:    "~/.pi/agent",
 		Enabled: &trueValue,
 		Categories: map[string]core.CategoryConfig{
-			"settings": {Paths: []string{"settings.json", "keybindings.json"}, Mode: core.SyncMode("merge")},
+			"settings": {Paths: []string{"settings.json", "keybindings.json", "mcp.json"}, Mode: core.SyncMode("merge")},
+			"context":  {Paths: []string{"SYSTEM.md", "APPEND_SYSTEM.md", "AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"}, Mode: core.SyncMode("mirror")},
 			"skills":   {Paths: []string{"skills/"}, Mode: core.SyncMode("mirror")},
+			// Local extension source, separate from pi install packages.
+			"extensions": {Paths: []string{"extensions/"}, Mode: core.SyncMode("mirror"), Exclude: []string{"*cache*", "node_modules/"}},
 			// packages 是旗舰类别：按名同步插件（listCmd 盘点，
 			// applyCmd 补装）。新机器不配置也能看到/同步插件。
 			"packages": func() core.CategoryConfig {
@@ -98,8 +101,14 @@ func TestFrozenDefaultAdapters(t *testing.T) {
 			"models":  {Paths: []string{"models.json"}, Mode: core.SyncMode("merge"), ExcludeKeys: []string{"apiKeys"}},
 			"prompts": {Paths: []string{"prompts/"}, Mode: core.SyncMode("mirror")},
 			"themes":  {Paths: []string{"themes/"}, Mode: core.SyncMode("mirror")},
+			"files": {Paths: []string{"./"}, Mode: core.SyncMode("mirror"), Exclude: []string{
+				"settings.json", "keybindings.json", "mcp.json", "models.json",
+				"SYSTEM.md", "APPEND_SYSTEM.md", "AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD",
+				"skills/", "extensions/", "agents/", "prompts/", "themes/",
+				"sessions/", "npm/", "git/", "tmp/", "bin/", "node_modules/", "*cache*",
+			}},
 		},
-		Ignore: []string{"auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "**/._*", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
+		Ignore: []string{"auth.json", "mcp-auth.json", "trust.json", "sessions/", "npm/", "git/", "tmp/", "bin/", "**/._*", "*.bak", "*.bak-*", "*.bak*", "*.log", "run-history.jsonl"},
 	}
 	if !reflect.DeepEqual(pi.DefaultPIAdapter, wantPI) {
 		t.Fatalf("pi defaults changed:\n got %#v\nwant %#v", pi.DefaultPIAdapter, wantPI)
@@ -138,21 +147,28 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 
 	writeFixture(t, home, ".pi/agent/settings.json", "{\"theme\":\"dark\"}")
 	writeFixture(t, home, ".pi/agent/keybindings.json", `{ "broken": `)
+	writeFixture(t, home, ".pi/agent/mcp.json", `{"mcpServers":{"local":{"command":"echo"}}}`)
+	writeFixture(t, home, ".pi/agent/SYSTEM.md", "# system\n")
+	writeFixture(t, home, ".pi/agent/AGENTS.md", "# agents\n")
 	writeFixture(t, home, ".pi/agent/skills/foo/SKILL.md", "# foo\n")
 	writeFixture(t, home, ".pi/agent/skills/foo/reference/notes.md", "notes\n")
 	writeFixture(t, home, ".pi/agent/skills/bar/SKILL.md", "# bar\n")
 	writeFixture(t, home, ".pi/agent/extensions/tool/index.js", "export const x = 1;\n")
+	writeFixture(t, home, ".pi/agent/extensions/tool/node_modules/left-pad/index.js", "MUST BE EXCLUDED")
 	writeFixture(t, home, ".pi/agent/extensions/pi-foo-cache/index.js", "MUST BE EXCLUDED")
 	writeFixture(t, home, ".pi/agent/extensions/mycache.json", "MUST BE EXCLUDED")
 	writeFixture(t, home, ".pi/agent/agents/reviewer.md", "# reviewer\n")
 	writeFixture(t, home, ".pi/agent/models.json", `{"provider":"openai","apiKeys":{"openai":"sk-x"}}`)
 	writeFixture(t, home, ".pi/agent/prompts/system.md", "# system\n")
 	writeFixture(t, home, ".pi/agent/themes/dark.json", `{"bg":"#000"}`)
+	writeFixture(t, home, ".pi/agent/custom-note.md", "hello from the rest of the tree\n")
+	writeFixture(t, home, ".pi/agent/notes/todo.md", "todo\n")
 
 	// Runtime/junk files are physically present but must not be collected.
 	writeFixture(t, home, ".pi/agent/sessions/x", "session data")
 	writeFixture(t, home, ".pi/agent/npm/y", "npm data")
 	writeFixture(t, home, ".pi/agent/auth.json", `{"token":"secret"}`)
+	writeFixture(t, home, ".pi/agent/mcp-auth.json", "MUST BE EXCLUDED")
 	writeFixture(t, home, ".pi/agent/models.json.bak-predirect", "backup")
 	writeFixture(t, home, ".pi/agent/pi-tui-crash.log", "stack trace")
 
@@ -164,8 +180,7 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 		t.Fatalf("adapter id = %q", got)
 	}
 	// packages (manifest) is not in the preferred order, so it sorts last.
-	// The extensions/ source tree is not a category: plugins sync by name.
-	wantCategories := []string{"settings", "skills", "agents", "models", "prompts", "themes", "packages"}
+	wantCategories := []string{"settings", "context", "skills", "extensions", "agents", "models", "prompts", "themes", "files", "packages"}
 	gotCategories := make([]string, 0, len(outcome.Snapshot.Categories))
 	for _, cat := range outcome.Snapshot.Categories {
 		gotCategories = append(gotCategories, cat.Category)
@@ -177,15 +192,19 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 	if got := category(t, outcome.Snapshot, "settings").Files; !reflect.DeepEqual(got, core.SnapshotFiles{
 		"settings.json":    {Kind: "json", Content: "{\"theme\":\"dark\"}"},
 		"keybindings.json": {Kind: "file", Content: `{ "broken": `},
+		"mcp.json":         {Kind: "json", Content: `{"mcpServers":{"local":{"command":"echo"}}}`},
 	}) {
 		t.Fatalf("settings snapshot = %#v", got)
+	}
+	if got := snapshotKeys(category(t, outcome.Snapshot, "context")); !reflect.DeepEqual(got, []string{"AGENTS.md", "SYSTEM.md"}) {
+		t.Fatalf("context keys = %#v", got)
 	}
 	if got := snapshotKeys(category(t, outcome.Snapshot, "skills")); !reflect.DeepEqual(got, []string{"bar/SKILL.md", "foo/SKILL.md", "foo/reference/notes.md"}) {
 		t.Fatalf("skills keys = %#v", got)
 	}
-	// Disabled categories leave no snapshot; the fixtures above (and the
-	// excluded cache entries) prove the ignore logic stays intact for
-	// whoever re-enables it.
+	if got := snapshotKeys(category(t, outcome.Snapshot, "extensions")); !reflect.DeepEqual(got, []string{"tool/index.js"}) {
+		t.Fatalf("extensions keys = %#v", got)
+	}
 	if got := snapshotKeys(category(t, outcome.Snapshot, "agents")); !reflect.DeepEqual(got, []string{"reviewer.md"}) {
 		t.Fatalf("agents keys = %#v", got)
 	}
@@ -195,7 +214,10 @@ func TestPIExactSnapshotAndKinds(t *testing.T) {
 	if got := category(t, outcome.Snapshot, "themes").Files["dark.json"]; got.Kind != "file" {
 		t.Fatalf("mirror JSON kind = %#v", got)
 	}
-	if strings.Contains(snapshotText(outcome.Snapshot), "MUST BE EXCLUDED") || strings.Contains(snapshotText(outcome.Snapshot), "session data") {
+	if got := snapshotKeys(category(t, outcome.Snapshot, "files")); !reflect.DeepEqual(got, []string{"custom-note.md", "notes/todo.md"}) {
+		t.Fatalf("files keys = %#v", got)
+	}
+	if strings.Contains(snapshotText(outcome.Snapshot), "MUST BE EXCLUDED") || strings.Contains(snapshotText(outcome.Snapshot), "session data") || strings.Contains(snapshotText(outcome.Snapshot), `"token":"secret"`) {
 		t.Fatal("ignored/excluded data entered the snapshot")
 	}
 }

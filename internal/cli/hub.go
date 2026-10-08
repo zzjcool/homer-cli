@@ -220,6 +220,9 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 		credential = resolved.Token
 	}
 	daemon := agentd.New(resolved, agentd.NewLocalExecutorWithHub(options.Home, hubBase, credential))
+	// Report the version of pi, herdr and the other programs the adapters
+	// drive, and let the console upgrade them on this machine.
+	daemon.SetToolkit(agentd.LocalToolkit())
 	writeLine(out, fmt.Sprintf("homer agent: %s 模式启动（Ctrl+C 停止）", agentModeLabel(resolved)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

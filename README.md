@@ -59,6 +59,31 @@ hub 的 `/api/agents` 仍可按机器采集状态和差异。控制台的「同�
 容器化验收：`bash e2e/hub-smoke.sh`（origin + hub + agent-a + agent-b 四容器，
 覆盖双通道采集与配置跨机流转）。
 
+### 应用版本与一键升级
+
+每台机器的 agent 会随心跳上报适配器所驱动的应用的版本（pi、herdr、opencode、
+VS Code，没装的不报）。控制台的机器卡片上有一行「应用」，`homer ps` 的最后一列
+也是同一份信息。
+
+- **什么算「落后」**：和整个机器群里任意一台上报过的最新正式版比（离线的机器也
+  算数；预发布版不当基准），或者和适配器声明的最低版本比，取较新的。读不出版本的
+  不会被标成落后；只有一台机器上报时没有对照，也不会被标成落后，但「详情」里每个
+  应用都有「升级」，随时可以点。
+- **怎么升**：落后的应用旁边直接有「升级」，卡片底部有「全部升级应用」（只含在线、
+  能升级的）。点下去后升级在那台机器上进行，可能要几十秒到几分钟，请留在窗口里；
+  升完立刻显示新版本。失败时会说明原因、给出命令输出的最后几行和官方安装命令，
+  可以复制到那台机器的终端里运行。
+- **安全**：控制台和 hub 只传应用的 ID，不传命令。机器按自己内置的表执行该应用
+  自己的升级命令（pi：`pi update --self`，herdr：`herdr update`，opencode：
+  `opencode upgrade`），表里没有的 ID 一律拒绝。VS Code 只报版本，要用系统的包
+  管理器更新。
+- **旧版 agent**：版本太老的 homer 不会上报应用版本，也不认识升级指令，先在控制台
+  点「更新程序」把它换成中心现在这份。
+- **给新的适配器加上这个能力**：在 `internal/adapter/tools.go` 的 `Tools()` 里加
+  一项（`ID`、`Adapter`、`Label`、`Binary`、`VersionArgs`、`Install`，能自升级的再填
+  `UpgradeArgs`，需要硬性下限时填 `MinVersion`）。上报、落后标记、升级按钮、
+  `homer ps` 都不用再改。
+
 ## 安装
 
 ### 1. release 二进制（推荐）
@@ -136,8 +161,12 @@ master`（分支名按实际仓库显示）确认无误后运行即可。`homer 
 
 四个内置 adapter 的默认范围：
 
-- **pi**：`settings.json` / `models.json`（merge），skills、extensions、agents、
-  prompts、themes（mirror）；运行时 sessions、auth、日志等忽略。
+- **pi**：上面这些分类之外，`~/.pi/agent` 里其余文件默认整棵收进中心（`files`）。
+  `auth.json` 和 `mcp-auth.json` 是 pi 的密钥存储，不进明文，在界面里默认加密。
+  其他文件可以在存储视图里审阅，再「转为加密」。`settings.json` /
+  `keybindings.json` / `mcp.json` / `models.json`（merge，`models.json` 去掉
+  `apiKeys`），说明文件、skills、extensions、agents、prompts、themes（mirror）。
+  sessions、安装缓存、日志不收。
 - **herdr**：仅同步 `~/.config/herdr/config.toml`。
 - **opencode**：`opencode.json` / `package.json`（merge），lock 文件（mirror），
   `node_modules` 与运行时文件忽略。

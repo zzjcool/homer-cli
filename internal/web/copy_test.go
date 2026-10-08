@@ -49,10 +49,15 @@ func TestConsoleUserCopy(t *testing.T) {
 		"/api/console",
 		// 配置查看（存储视角 / 机器视角）
 		"查看存储内容", "服务器存储 · 当前内容", "/api/storage",
+		"默认加密", "待加密", "转为加密",
 		"正在向这台机器实时查询", "未收取", "待下发",
 		// 机器卡片上的资源快照（agent 心跳上报）
 		"内存", "网卡", "负载", "磁盘", "已运行", "等待机器上报系统信息",
 		"上次心跳", "版本未上报", "还没有心跳",
+		// 机器上的应用版本（pi / herdr / opencode…）与一键升级
+		"应用版本", "全部升级应用", "/tool-upgrade", "a.tools",
+		"正在升级", "有应用没有升级成功", "复制安装命令", "已是已知最新版本",
+		"要用这台机器的包管理器更新",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)

@@ -42,6 +42,8 @@ type PullDeps struct {
 	// upstream/fetch precondition chain is skipped entirely.
 	HubSnapshot []core.AdapterSnapshot
 	Commands    manifest.CommandPort
+	// Look resolves a tool CLI before dispatch. Nil reads the login-shell PATH.
+	Look func(string) (string, error)
 }
 
 type PullStatus string
@@ -460,6 +462,12 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 		report = newPullCommandReport(PullStatusNoDrift)
 		report.Warnings = warnings
 		report.Errors = sourceErrors
+		return report
+	}
+	if missing := missingToolErrors(*config, applyAdapterIDs(remainingPlan, manifestTasks), pullLook(deps)); len(missing) > 0 {
+		report = newPullCommandReport(PullStatusError)
+		report.Warnings = warnings
+		report.Errors = append(append([]string{}, sourceErrors...), missing...)
 		return report
 	}
 

@@ -26,6 +26,10 @@ const (
 	CommandPair    Command = "pair"
 	CommandServe   Command = "serve"
 	CommandAgent   Command = "agent"
+	CommandPS      Command = "ps"
+	CommandToken   Command = "token"
+	CommandJoin    Command = "join"
+	CommandResolve Command = "resolve"
 	CommandVersion Command = "version"
 	CommandUpgrade Command = "upgrade"
 	CommandHelp    Command = "help"
@@ -47,6 +51,10 @@ var COMMANDS = []Command{
 	CommandPair,
 	CommandServe,
 	CommandAgent,
+	CommandPS,
+	CommandToken,
+	CommandJoin,
+	CommandResolve,
 	CommandVersion,
 	CommandUpgrade,
 	CommandHelp,
@@ -91,41 +99,50 @@ const USAGE = `homer — dotfiles for humans and their AI agents
 命令:
   init      扫描 adapter 并生成 homer.json + store 快照
   remote    配置 origin remote（不自动推送）
-  status    显示本地/仓库之间的漂移概览
-  diff      显示漂移的详细差异
-  push      密钥扫描后推送本地快照到 store 并提交（+ 推送远端）
-  pull      拉取远端快照，备份后应用到工具目录
+  serve     启动中心：网页控制台和 API 一直在后台跑
+  agent     把本机接入中心，并保持连接
+  token     在中心机器上查看或生成中心令牌
+  ps        列出中心上的机器，以及每台机器上 pi、herdr 等应用的版本
+  join      打印接入新机器的命令（对应控制台「接入新机器」）
+  status    查看漂移。设置了 HOMER_HOST 或 --host 时向中心查询，否则检查本机
+  diff      查看差异。设置了中心地址时向中心查询，否则检查本机
+  push      设置了中心地址时把这台机器收取到中心，否则写入本机存储
+  pull      设置了中心地址时把中心内容下发到这台机器，否则应用到本机工具目录
+  resolve   在这台机器上选择保留哪一边（以这台机器为准 / 以中心为准）
+  upgrade   更新程序。不带 --id 更新本机；带 --id 更新那台机器
+  key       口令密钥：list | create | encrypt | unlock | passwd
+  version   打印 homer 版本
+
+这些命令不走中心，控制台也没有对应按钮，日常和自动化不要用:
+  init      扫描 adapter 并生成 homer.json + store 快照
+  remote    配置 origin remote（不自动推送）
   merge     逐项裁决本地/远端冲突
   home      新机器一键归位：clone 配置仓库 → 应用配置 → 解密密钥 → doctor
   doctor    八项体检（配置 / 仓库 / 远端 / adapter / age / state / 占位符残留）
   secret    密钥投递：keygen | push | pull | list
-  key       口令密钥：list | create | encrypt | unlock | passwd
   pair      在线配对另一台机器（tailcat 快车道，传输全程 age 密文）
-  serve     启动本地 hub：HTTP API + 网页控制台（默认 127.0.0.1:7760）
-  agent     把本机接入 hub：--listen 被中心直连 / --connect 主动拨出
-  version   打印 homer 版本（开发构建显示 dev；联网时提示新版本）
-  upgrade   换成新版本，并重启正在运行的 agent
 
 全局选项:
-  --home <dir>  homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
-  --version     打印版本
-  -h, --help    显示本帮助
+  --home <dir>   homer 工作区（默认 $HOMER_HOME 或 ~/.homer）
+  --host <url>   中心地址（默认 $HOMER_HOST，否则 http://127.0.0.1:7760；也接受 tcp://host:port）
+  --token <t>    中心令牌（默认 $HOMER_HUB_TOKEN，否则 keys/hub-token）
+  --id <id>      要操作的机器（默认本机 agent.json）
+  --version      打印版本
+  -h, --help     显示本帮助
 
 退出码:
   0  成功（包括 help；漂移是信息而不是错误）
   1  用法错误或命令失败
 
 示例:
-  homer init
-  homer status --json
-  homer diff --category settings
+  homer token
+  homer ps
+  homer join
+  homer status
   homer push --yes
   homer pull --yes
-  homer merge --accept-remote
-  homer home <repo-url> --yes
-  homer doctor --json
-  homer secret keygen
-  homer pair
+  homer resolve --accept-local --yes
+  homer upgrade --id <机器>
   homer pair <tc-addr>
 `
 
@@ -160,6 +177,8 @@ type CommandOptions struct {
 	Token     string
 	ID        string
 	ShowJoin  bool
+	// Host is the hub this client talks to, like Docker's --host.
+	Host string
 }
 
 type argumentError struct{ message string }
@@ -360,6 +379,12 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 				return options, err
 			}
 			options.ID = value
+		case "--host", "-H":
+			value, err := takeOptionValue(args, &index, name, inline, hasInline)
+			if err != nil {
+				return options, err
+			}
+			options.Host = value
 		case "--show-join":
 			options.ShowJoin = true
 		default:
@@ -380,13 +405,21 @@ func commandUsage(command Command) string {
 	case CommandRemote:
 		return "用法: homer remote <url> [options]\n\n配置 origin，不自动推送。\n\n选项: --home <dir> --json -h, --help"
 	case CommandStatus:
-		return "用法: homer status [options]\n\n显示本地 / store / git remote 漂移概览。\n\n选项: --home <dir> --json --verbose, -v -h, --help"
+		return "用法: homer status [options]\n\n向中心查询这台机器的漂移，和控制台用的是同一条路径。\n\n选项: --home <dir> --host <url> --id <agentId> --json --verbose, -v -h, --help"
 	case CommandDiff:
-		return "用法: homer diff [options]\n\n显示键级与行级差异。\n\n选项: --home <dir> --adapter <id> --category <name> -h, --help"
+		return "用法: homer diff [options]\n\n向中心查询这台机器的差异。\n\n选项: --home <dir> --host <url> --id <agentId> --adapter <id> --category <name> -h, --help"
 	case CommandPush:
-		return "用法: homer push [options]\n\n选项: --home <dir> --json --yes --no-push -h, --help"
+		return "用法: homer push [options]\n\n把这台机器的配置收取到中心。加上 --yes 才会执行。\n\n选项: --home <dir> --host <url> --id <agentId> --adapters <ids> --json --yes -h, --help"
 	case CommandPull:
-		return "用法: homer pull [options]\n\n选项: --home <dir> --json --yes -h, --help"
+		return "用法: homer pull [options]\n\n把中心的配置下发到这台机器。加上 --yes 才会执行。\n\n选项: --home <dir> --host <url> --id <agentId> --adapters <ids> --json --yes -h, --help"
+	case CommandPS:
+		return "用法: homer ps [options]\n\n列出中心上的机器，以及每台机器上 pi、herdr 等应用的版本；落后于其他机器的会标出最新版本。\n\n选项: --home <dir> --host <url> --json -h, --help"
+	case CommandToken:
+		return "用法: homer token [options]\n\n在中心那台机器上查看中心令牌。文件不存在时会生成。--force 换成新的，正在运行的 homer serve 要重启后才使用新令牌。\n\n选项: --home <dir> --force -h, --help"
+	case CommandJoin:
+		return "用法: homer join [options]\n\n向中心要一条接入新机器的命令，和控制台「接入新机器」相同。\n\n选项: --home <dir> --host <url> --token <t> -h, --help"
+	case CommandResolve:
+		return "用法: homer resolve [options]\n\n在指定机器上选择保留哪一边。--accept-local 以这台机器为准，--accept-remote 以中心为准。加上 --yes 才会执行。\n\n选项: --home <dir> --host <url> --id <agentId> --adapters <ids> --accept-local --accept-remote --yes --json -h, --help"
 	case CommandMerge:
 		return "用法: homer merge [options]\n\n选项: --home <dir> --json --accept-local --accept-remote -h, --help"
 	case CommandHome:

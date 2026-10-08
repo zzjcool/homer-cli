@@ -22,6 +22,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/hub"
 	"github.com/zzjcool/homer-cli/internal/keyring"
 	"github.com/zzjcool/homer-cli/internal/sshkey"
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -94,6 +95,10 @@ type Daemon struct {
 	lastDriftAt time.Time
 	// hosts keeps the previous CPU sample for utilization deltas.
 	hosts hostCollector
+	// toolkit measures and upgrades the programs the adapters drive; tools
+	// remembers the last measurement. See tools.go.
+	toolkit Toolkit
+	tools   toolState
 	// retries logs one line per failing key per minute — the silent-401
 	// lesson: a doomed retry loop must be visible in the log, never spam.
 	retries *retryLogger
@@ -177,6 +182,7 @@ func (d *Daemon) runListen(ctx context.Context) error {
 		AgentEndpointAuthorized: d.listenAuthorized,
 		LocalResolve:            d.resolveLocal,
 		LocalUpgrade:            d.upgradeLocal,
+		LocalToolUpgrade:        d.upgradeToolLocal,
 		AfterLocalWrite:         d.forgetDrift,
 	})
 	if err != nil {
@@ -431,6 +437,9 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		Code     string            `json:"code,omitempty"`
 		Drift    *hub.AgentDrift   `json:"drift,omitempty"`
 		Host     *hub.HostSnapshot `json:"host,omitempty"`
+		// Tools is a pointer so a machine with nothing installed (an empty
+		// list) differs from one that has not measured yet (absent).
+		Tools *[]toolctl.Status `json:"tools,omitempty"`
 	}{
 		AgentID:  d.cfg.AgentID,
 		Hostname: hostname,
@@ -438,6 +447,7 @@ func (d *Daemon) register(ctx context.Context, mode hub.AgentMode, hostname stri
 		Version:  web.Version,
 		Code:     d.cfg.EnrollCode,
 		Host:     d.hostSnapshot(),
+		Tools:    d.reportedTools(ctx, firstToolWait),
 	}
 	if mode == hub.AgentModeListen {
 		payload.Drift = d.driftSummary(ctx)
@@ -549,7 +559,8 @@ func (d *Daemon) poll(ctx context.Context, client *http.Client) (hub.Task, bool,
 		Version     string            `json:"version,omitempty"`
 		Drift       *hub.AgentDrift   `json:"drift,omitempty"`
 		Host        *hub.HostSnapshot `json:"host,omitempty"`
-	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Version: web.Version, Drift: d.driftSummary(ctx), Host: d.hostSnapshot()}
+		Tools       *[]toolctl.Status `json:"tools,omitempty"`
+	}{AgentID: d.cfg.AgentID, WaitSeconds: waitSeconds, Version: web.Version, Drift: d.driftSummary(ctx), Host: d.hostSnapshot(), Tools: d.reportedTools(ctx, 0)}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return hub.Task{}, false, err
@@ -584,6 +595,11 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 	// not fit in the normal 50s report budget.
 	if task.Kind == hub.TaskKindPull && limit < 12*time.Minute {
 		limit = 12 * time.Minute
+	}
+	// An installer downloads and unpacks; the report budget is for tasks
+	// that only read and write local files.
+	if task.Kind == hub.TaskKindToolUpgrade && limit < ToolUpgradeBudget {
+		limit = ToolUpgradeBudget
 	}
 	ctx, cancel := context.WithTimeout(parent, limit)
 	defer cancel()
@@ -635,6 +651,8 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 			output = keyring.Apply(d.cfg.HomerHome, command)
 		case hub.TaskKindUpgrade:
 			output = d.runUpgrade()
+		case hub.TaskKindToolUpgrade:
+			output = d.runToolUpgrade(ctx, task.Options.Tool)
 		default:
 			err = fmt.Errorf("unsupported task kind %q", task.Kind)
 		}
@@ -675,6 +693,8 @@ func (d *Daemon) execute(parent context.Context, task hub.Task) hub.TaskResult {
 		case sshkey.Report:
 			result.OK = report.OK
 		case commands.UpgradeReport:
+			result.OK = report.OK
+		case toolctl.UpgradeResult:
 			result.OK = report.OK
 		default:
 			result.OK = taskResultOK(task.Kind, output.report)

@@ -128,6 +128,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleLocalUpgrade(w, r)
+	case path == "/api/tools/upgrade":
+		// Listen-mode agents only: the hub dials this to upgrade one
+		// program (pi, herdr...) on the machine.
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleLocalToolUpgrade(w, r)
 	case path == "/api/sync/choices":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w)
@@ -435,6 +443,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, _ *http.Request) {
 	for i := range agents {
 		agents[i].Outdated = upgrade.IsNewer(Version, agents[i].Version)
 	}
+	annotateTools(agents)
 	writeJSON(w, http.StatusOK, struct {
 		OK     bool        `json:"ok"`
 		Agents []AgentInfo `json:"agents"`
@@ -530,6 +539,12 @@ func (s *Server) handleAgentRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAgentUpgrade(w, r, agentID)
+	case "tool-upgrade":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleAgentToolUpgrade(w, r, agentID)
 	default:
 		writeError(w, http.StatusNotFound, "not-found", "请求的资源不存在", nil)
 	}

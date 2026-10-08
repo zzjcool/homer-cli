@@ -45,7 +45,7 @@ func TestStatusDisabledSummariesMixedAdapterAndCategory(t *testing.T) {
 	}
 
 	got := commands.DisabledSummaries(config)
-	want := []string{"herdr", "pi/agents", "pi/extensions", "vscode/themes"}
+	want := []string{"herdr", "pi/extensions", "pi/agents", "vscode/themes"}
 	if len(got) != len(want) {
 		t.Fatalf("DisabledSummaries length = %d, got %#v, want %#v", len(got), got, want)
 	}

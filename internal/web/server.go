@@ -45,6 +45,9 @@ type AgentInfo struct {
 	Drift *AgentDrift `json:"drift,omitempty"`
 	// Host is the machine's last self-reported resource snapshot.
 	Host *HostSnapshot `json:"host,omitempty"`
+	// Tools lists the programs the adapters drive (pi, herdr...) that this
+	// machine has, each with its version and whether it is behind.
+	Tools []AgentTool `json:"tools,omitempty"`
 }
 
 // AgentDrift is the per-machine status summary the console renders.
@@ -174,6 +177,10 @@ type ServeOptions struct {
 	// Set only on a listen-mode agent. The console reaches connect-mode
 	// machines through an upgrade task instead.
 	LocalUpgrade func() (json.RawMessage, error)
+	// LocalToolUpgrade upgrades one program an adapter drives (pi, herdr...)
+	// on this machine and returns the report. Set only on a listen-mode
+	// agent; connect-mode machines get an upgrade task instead.
+	LocalToolUpgrade func(ctx context.Context, tool string) (json.RawMessage, error)
 	// AfterLocalWrite runs after this process applies a push, pull, or
 	// conflict choice. The agent uses it to drop a throttled drift cache
 	// so the next heartbeat matches what the write just did.
