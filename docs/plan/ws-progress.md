@@ -14,10 +14,10 @@
 | P4a shellenv 缓存 | worker-3(worker-1 因旧测试冲突停止) | ws/p4a-shellenv | ✅ 已合并 2ef7ba9(tag ws/p4a-merged),build/vet/race 通过 |
 | P1 stream 库 | worker-6(worker-2/4 因计划错误停止) | ws/p1-stream-v3 | ✅ 完整实现已合并 0a07931(tag ws/p1-merged);orchestrator 独立复验 build/vet/-race/count=30 全过 |
 | P2 hub | worker-7 | ws/p2-hub | ✅ 已合并 b0fb343(tag ws/p2-merged);hub+web+stream 合并后 build/vet/race 全过 |
-| P3 agent | worker-8 | ws/p3-agent | 进行中 |
+| P3 agent | worker-8 | ws/p3-agent | ✅ 已合并 9de73f8(tag ws/p3-merged) |
 | P4c web+UI | worker-9 | ws/p4c-web | ✅ 已合并 37a1a23(tag ws/p4c-merged);复验 web race/闸口矩阵/ETag/ChoicesStream/fanout 通过 |
 | P4b agent 数据面 | - | ws/p4b-data | 待 P3 |
-| I1 集成 | orchestrator | ws/integration | 待 |
+| I1 集成 | orchestrator | master | ✅ f18141c(tag ws/i1-integrated):CLI 改 --hub/--data-url、serve 装配 AgentHub、删 listen/connect;go build ./... 通过,internal/... -race 全绿 |
 | P5 CLI/docker/文档 | - | ws/p5-cli | 待 I1 |
 | P6a/b 测试 | - | ws/p6-tests | 待 |
 | P7 hw 性能验收 | orchestrator+用户 | - | 待 |
@@ -43,3 +43,7 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - P1 合并 0a07931(tag ws/p1-merged)。TestHalfOpenDetectedByPing 属 P6a,不在 P1。P2/P3/P4c 的分支基于 F1 骨架(73769a1),合并时会有 stream 库后续补齐的差异,I1 统一处理
 - P4c 合并 37a1a23。master 全仓暂不能整体编译(预期:web 删 AgentInfo.Mode 等,hub/agentd/cli/tests/e2e 待 P2/P3/I1/P5/P6 修)。tests/e2e 的 dispatch_unlock_ui_test.go、tool_upgrade_ui_test.go 仍引用 web.AgentInfo.Mode,归 P6
 - P2 合并 b0fb343。复验:hub race count=15 稳定;握手/顶替4001/吊销4401/410墓碑/requireOnline 统一都在代码里。测试名与计划略有出入(TestAgentHubSupersedesPreviousSession 等),覆盖的场景齐
+- P3 合并 9de73f8;I1:我自己改了 internal/cli(args/run/hub/upgrade + 测试)和 hubtoken 注释,机械性改动,冲突风险小所以没再派 worker
+- **首次端到端冒烟(本机回环,真 hub+真 agent)**:choices 0.70~0.75s(旧 1.3~1.6s);4 并发任务全部 ~0.73s 同时完成(旧严格串行 0.13/3.5/5.8s)。不含 CF tunnel/快照缓存/precheck 合并,不能当 P7 验收数字
+- 待办:tests/e2e 编译失败(dispatch_unlock_ui_test.go/tool_upgrade_ui_test.go 引用 web.AgentInfo.Mode,P6 修)
+- 教训:不要用 pkill -f 带路径模式(会匹配到自己的 bash -c 命令行),用 PID 精确 kill
