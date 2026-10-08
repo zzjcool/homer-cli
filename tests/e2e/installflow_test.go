@@ -120,12 +120,68 @@ func TestInstallScriptEnrollFlow(t *testing.T) {
 			if item["agentId"] == persisted.AgentID && item["drift"] != nil {
 				t.Logf("WS drift arrived for %s: %v", persisted.AgentID, item["drift"])
 				stopBackgroundPID(pid)
+				restartBurnedCodeAgent(t, binary, machineB, global, homerHome, hubURL, auth, hubProc, persisted.AgentID, code)
 				return
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("drift never arrived for %s after WS hello (agent log: %s)", persisted.AgentID, readAgentInstallLog(homerHome))
+}
+
+// restartBurnedCodeAgent is the regression guard for a real outage found in
+// review: install.sh leaves the one-time hr_ code in keys/hub-token and nothing
+// deletes it after redemption. A restart (systemd Restart=always, reboot, or
+// upgrade re-exec) used to present that burned code again; the hub answered
+// 401 and the agent stayed offline for good even though agent.json held a
+// valid secret. The restarted agent must come back using its own secret.
+func restartBurnedCodeAgent(t *testing.T, binary string, machine machine, global, homerHome, hubURL string, auth map[string]string, hubProc *exec.Cmd, agentID, code string) {
+	t.Helper()
+	tokenFile := filepath.Join(homerHome, "keys", "hub-token")
+	if got := strings.TrimSpace(string(mustReadFile(t, tokenFile))); got != code {
+		t.Fatalf("precondition: keys/hub-token should still hold the burned code, got %q", got)
+	}
+	// Wait until the hub sees the first agent as gone, so the next "online"
+	// observation can only come from the restarted process.
+	waitAgentStale(t, hubURL, auth, hubProc, agentID, true)
+	restarted := startE2EChild(t, binary, machine.fakeHome, homerHome, global, "agent", "--hub", hubURL, "--home", homerHome)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if !agentIsStale(t, hubURL, auth, hubProc, agentID) {
+			if strings.Contains(restarted.output.String(), "401") {
+				t.Fatalf("restarted agent logged a 401 yet came online: %s", restarted.output.String())
+			}
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("restarted agent never came back online (burned code in keys/hub-token must not shadow agent.json's secret); agent output: %s", restarted.output.String())
+}
+
+func agentIsStale(t *testing.T, hubURL string, auth map[string]string, hubProc *exec.Cmd, agentID string) bool {
+	t.Helper()
+	body := apiGet(t, hubURL+"/api/agents", auth, hubProc)
+	items, _ := jsonPath(t, body, "agents").([]any)
+	for _, item := range items {
+		entry := item.(map[string]any)
+		if entry["agentId"] == agentID {
+			stale, _ := entry["stale"].(bool)
+			return stale
+		}
+	}
+	return true
+}
+
+func waitAgentStale(t *testing.T, hubURL string, auth map[string]string, hubProc *exec.Cmd, agentID string, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if agentIsStale(t, hubURL, auth, hubProc, agentID) == want {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("agent %s never reached stale=%v", agentID, want)
 }
 
 var installPIDPattern = regexp.MustCompile(`(?m)PID:\s*([0-9]+)`)

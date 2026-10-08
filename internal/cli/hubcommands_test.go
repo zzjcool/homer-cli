@@ -195,3 +195,34 @@ func TestJoinCommandHidesTokenFromProcessList(t *testing.T) {
 		t.Fatalf("wildcard join = %q", wild)
 	}
 }
+
+// install.sh leaves the one-time enrollment code in keys/hub-token and nothing
+// removes it after redemption. A restart must therefore NOT present that
+// burned code when agent.json already holds the machine's own secret: the hub
+// answers 401 and the agent would stay offline forever (it was reproduced with
+// a real hub and a real restart on this exact setup).
+func TestResolveAgentCredentialBurnedCodeFileDoesNotShadowSecret(t *testing.T) {
+	cases := []struct {
+		name                      string
+		explicit, file, secret    string
+		wantToken, wantEnrollCode string
+	}{
+		{"fresh install: code in file, no secret yet", "", "hr_abc", "", "", "hr_abc"},
+		{"RESTART: burned code still in file, secret persisted", "", "hr_abc", "sec-1", "sec-1", ""},
+		{"explicit --token code wins even when a secret exists (re-enroll)", "hr_new", "hr_old", "sec-1", "", "hr_new"},
+		{"explicit hub token wins", "hubtok", "hr_abc", "sec-1", "hubtok", ""},
+		{"file hub token (not a code) is used as-is", "", "hubtok", "sec-1", "hubtok", ""},
+		{"only a persisted secret", "", "", "sec-1", "sec-1", ""},
+		{"nothing at all", "", "", "", "", ""},
+		{"whitespace around values is ignored", "  ", " hr_abc \n", " sec-1 ", "sec-1", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token, code := resolveAgentCredential(tc.explicit, tc.file, tc.secret)
+			if token != tc.wantToken || code != tc.wantEnrollCode {
+				t.Fatalf("resolveAgentCredential(%q,%q,%q) = (%q,%q), want (%q,%q)",
+					tc.explicit, tc.file, tc.secret, token, code, tc.wantToken, tc.wantEnrollCode)
+			}
+		})
+	}
+}

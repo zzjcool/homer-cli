@@ -162,37 +162,15 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 // runAgent runs the agent daemon. The agent dials the hub over a WebSocket
 // stream and listens on no port.
 func runAgent(options CommandOptions, out, errOut io.Writer) int {
-	token := hubTokenFromEnv(options.Token)
 	paths := ResolveHomerPaths(options.Home)
-	// Tailscale-style bootstrap: the install script lands the credential in
-	// keys/hub-token on the agent machine. An hr_-prefixed value is a
-	// one-time enrollment code (consumed at first registration for a
-	// per-agent secret); anything else is a legacy shared hub token.
-	// Priority stays flag > env > file.
-	enrollCode := ""
-	if strings.HasPrefix(token, "hr_") {
-		enrollCode, token = token, ""
-	}
-	if token == "" && enrollCode == "" {
-		if fileToken, ok := hub.ReadHubToken(paths.Home); ok {
-			if strings.HasPrefix(fileToken, "hr_") {
-				enrollCode = fileToken
-			} else {
-				token = fileToken
-			}
-		}
-	}
-	// A persisted per-agent secret (agent.json) supersedes shared tokens.
+	// A persisted per-agent secret (agent.json) is this machine's own
+	// credential once it has enrolled.
 	var persisted agentd.AgentConfig
 	if loaded, ok := agentd.LoadAgentConfig(paths.Home); ok {
 		persisted = loaded
 	}
-	if persisted.AgentSecret != "" {
-		// Already enrolled: keep using this machine's own secret.
-		if token == "" && enrollCode == "" {
-			token = persisted.AgentSecret
-		}
-	}
+	fileToken, _ := hub.ReadHubToken(paths.Home)
+	token, enrollCode := resolveAgentCredential(hubTokenFromEnv(options.Token), fileToken, persisted.AgentSecret)
 	config := agentd.Config{
 		Home:        paths.Home,
 		HomerHome:   options.Home,
@@ -235,6 +213,41 @@ func runAgent(options CommandOptions, out, errOut io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveAgentCredential picks the bearer token and the one-time enrollment
+// code for an agent start.
+//
+// Priority is explicit (--token / HOMER_HUB_TOKEN) > keys/hub-token file >
+// persisted agent.json secret. An hr_-prefixed value is a one-time enrollment
+// code; anything else is a hub token.
+//
+// install.sh leaves the enrollment code in keys/hub-token and nothing removes
+// it once it has been redeemed. So a code that comes only from that file is
+// ignored when agent.json already holds this machine's secret: presenting the
+// burned code on every restart would be rejected with 401 forever. An
+// explicit --token / HOMER_HUB_TOKEN code still wins, because it means the
+// operator wants to re-enroll.
+func resolveAgentCredential(explicit, fileToken, persistedSecret string) (token, enrollCode string) {
+	explicit = strings.TrimSpace(explicit)
+	fileToken = strings.TrimSpace(fileToken)
+	persistedSecret = strings.TrimSpace(persistedSecret)
+	if explicit != "" {
+		if strings.HasPrefix(explicit, "hr_") {
+			return "", explicit
+		}
+		return explicit, ""
+	}
+	if fileToken != "" {
+		if strings.HasPrefix(fileToken, "hr_") {
+			if persistedSecret != "" {
+				return persistedSecret, ""
+			}
+			return "", fileToken
+		}
+		return fileToken, ""
+	}
+	return persistedSecret, ""
 }
 
 func firstNonEmpty(values ...string) string {
