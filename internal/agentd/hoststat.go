@@ -21,7 +21,7 @@ type cpuTimes struct {
 }
 
 // hostCollector keeps the previous CPU sample so utilization is a delta
-// across heartbeats instead of a blocking sample on every poll.
+// across heartbeats instead of taking a blocking sample for each one.
 type hostCollector struct {
 	mu   sync.Mutex
 	prev cpuTimes

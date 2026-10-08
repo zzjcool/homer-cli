@@ -7,7 +7,7 @@ import (
 )
 
 // HostSnapshot is the machine resource report an agent uploads with
-// registration and each poll. The console renders it on the machine card.
+// hello and heartbeats. The console renders it on the machine card.
 // Every field is best-effort: a platform that cannot read one source omits it.
 type HostSnapshot struct {
 	OS        string      `json:"os,omitempty"`

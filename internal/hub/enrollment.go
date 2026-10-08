@@ -99,7 +99,7 @@ func (m *EnrollmentManager) ValidCode(code string) bool {
 // Redeem consumes a one-time enrollment code and returns a fresh
 // per-agent secret. The code is burned regardless of what the caller does
 // with the secret; the caller binds the secret to an agentID via
-// BindAgent (the hub learns the agentID at registration time).
+// BindAgent (the hub learns the agentID during hello).
 func (m *EnrollmentManager) Redeem(code string) (string, error) {
 	m.mu.Lock()
 	entry, ok := m.codes[code]
@@ -121,7 +121,7 @@ func (m *EnrollmentManager) Redeem(code string) (string, error) {
 }
 
 // BindAgent records (or replaces — re-install scenario) the secret hash
-// for an agentID. Binding at registration time is what ties a redeemed
+// for an agentID. Binding during hello is what ties a redeemed
 // secret to a concrete machine.
 func (m *EnrollmentManager) BindAgent(agentID, secret string) {
 	if agentID == "" || secret == "" {

@@ -225,8 +225,8 @@ func TestDispatcherRequiresOnlineForEveryCall(t *testing.T) {
 			}
 		})
 	}
-	if _, err := dispatcher.AgentStatus(context.Background(), "missing"); !hasAgentCode(err, "agent-not-found", http.StatusNotFound) {
-		t.Fatalf("unknown agent error = %v", err)
+	if _, err := dispatcher.AgentStatus(context.Background(), "missing"); !hasAgentCode(err, "agent-not-found", http.StatusNotFound) || !strings.Contains(err.Error(), "未注册") {
+		t.Fatalf("unknown agent error = %v, want Chinese not-registered message", err)
 	}
 }
 

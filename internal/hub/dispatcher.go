@@ -312,11 +312,11 @@ func (d *Dispatcher) requireOnline(agentID string) (AgentInfo, *stream.Session, 
 
 func (d *Dispatcher) agentInfo(agentID string) (AgentInfo, error) {
 	if d == nil || d.Registry == nil {
-		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("agent %q is not registered", agentID))
+		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("机器 %q 未注册", agentID))
 	}
 	info, ok := d.Registry.Get(agentID)
 	if !ok {
-		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("agent %q is not registered", agentID))
+		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("机器 %q 未注册", agentID))
 	}
 	return info, nil
 }

@@ -254,7 +254,7 @@ func (l stderrLogger) Printf(format string, args ...any) {
 	writeLine(l.out, fmt.Sprintf(format, args...))
 }
 
-// agentPortSuffix formats the connect hint so users on another machine can
+// agentPortSuffix formats the hub address hint so users on another machine can
 // copy-paste the agent bootstrap command.
 func agentPortSuffix(boundAddr string) string {
 	if _, port, err := net.SplitHostPort(boundAddr); err == nil {

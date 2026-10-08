@@ -167,7 +167,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAgents(w, r)
 	case path == "/api/agents/revoke":
 		// Tailscale-style machine revocation: drops the per-agent secret.
-		// The machine's next poll 401s immediately; siblings unaffected.
+		// The live WebSocket is kicked immediately; siblings are unaffected.
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w)
 			return
@@ -831,7 +831,7 @@ func (s *Server) serveSelfBinary(w http.ResponseWriter, r *http.Request, compres
 }
 
 // handleAgentRevoke drops a machine's per-agent enrollment secret. The
-// revoked machine 401s on its next poll; other machines are unaffected.
+// revoked machine's live WebSocket is closed immediately; others are unaffected.
 // The agentID stays eligible for a fresh enrollment (re-install scenario).
 func (s *Server) handleAgentRevoke(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Enrollment == nil {
@@ -858,9 +858,8 @@ func (s *Server) handleAgentRevoke(w http.ResponseWriter, r *http.Request) {
 
 // handleAgentRemove drops a machine from the list entirely: credential
 // revocation (when the enrollment service is wired) plus registry removal.
-// The removed machine disappears from the console; if it still runs the
-// agent daemon it re-registers on its next poll recovery — re-appearing
-// only when its credential remains valid, which revocation prevents.
+// The removed machine disappears from the console; if its agent daemon is
+// still running, a later reconnect can restore it only with a valid credential.
 func (s *Server) handleAgentRemove(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		AgentID string `json:"agentId"`
@@ -880,7 +879,7 @@ func (s *Server) handleAgentRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	// Kill the credential first (no-op for never-enrolled machines), then
 	// drop the row. Order matters: remove-then-revoke would leave a window
-	// where the daemon re-registers before its credential dies.
+	// where the daemon reconnects before its credential is invalidated.
 	if s.opts.Enrollment != nil {
 		s.opts.Enrollment.Revoke(agentID)
 	}
