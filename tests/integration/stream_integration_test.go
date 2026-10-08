@@ -787,18 +787,20 @@ func TestCancelTask(t *testing.T) {
 	}
 }
 
-// TestCancelTaskHTTPContext is a regression probe for the caller-facing
-// net/http cancellation path. Dispatcher cancellation is covered by
-// TestCancelTask; if net/http does not propagate a disconnected HTTP/1 caller's
-// cancellation while a handler is waiting, keep this probe skipped and report
-// the product defect rather than hiding it in the dispatcher test.
+// TestCancelTaskHTTPContext checks the caller-facing cancellation path end to
+// end: a console request that disconnects must cancel the task on the agent.
+// Dispatcher-level cancellation is covered by TestCancelTask.
 func TestCancelTaskHTTPContext(t *testing.T) {
 	world := newHomerWorld(t)
 	eventLog := filepath.Join(world.root, "cancel-http-events.jsonl")
 	agent := startHelperAgent(t, world.root, world.global, filepath.Join(world.root, "cancel-http-agent"), world.url,
 		"cancel-http-agent", world.token, fakeExecutorConfig{BlockDiff: true, EventLog: eventLog}, 0, 0, 0, 0)
 	waitAgent(t, world, "cancel-http-agent", true, 10*time.Second)
-	request, err := startAsyncRequest(world, http.MethodPost, "/api/agents/cancel-http-agent/diff?adapter=pi", []byte("{}"), 15*time.Second)
+	// The console sends this POST with no body. A request that carries a body
+	// the handler never reads does not get its context canceled when the
+	// client disconnects (net/http server behavior, verified separately), so
+	// the probe must use the same bodiless shape as the real caller.
+	request, err := startAsyncRequest(world, http.MethodPost, "/api/agents/cancel-http-agent/diff?adapter=pi", nil, 15*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -818,7 +820,7 @@ func TestCancelTaskHTTPContext(t *testing.T) {
 	}
 	if !hasFileEvent(eventLog, "diff", "canceled") {
 		events, _ := os.ReadFile(eventLog)
-		t.Skipf("known defect I12 HTTP path: HTTP caller returned context-canceled, but the agent executor did not receive ctx cancellation within 1s; events=%s; see P6a_REPORT.md", events)
+		t.Fatalf("HTTP caller returned context-canceled, but the agent executor did not receive ctx cancellation within 1s; events=%s", events)
 	}
 	_ = agent
 }

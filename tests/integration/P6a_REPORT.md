@@ -15,8 +15,8 @@
 - Benchmark package also contains only `BenchmarkFourParallel`; `dialog_bench.sh` prints nearest-rank P50/P95.
 - Stability was run separately per requested case; all pass rates are 100%: I2 `TestReconnectAfterCut` 10/10, I5 `TestInflightDisconnectFailsFast` 10/10, I6 `TestSameAgentIDSupersede` 10/10, I11 `TestFiftyConcurrentTasks` 10/10, I19 `TestGracefulShutdownClose` 10/10.
 - R8: the hub consumes the single-use code when it accepts hello, before a delayed/lost welcome can deliver the secret. The old code is rejected; a fresh code plus a successful handshake persists an agent secret and a subsequent secret-authenticated restart succeeds.
-- **Known defects / defect report:** I12 HTTP cancellation propagation is incomplete. Repro: start a real agent with an executor blocked on its task `ctx`; POST `/api/agents/<id>/diff`, wait for the executor start event, then cancel/disconnect the HTTP client. The caller returns `context canceled` immediately, but the agent executor does not observe `ctx.Done()` within 1s. The in-process `Dispatcher.AgentDiff(ctx, ...)` path passes: it returns `agent-timeout` promptly and the executor observes cancellation. Suggested repair location: `internal/web/handlers.go` / `handleAgentDiff` plus dispatcher cancellation/error mapping; ensure HTTP disconnect/cancel cancels the request context all the way through `Dispatcher.call` to `Session.Call` and the stream cancel frame. Minimal reproducer: `TestCancelTaskHTTPContext`. This I12 defect is the only known behavior caveat.
-- **t.Skip tests:** `TestCancelTaskHTTPContext` skips only after reproducing the I12 HTTP-to-agent cancellation propagation defect (observed skip message includes the executor event log); `TestUpgradeReexecReconnect` skips only when `runtime.GOOS != linux` because `reexecAgent` is a Linux `syscall.Exec` implementation. Linux acceptance executed reexec successfully. Both skip reasons are printed by the tests.
+- **Known defects:** none. (Originally reported as I12, "HTTP cancellation not propagated". Re-investigated by the orchestrator: it was a test-shape artifact, not a product defect. Go's net/http server does not cancel `r.Context()` when a client disconnects while the handler never reads a request body that was sent. The real console sends this POST with no body. With a bodiless request the agent receives the cancel in ~0.1s, 15/15 under `-race`. `TestCancelTaskHTTPContext` now sends a bodiless request and fails hard instead of skipping.)
+- **t.Skip tests:** `TestUpgradeReexecReconnect` skips only when `runtime.GOOS != linux` because `reexecAgent` is a Linux `syscall.Exec` implementation. Linux acceptance executed reexec successfully. Both skip reasons are printed by the tests.
 - **Interface change requests:** none; no interfaces changed.
 
 ## Verification output
@@ -73,7 +73,7 @@ https://github.com/zzjcool/homer-cli/pull/14 (branch `ws/p6a-integration`, base 
 
 ## Open issues
 
-- I12 HTTP cancellation propagation defect listed above remains open; no other defects were observed. The plan's interface/signatures were not changed.
+- No open defects. The plan's interface/signatures were not changed.
 - Post-suite diagnostic output for `TestCancelTaskHTTPContext`:
 
 ```text
