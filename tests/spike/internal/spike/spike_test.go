@@ -40,7 +40,7 @@ func TestEchoUpgradeEchoCloseAndNDJSON(t *testing.T) {
 	}
 }
 
-func TestNoHijackerIsExplicitHTTP500(t *testing.T) {
+func TestNoHijackerIsExplicitUpgradeRejection(t *testing.T) {
 	addr := freeAddr(t)
 	ctx, cancel, done := startEcho(t, EchoConfig{Addr: addr})
 	defer stopService(t, cancel, done)
