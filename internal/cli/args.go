@@ -374,6 +374,16 @@ func parseOptions(command Command, args []string, allowPositionals bool) (Comman
 		case "--show-join":
 			options.ShowJoin = true
 		default:
+			if command == CommandAgent {
+				switch name {
+				case "--connect":
+					return options, usageArgumentError("--connect 已移除，请改用 --hub <url>")
+				case "--listen":
+					return options, usageArgumentError("--listen 已移除；listen 模式已移除，agent 现在只主动连 hub")
+				case "--advertise":
+					return options, usageArgumentError("--advertise 已移除；listen 模式已移除，agent 现在只主动连 hub")
+				}
+			}
 			return options, usageArgumentError(fmt.Sprintf("未知选项: %s", arg))
 		}
 	}
