@@ -74,14 +74,14 @@ systemctl --user stop homer-agent.service  # 用户级 unit
 # 若为系统级 unit，则改用：systemctl stop homer-agent.service
 ```
 
-编辑 `homer-agent.service` 的 `ExecStart`，把旧命令中的 `--connect=<url>` 改为
-`--hub <url>`，例如：
+编辑 `homer-agent.service` 的 `ExecStart`，把旧命令中的 `--connect <url>`（也可能写成
+`--connect=<url>`）改为 `--hub <url>`，例如：
 
 ```ini
 # 旧版本
-ExecStart=/path/to/homer agent --connect=https://<hub> --id hw-7735
+ExecStart=/path/to/homer agent --connect https://<hub>
 # 新版本
-ExecStart=/path/to/homer agent --hub https://<hub> --id hw-7735
+ExecStart=/path/to/homer agent --hub https://<hub>
 ```
 
 `agent.json` 中已有的 `agentSecret` 继续有效；旧的 `connectUrl` 字段会被忽略，
