@@ -12,7 +12,7 @@
 |---|---|---|---|
 | P0 CF WS spike | worker-5(worker-0 因计划验收命令错误停止) | 主 checkout tests/spike | ✅ 已合并 c52f6f1(tag ws/g0-passed):G0 通过 |
 | P4a shellenv 缓存 | worker-3(worker-1 因旧测试冲突停止) | ws/p4a-shellenv | ✅ 已合并 2ef7ba9(tag ws/p4a-merged),build/vet/race 通过 |
-| P1 stream 库 | worker-6(worker-2/4 因计划错误停止) | ws/p1-stream-v3 | F1 已合并 master(tag ws/f1-merged=73769a1);补齐阶段进行中 |
+| P1 stream 库 | worker-6(worker-2/4 因计划错误停止) | ws/p1-stream-v3 | ✅ 完整实现已合并 0a07931(tag ws/p1-merged);orchestrator 独立复验 build/vet/-race/count=30 全过 |
 | P2 hub | worker-7 | ws/p2-hub | 进行中 |
 | P3 agent | worker-8 | ws/p3-agent | 进行中 |
 | P4c web+UI | worker-9 | ws/p4c-web | 进行中 |
@@ -40,3 +40,4 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
 - 注意:P3 分支基于旧 hub 代码,P2 删除旧符号后需 I1 集成统一修复
 - P0 完成,G0 通过。V3:CF 空闲约124s断;R13:经CF的NDJSON被缓冲(推翻增量渲染假设),已写入计划;性能验收只看整包 P95<2s
 - 已关闭 worker 误开的 PR #4 #5 #6
+- P1 合并 0a07931(tag ws/p1-merged)。TestHalfOpenDetectedByPing 属 P6a,不在 P1。P2/P3/P4c 的分支基于 F1 骨架(73769a1),合并时会有 stream 库后续补齐的差异,I1 统一处理
