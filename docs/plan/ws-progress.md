@@ -62,3 +62,9 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
   - reviewer-2:6 项必须改——两套 singleflight 重复且 runStatusFlight 无 recover;零调用的 ListenAndServe/clearEnrollCode/requiresAdvertiseHint/Dispatcher.Token/三个无发送方的 agent.* 事件;agent 侧缺「已连接」日志;poll/register/connect 措辞残留;**WS close reason 125 字节上限**(orchestrator 已实测复现:142 字节中文 reason 使对端收到 EOF 而不是 4401);接入层仍绑死 wsconn(加 gRPC 要改 5 个文件,建议后续加 Dialer/serveConn,本轮不做)
   - reviewer-1:约 45 处手动变异中约 12 处存活——R5 写后失效(writeGen/forgetDrift)、关闭码数值 4000/4001/4403、心跳线上码与默认 25s/75s、Run 级退避/重置/重试日志、dispatcher 排队后二次 requireOnline、U10 CAS 退化、I14 重连 hello;TestDispatcherCallConcurrencyLimit 压力下约 2% 不稳定;I15 死断言
   - 已派:批次 A(worker-15, ws/fix-a-cleanup:清理+close reason 截断+日志+迁移提示)、批次 B(worker-14, ws/fix-b-tests:补测试+变异自证);等 reviewer-0 回来决定是否追加批次 C
+- reviewer-0(正确性)回报:**R1 🔴 不可合并**——install.sh 接入的 agent 重启/重启机器/upgrade reexec 后永久 401(keys/hub-token 里已烧的 hr_ 码覆盖 agent.json 的 secret)。**orchestrator 用真 hub+真 agent 独立复现**(首次接入成功→同 home 重启→401→agent stale);旧代码有 fall-through 兜底,新代码丢了。hw 迁移 runbook 正好会踩中。
+  - **已修(9721c3f,tag ws/fix-r1)**:抽出 resolveAgentCredential——仅来自文件的 hr_ 码在已有 persisted secret 时忽略;显式 --token/HOMER_HUB_TOKEN 的码仍优先(重新接入)。回归:CLI 表驱动测试(变异会红)+ 守门员 TestInstallScriptEnrollFlow 补「重启」断言(变异后红:restarted agent never came back online)。真进程复验 3 场景(首接/重启/显式新码重接)均 stale=False
+  - Y1 🟡 **已独立复现**:Session 自己发起的 Close(code) 在真实 WS 上对端只收到 EOF(terminate 先 cancel 读 ctx 再关 conn,coder/websocket 取消 Read 即掐断传输;hub 的 Kick/Shutdown/顶替走 touchConn 绕过所以 4001/4401/1001 OK)。影响 1008 slow-consumer 与 agent 自己的 hello 失败关闭码
+  - Y2 🟡 **已独立复现**:evt 每条一个 goroutine,2000 条事件 612 次逆序;agent 在写完/扫描完/工具探测完各自补发 hb,hub 可能先应用新 drift 再应用旧的;且无并发上限
+  - 其余 Y3 reexec 无超时 / Y4 写锁楔住无日志 / Y5 空 hub 409 时 inspect 双扫描 / Y6 ETag 撞号,待合并 A/B 后统一排批次 C
+  - 等 A(worker-15)/B(worker-14) 回来,合并后在其基础上做批次 C(Y1 Y2 Y3 Y4 Y5 Y6),避免与 A 的 session.go/client.go/agenthub.go 改动冲突
