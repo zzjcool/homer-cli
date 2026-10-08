@@ -33,9 +33,10 @@ type localExecutor struct {
 	homerHome string
 	// No-git data plane transport: when hubURL is set, push uploads and
 	// pull download through the hub's /api/snapshot endpoints.
-	hubURL     string
-	credential string
-	hubHTTP    *http.Client
+	hubURL        string
+	credential    string
+	hubHTTP       *http.Client
+	snapshotCache snapshotCache
 }
 
 // NewLocalExecutor returns the production task executor. The commands package
@@ -316,30 +317,107 @@ type hubSnapshotPayload struct {
 // downloadHubSnapshot fetches the hub's current generation and converts it
 // into the adapter-snapshot form the pull pipeline consumes.
 func (e *localExecutor) downloadHubSnapshot(ctx context.Context) ([]core.AdapterSnapshot, []byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(e.hubURL, "/")+"/api/snapshot", nil)
-	if err != nil {
-		return nil, nil, err
+	if e == nil {
+		return nil, nil, errors.New("nil executor")
 	}
-	if e.credential != "" {
-		request.Header.Set("Authorization", "Bearer "+e.credential)
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	response, err := e.hubClient().Do(request)
-	if err != nil {
-		return nil, nil, err
+	flight, leader := e.snapshotCache.beginDownload()
+	if !leader {
+		select {
+		case <-flight.done:
+			return cloneAdapterSnapshots(flight.snapshots), append([]byte(nil), flight.meta...), flight.err
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
 	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusConflict {
-		return nil, nil, errNoHubSnapshot
+	snapshots, meta, err := e.downloadHubSnapshotUnshared(ctx)
+	e.snapshotCache.finishDownload(flight, snapshots, meta, err)
+	return cloneAdapterSnapshots(snapshots), append([]byte(nil), meta...), err
+}
+
+func (e *localExecutor) downloadHubSnapshotUnshared(ctx context.Context) ([]core.AdapterSnapshot, []byte, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(e.hubURL), "/")
+	if baseURL == "" {
+		return nil, nil, errors.New("hub data URL is empty")
 	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, nil, fmt.Errorf("hub snapshot: %s %s", response.Status, strings.TrimSpace(string(body)))
+
+	// A 304 is only useful while the decoded generation it names is still in
+	// memory. If an upload invalidates that entry while this request is in
+	// flight, retry once without a validator instead of returning stale data.
+	for attempt := 0; attempt < 2; attempt++ {
+		etag, cacheEpoch, cached := e.snapshotCache.requestState()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/snapshot", nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		if e.credential != "" {
+			request.Header.Set("Authorization", "Bearer "+e.credential)
+		}
+		if cached {
+			request.Header.Set("If-None-Match", etag)
+		}
+		response, err := e.hubClient().Do(request)
+		if err != nil {
+			return nil, nil, err
+		}
+		if response.StatusCode == http.StatusNotModified {
+			responseETag := response.Header.Get("ETag")
+			_ = response.Body.Close()
+			if responseETag != "" && responseETag != etag {
+				e.snapshotCache.invalidateIf(etag, cacheEpoch)
+				if attempt == 0 {
+					continue
+				}
+				return nil, nil, fmt.Errorf("hub snapshot: 304 etag %q does not match requested generation %q", responseETag, etag)
+			}
+			if snapshots, meta, ok := e.snapshotCache.get(etag, cacheEpoch); ok {
+				return snapshots, meta, nil
+			}
+			if attempt == 0 {
+				continue
+			}
+			return nil, nil, errors.New("hub snapshot: received 304 without a cached generation")
+		}
+		if response.StatusCode == http.StatusConflict {
+			_ = response.Body.Close()
+			if cached {
+				e.snapshotCache.invalidateIf(etag, cacheEpoch)
+			}
+			return nil, nil, errNoHubSnapshot
+		}
+		if response.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+			_ = response.Body.Close()
+			return nil, nil, fmt.Errorf("hub snapshot: %s %s", response.Status, strings.TrimSpace(string(body)))
+		}
+		var payload hubSnapshotPayload
+		decodeErr := json.NewDecoder(response.Body).Decode(&payload)
+		_ = response.Body.Close()
+		if decodeErr != nil {
+			return nil, nil, decodeErr
+		}
+		snapshots := snapshotsFromWire(payload.Store)
+		meta := []byte(payload.HomerJSON)
+		responseETag := response.Header.Get("ETag")
+		storedEpoch := e.snapshotCache.store(cacheEpoch, responseETag, snapshots, meta)
+		if responseETag == "" {
+			// ETag support is part of the hub contract, but an intermediary or
+			// older hub may omit it. The body is still usable; simply do not cache.
+			return cloneAdapterSnapshots(snapshots), append([]byte(nil), meta...), nil
+		}
+		if cachedSnapshots, cachedMeta, ok := e.snapshotCache.get(responseETag, storedEpoch); ok {
+			return cachedSnapshots, cachedMeta, nil
+		}
+		// The response lost a race to an invalidation or a newer generation.
+		// Retry once without the stale response's validator.
+		if attempt == 0 {
+			continue
+		}
+		return nil, nil, errors.New("hub snapshot: generation changed during consecutive downloads")
 	}
-	var payload hubSnapshotPayload
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		return nil, nil, err
-	}
-	return snapshotsFromWire(payload.Store), []byte(payload.HomerJSON), nil
+	return nil, nil, errors.New("hub snapshot: conditional request retry exhausted")
 }
 
 // bootstrapFromGeneration seeds an uninitialized workspace from the hub's
@@ -442,6 +520,11 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 		request.Header.Set("Authorization", "Bearer "+e.credential)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	// Invalidate before and after sending: a concurrent GET started after the
+	// first invalidation must not repopulate the pre-upload generation while
+	// this POST is still in flight.
+	e.snapshotCache.invalidate()
+	defer e.snapshotCache.invalidate()
 	response, err := e.hubClient().Do(request)
 	if err != nil {
 		return 0, err
@@ -500,51 +583,4 @@ func (e *localExecutor) hubClient() *http.Client {
 		return e.hubHTTP
 	}
 	return &http.Client{Timeout: 120 * time.Second}
-}
-
-// agentSyncDeps adapts the executor's hub transport into the web server's
-// SyncDepsSource: the listen agent's own /api/pull and /api/push (invoked
-// by the hub's dispatcher over direct HTTP) run through the same no-git
-// transport as task execution.
-type agentSyncDeps struct {
-	executor *localExecutor
-}
-
-func (d agentSyncDeps) PullDeps() *commands.PullDeps {
-	deps := &commands.PullDeps{NoFetch: true}
-	if d.executor.hubURL != "" {
-		// Download eagerly: the deps are consumed within one request.
-		snapshot, meta, err := d.executor.downloadHubSnapshot(context.Background())
-		if err == nil {
-			if bootstrapErr := d.executor.bootstrapFromGeneration(snapshot, meta); bootstrapErr == nil {
-				deps.HubSnapshot = snapshot
-			}
-		}
-	}
-	return deps
-}
-
-func (d agentSyncDeps) PushDeps(adapters []string) *commands.PushDeps {
-	deps := &commands.PushDeps{}
-	if d.executor.hubURL != "" {
-		if adapters != nil {
-			snapshot, _, err := d.executor.downloadHubSnapshot(context.Background())
-			switch {
-			case errors.Is(err, errNoHubSnapshot):
-				deps.HubSnapshot = []core.AdapterSnapshot{}
-			case err != nil:
-				deps.HubErr = err
-			default:
-				deps.HubSnapshot = snapshot
-			}
-		}
-		captured := adapters
-		deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
-			if deps.HubErr != nil {
-				return 0, deps.HubErr
-			}
-			return d.executor.uploadHubSnapshot(context.Background(), snapshot, captured)
-		}
-	}
-	return deps
 }
