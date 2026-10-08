@@ -17,10 +17,10 @@ import (
 )
 
 // TestAgentHubTopology verifies the P2/P3 flow end to end on one host with
-// three homer processes: a hub (serve), a listen-mode agent A, and a
-// connect-mode agent B. It walks plan §5 steps 2-4: both agents register,
-// remote status collection works over both transports, and a remote push
-// round-trips config from A through the git origin to B.
+// three homer processes: a hub (serve) and two agents that both establish
+// outbound WebSocket sessions. It walks plan §5 steps 2-4: both agents
+// register, remote status works for each, and push round-trips config from A
+// through the git origin to B.
 func TestAgentHubTopology(t *testing.T) {
 	root := t.TempDir()
 	global := filepath.Join(root, "gitconfig")
@@ -52,26 +52,20 @@ func TestAgentHubTopology(t *testing.T) {
 		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", machineA.homerHome)
 	defer stopProc(t, hubProc)
 
-	// Agent A: listen mode, reachable at its own port.
-	listenPort := freePort(t)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
+	// Both agents dial the hub; agents never expose an inbound listener.
 	agentA := startHomer(t, binary, machineA, global,
-		"agent", "--listen", fmt.Sprintf("127.0.0.1:%d", listenPort),
-		"--advertise", fmt.Sprintf("http://127.0.0.1:%d", listenPort),
-		"--hub", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", hubURL,
 		"--token", token, "--id", "agent-a", "--home", machineA.homerHome)
 	defer stopProc(t, agentA)
-
-	// Agent B: connect mode (dials out; the NAT shape).
 	agentB := startHomer(t, binary, machineB, global,
-		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", hubURL,
 		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
 	defer stopProc(t, agentB)
 
-	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 	auth := map[string]string{"Authorization": "Bearer " + token}
 
-	// Both agents must appear in the registry (listen registered explicitly,
-	// connect registered on startup).
+	// Both agents must appear in the registry after their stream hello.
 	deadline := time.Now().Add(30 * time.Second)
 	ids := map[string]bool{}
 	for time.Now().Before(deadline) && !(ids["agent-a"] && ids["agent-b"]) {
@@ -86,13 +80,12 @@ func TestAgentHubTopology(t *testing.T) {
 		t.Fatalf("registered agents = %v; hub output: %s", ids, procOutput[hubProc])
 	}
 
-	// Remote status over the listen (direct) transport.
+	// Both stream-connected agents support the same remote status call.
 	body := apiPost(t, hubURL+"/api/agents/agent-a/status", auth)
 	if report, ok := jsonPath(t, body, "report").(map[string]any); !ok || len(report["adapters"].([]any)) == 0 {
 		t.Fatalf("agent-a status report = %v", body)
 	}
 
-	// Remote status over the connect (queued) transport.
 	body = apiPost(t, hubURL+"/api/agents/agent-b/status", auth)
 	if report, ok := jsonPath(t, body, "report").(map[string]any); !ok || len(report["adapters"].([]any)) == 0 {
 		t.Fatalf("agent-b status report = %v", body)
@@ -285,10 +278,10 @@ func TestAgentZeroArgRestart(t *testing.T) {
 	token := strings.TrimSpace(string(tokenBytes))
 	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 
-	// First start: the verbatim join-command shape (env token, --connect).
+	// First start: the verbatim join-command shape (env token, --hub).
 	first := startHomerWithEnv(t, binary, machine, global,
 		[]string{"HOMER_HUB_TOKEN=" + token},
-		"agent", "--connect", hubURL, "--id", "restart-agent", "--home", machine.homerHome)
+		"agent", "--hub", hubURL, "--id", "restart-agent", "--home", machine.homerHome)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if agentRegistered(t, hubURL, token, "restart-agent") {
@@ -378,11 +371,10 @@ func startHomerWithEnv(t *testing.T, binary string, m machine, global string, ex
 	return command
 }
 
-// TestInstallScriptBootstrap walks the Tailscale-style onboarding: fetch
+// TestInstallScriptBootstrap walks the shared-token bootstrap: fetch
 // /install.sh from the hub (public), verify the token is NOT embedded,
-// then simulate the script's effect (token → keys/hub-token on a fresh
-// machine) and run a zero-flag agent that must register via the token-file
-// fallback.
+// then simulate the script's token-file setup on a fresh machine and run
+// agent --hub, which must register through the outbound Stream.
 func TestInstallScriptBootstrap(t *testing.T) {
 	root := t.TempDir()
 	global := filepath.Join(root, "gitconfig")
@@ -417,7 +409,7 @@ func TestInstallScriptBootstrap(t *testing.T) {
 	if strings.Contains(string(script), "install-e2e-token") {
 		t.Fatal("install.sh must not embed the hub token")
 	}
-	for _, marker := range []string{hubURL, "keys/hub-token", "homer agent --connect", "/dl/homer"} {
+	for _, marker := range []string{hubURL, "keys/hub-token", "homer agent --hub", "/dl/homer"} {
 		if !strings.Contains(string(script), marker) {
 			t.Fatalf("install.sh missing %q", marker)
 		}
@@ -451,7 +443,7 @@ func TestInstallScriptBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentProc := startHomerWithEnv(t, binary, agentMachine, global, nil,
-		"agent", "--connect", hubURL, "--id", "install-script-agent", "--home", agentMachine.homerHome)
+		"agent", "--hub", hubURL, "--id", "install-script-agent", "--home", agentMachine.homerHome)
 	defer stopProc(t, agentProc)
 
 	deadline := time.Now().Add(20 * time.Second)
@@ -513,7 +505,7 @@ func TestEnrollmentE2E(t *testing.T) {
 	code := strings.TrimSpace(strings.SplitN(joinPayload.Command[codeStart+len("--token "):], " ", 2)[0])
 
 	// 2. A fresh machine enrolls via the token-file bootstrap (install.sh
-	// writes keys/hub-token with the code; agent detects the hr_ prefix).
+	// writes keys/hub-token with the code; agent exchanges it during WS hello).
 	agentMachine := makeMachine(t, root, "E", global, false)
 	tokenDir := filepath.Join(agentMachine.homerHome, "keys")
 	if err := os.MkdirAll(tokenDir, 0o700); err != nil {
@@ -523,7 +515,7 @@ func TestEnrollmentE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentProc := startHomerWithEnv(t, binary, agentMachine, global, nil,
-		"agent", "--connect", hubURL, "--id", "enroll-e2e-agent", "--home", agentMachine.homerHome)
+		"agent", "--hub", hubURL, "--id", "enroll-e2e-agent", "--home", agentMachine.homerHome)
 	defer stopProc(t, agentProc)
 
 	deadline := time.Now().Add(20 * time.Second)
@@ -559,15 +551,15 @@ func TestEnrollmentE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondProc := startHomerWithEnv(t, binary, secondMachine, global, nil,
-		"agent", "--connect", hubURL, "--id", "replay-agent", "--home", secondMachine.homerHome)
+		"agent", "--hub", hubURL, "--id", "replay-agent", "--home", secondMachine.homerHome)
 	defer stopProc(t, secondProc)
 	time.Sleep(3 * time.Second) // enough for a registration attempt + retry cycle
 	if agentRegistered(t, hubURL, "mgmt-token", "replay-agent") {
 		t.Fatal("burned enrollment code was replayed successfully")
 	}
 
-	// 5. Revocation: the enrolled machine drops, others (management token)
-	// keep working, and the same agentID may re-enroll later.
+	// 5. Revocation: the enrolled machine's Stream is kicked and its old
+	// secret fails future hellos, while the management token still works.
 	revokeReq, _ := http.NewRequest(http.MethodPost, hubURL+"/api/agents/revoke", strings.NewReader(`{"agentId":"enroll-e2e-agent"}`))
 	revokeReq.Header.Set("Authorization", "Bearer mgmt-token")
 	revokeReq.Header.Set("Content-Type", "application/json")
@@ -603,19 +595,16 @@ func TestManualSyncFanout(t *testing.T) {
 		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", machineA.homerHome)
 	defer stopProc(t, hubProc)
 
-	listenPort := freePort(t)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 	agentA := startHomer(t, binary, machineA, global,
-		"agent", "--listen", fmt.Sprintf("127.0.0.1:%d", listenPort),
-		"--advertise", fmt.Sprintf("http://127.0.0.1:%d", listenPort),
-		"--hub", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", hubURL,
 		"--token", token, "--id", "agent-a", "--home", machineA.homerHome)
 	defer stopProc(t, agentA)
 	agentB := startHomer(t, binary, machineB, global,
-		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", hubURL,
 		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
 	defer stopProc(t, agentB)
 
-	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 	auth := map[string]string{"Authorization": "Bearer " + token}
 
 	// Wait for both machines to appear in the registry.
@@ -692,19 +681,16 @@ func TestOfflineConflictKeepsLocal(t *testing.T) {
 		"serve", "--addr", fmt.Sprintf("127.0.0.1:%d", hubPort), "--token", token, "--home", machineA.homerHome)
 	defer stopProc(t, hubProc)
 
-	listenPort := freePort(t)
+	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 	agentA := startHomer(t, binary, machineA, global,
-		"agent", "--listen", fmt.Sprintf("127.0.0.1:%d", listenPort),
-		"--advertise", fmt.Sprintf("http://127.0.0.1:%d", listenPort),
-		"--hub", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", hubURL,
 		"--token", token, "--id", "agent-a", "--home", machineA.homerHome)
 	defer stopProc(t, agentA)
 	agentB := startHomer(t, binary, machineB, global,
-		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", hubURL,
 		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
 	defer stopProc(t, agentB)
 
-	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 	auth := map[string]string{"Authorization": "Bearer " + token}
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -737,7 +723,7 @@ func TestOfflineConflictKeepsLocal(t *testing.T) {
 	stopProc(t, agentB)
 	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"fromA\": true\n}\n")
 	sync = apiPost(t, hubURL+"/api/sync?direction=to-others&confirm=true", auth)
-	// The publish must succeed. A just-stopped connect agent may still
+	// The publish must succeed. A just-stopped agent may still
 	// hold a half-open TCP session, so its fan-out entry can time out —
 	// "partial" (with agent-a applied) is an accepted outcome; only the
 	// "synced" status means nobody lagged.
@@ -755,7 +741,7 @@ func TestOfflineConflictKeepsLocal(t *testing.T) {
 
 	// B comes back online.
 	agentB = startHomer(t, binary, machineB, global,
-		"agent", "--connect", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
+		"agent", "--hub", fmt.Sprintf("http://127.0.0.1:%d", hubPort),
 		"--token", token, "--id", "agent-b", "--home", machineB.homerHome)
 	defer stopProc(t, agentB)
 	deadline = time.Now().Add(30 * time.Second)
@@ -787,9 +773,9 @@ func TestOfflineConflictKeepsLocal(t *testing.T) {
 
 // TestPureServerFourStepStory pins the user's architecture: the server is
 // ONLY a server — it holds the storage and no machine of its own.
-//  1. connect machine A (enrollment)
+//  1. join machine A over its outbound Stream
 //  2. collect A's config into the server's storage
-//  3. connect machine B (enrollment)
+//  3. join machine B over its outbound Stream
 //  4. dispatch the storage to B
 func TestPureServerFourStepStory(t *testing.T) {
 	root := t.TempDir()
@@ -799,9 +785,8 @@ func TestPureServerFourStepStory(t *testing.T) {
 	binary := binaryOf(t)
 	machineA := makeMachine(t, root, "A", global, true)
 	machineB := makeMachine(t, root, "B", global, false)
-	// Machine A is an already-configured machine (it ran homer init when
-	// it first adopted homer — that is what "connect an existing machine"
-	// means).
+	// Machine A is already configured (it ran homer init when first
+	// adopting homer).
 	if result := runHomer(t, binary, machineA, "init", "--json"); result.code != 0 {
 		t.Fatalf("init A failed: %s%s", result.stdout, result.stderr)
 	}
@@ -822,7 +807,7 @@ func TestPureServerFourStepStory(t *testing.T) {
 
 	// Step 1: connect machine A.
 	agentA := startHomer(t, binary, machineA, global,
-		"agent", "--connect", hubURL, "--token", token, "--id", "machine-a", "--home", machineA.homerHome)
+		"agent", "--hub", hubURL, "--token", token, "--id", "machine-a", "--home", machineA.homerHome)
 	defer stopProc(t, agentA)
 	waitRegistered(t, hubURL, auth, hubProc, "machine-a")
 
@@ -841,7 +826,7 @@ func TestPureServerFourStepStory(t *testing.T) {
 
 	// Step 3: connect machine B (empty machine, bootstrap via dispatch).
 	agentB := startHomer(t, binary, machineB, global,
-		"agent", "--connect", hubURL, "--token", token, "--id", "machine-b", "--home", machineB.homerHome)
+		"agent", "--hub", hubURL, "--token", token, "--id", "machine-b", "--home", machineB.homerHome)
 	defer stopProc(t, agentB)
 	waitRegistered(t, hubURL, auth, hubProc, "machine-b")
 
@@ -894,7 +879,7 @@ func TestSelectiveAdapterSync(t *testing.T) {
 	hubURL := fmt.Sprintf("http://127.0.0.1:%d", hubPort)
 	auth := map[string]string{"Authorization": "Bearer " + token}
 	agentA := startHomer(t, binary, machineA, global,
-		"agent", "--connect", hubURL, "--token", token, "--id", "machine-a", "--home", machineA.homerHome)
+		"agent", "--hub", hubURL, "--token", token, "--id", "machine-a", "--home", machineA.homerHome)
 	defer stopProc(t, agentA)
 	waitRegistered(t, hubURL, auth, hubProc, "machine-a")
 
@@ -961,7 +946,7 @@ func TestSelectiveAdapterSync(t *testing.T) {
 	}
 
 	agentB := startHomer(t, binary, machineB, global,
-		"agent", "--connect", hubURL, "--token", token, "--id", "machine-b", "--home", machineB.homerHome)
+		"agent", "--hub", hubURL, "--token", token, "--id", "machine-b", "--home", machineB.homerHome)
 	defer stopProc(t, agentB)
 	waitRegistered(t, hubURL, auth, hubProc, "machine-b")
 

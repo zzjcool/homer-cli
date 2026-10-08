@@ -22,8 +22,8 @@ import (
 // The dispatch dialog is one conversation: pick adapters, then type the
 // password in the next step, and stay there until the files are written.
 func TestDispatchDialogUnlocksBeforeSend(t *testing.T) {
-	if _, err := os.Stat("/usr/bin/chromium"); err != nil {
-		t.Skip("chromium is not installed")
+	if _, err := chromiumExecutable(t); err != nil {
+		t.Skipf("chromium is not installed: %v", err)
 	}
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -187,7 +187,6 @@ func (s *dispatchUIStub) ListAgents() []web.AgentInfo {
 	return []web.AgentInfo{{
 		AgentID:  "box",
 		Hostname: "box",
-		Mode:     "connect",
 		LastSeen: time.Now(),
 	}}
 }

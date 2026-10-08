@@ -199,41 +199,39 @@ func TestConsoleDockerScenarios(t *testing.T) {
 		t.Fatalf("dispatch to box-b changed box-a\nbefore %q\nafter %q", before, after)
 	}
 
-	t.Log("hub dials a listen-mode machine")
-	_, listenCmd := env.joinCommands()
-	listenCmd = strings.ReplaceAll(listenCmd, "<这台机器的IP>", "box-listen")
-	if !strings.Contains(listenCmd, "--listen") || !strings.Contains(listenCmd, "box-listen:7761") {
-		t.Fatalf("listen command = %q", listenCmd)
+	t.Log("join a second machine through the same outbound stream command")
+	streamCmd := env.joinCommand()
+	if strings.Contains(streamCmd, "--listen") || strings.Contains(streamCmd, "--connect") {
+		t.Fatalf("join command includes a removed agent flag: %q", streamCmd)
 	}
-	out, err := env.exec("box-listen", listenCmd, 90*time.Second)
-	t.Logf("listen install: %v\n%s", err, out)
+	out, err := env.exec("box-listen", streamCmd, 90*time.Second)
+	t.Logf("second agent install: %v\n%s", err, out)
 	if err != nil {
-		t.Fatalf("listen install failed: %v\n%s", err, out)
+		t.Fatalf("second agent install failed: %v\n%s", err, out)
 	}
 	time.Sleep(3 * time.Second)
-	t.Logf("listen agent log:\n%s", env.agentLog("box-listen"))
-	env.waitRow("box-listen", "中心直连", 60*time.Second)
-	env.waitRow("box-listen", "box-listen:7761", 20*time.Second)
+	t.Logf("second agent log:\n%s", env.agentLog("box-listen"))
+	env.waitRow("box-listen", "新机器 · 等待下发", 60*time.Second)
 	env.clickRow("box-listen", "查看")
 	env.waitJS(`document.querySelector('#dlg-view').open`, 20*time.Second)
 	env.waitJS(`!document.querySelector('#view-body').innerText.includes('正在向这台机器')`, 30*time.Second)
 	if view := env.eval(`document.querySelector('#view-body').innerText`); strings.Contains(view, "502") || strings.Contains(view, "查询失败") {
-		t.Fatalf("listen view = %s", view)
+		t.Fatalf("second agent view = %s", view)
 	}
 	env.click(`#dlg-view button[value="ok"]`)
 	env.confirmRow("box-listen", "下发")
 	if outcome := env.waitOutcome(90 * time.Second); !strings.Contains(outcome, "已下发到 box-listen") {
-		t.Fatalf("listen dispatch = %s\n%s", outcome, env.agentLog("box-listen"))
+		t.Fatalf("second agent dispatch = %s\n%s", outcome, env.agentLog("box-listen"))
 	}
 	if !env.fileExists("box-listen", "/root/.homer/homer.json") {
-		t.Fatal("listen dispatch did not create homer.json")
+		t.Fatal("second agent dispatch did not create homer.json")
 	}
 	env.installLoginKey("box-listen", "e2euser")
 	if outcome := env.waitOutcome(40 * time.Second); !strings.Contains(outcome, "已把 e2euser") {
-		t.Fatalf("listen login key = %s\n%s", outcome, env.agentLog("box-listen"))
+		t.Fatalf("second agent login key = %s\n%s", outcome, env.agentLog("box-listen"))
 	}
 	if body := env.cat("box-listen", "/root/.ssh/authorized_keys"); !strings.Contains(body, "BEGIN homer github e2euser") {
-		t.Fatalf("listen authorized_keys =\n%s", body)
+		t.Fatalf("second agent authorized_keys =\n%s", body)
 	}
 
 	t.Log("restart box-b agent and dispatch again")
@@ -613,26 +611,24 @@ func rowEnabledJS(hostname string) string {
 
 func (c *consoleEnv) joinCommand() string {
 	c.t.Helper()
-	connect, _ := c.joinCommands()
-	return connect
-}
-
-func (c *consoleEnv) joinCommands() (string, string) {
-	c.t.Helper()
 	c.click("#btn-join-top")
 	c.waitJS(`(document.querySelector('#join-cmd')||{}).value && document.querySelector('#join-cmd').value.includes('curl ')`, 15*time.Second)
-	c.waitJS(`(document.querySelector('#join-listen')||{}).value && document.querySelector('#join-listen').value.includes('--listen')`, 15*time.Second)
-	connect := c.eval(`document.querySelector('#join-cmd').value`)
-	listen := c.eval(`document.querySelector('#join-listen').value`)
+	command := c.eval(`document.querySelector('#join-cmd').value`)
+	if got := c.eval(`document.querySelectorAll('#dlg-join .join-cmd input').length`); got != "1" {
+		c.t.Fatalf("join dialog has %s command fields, want one", got)
+	}
+	if got := c.eval(`!!document.querySelector('#join-listen')`); got != "false" {
+		c.t.Fatalf("join dialog still exposes a listen command")
+	}
 	c.click(`#dlg-join button[value="ok"]`)
 	time.Sleep(300 * time.Millisecond)
-	if !strings.Contains(connect, "hr_") || !strings.Contains(connect, c.base) {
-		c.t.Fatalf("join command = %q", connect)
+	if !strings.Contains(command, "hr_") || !strings.Contains(command, c.base) {
+		c.t.Fatalf("join command = %q", command)
 	}
-	if !strings.Contains(listen, "--listen") || !strings.Contains(listen, "hr_") {
-		c.t.Fatalf("listen command = %q", listen)
+	if strings.Contains(command, "--listen") || strings.Contains(command, "--connect") {
+		c.t.Fatalf("join command uses a removed agent flag: %q", command)
 	}
-	return connect, listen
+	return command
 }
 
 func (c *consoleEnv) exec(service, script string, timeout time.Duration) (string, error) {

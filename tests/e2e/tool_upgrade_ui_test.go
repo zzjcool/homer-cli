@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -45,13 +44,13 @@ func newToolUIStub() *toolUIStub {
 		fail:     map[string]bool{},
 		installs: "0.90.2",
 		agents: []web.AgentInfo{
-			{AgentID: "alpha", Hostname: "alpha", Mode: "connect", LastSeen: now,
+			{AgentID: "alpha", Hostname: "alpha", LastSeen: now,
 				Tools: []web.AgentTool{uiTool("pi", "pi", "0.80.0", true), uiTool("herdr", "herdr", "0.9.1", true), broken}},
-			{AgentID: "beta", Hostname: "beta", Mode: "connect", LastSeen: now,
+			{AgentID: "beta", Hostname: "beta", LastSeen: now,
 				Tools: []web.AgentTool{uiTool("pi", "pi", "0.90.2", true), uiTool("vscode", "VS Code", "1.100.0", false)}},
-			{AgentID: "gamma", Hostname: "gamma", Mode: "connect", LastSeen: now.Add(-10 * time.Minute), Stale: true,
+			{AgentID: "gamma", Hostname: "gamma", LastSeen: now.Add(-10 * time.Minute), Stale: true,
 				Tools: []web.AgentTool{uiTool("pi", "pi", "0.70.0", true)}},
-			{AgentID: "delta", Hostname: "delta", Mode: "connect", LastSeen: now,
+			{AgentID: "delta", Hostname: "delta", LastSeen: now,
 				Tools: []web.AgentTool{uiTool("vscode", "VS Code", "1.90.0", false)}},
 		},
 	}
@@ -197,8 +196,8 @@ func (u *toolUI) click(js string) {
 }
 
 func TestToolUpgradeConsole(t *testing.T) {
-	if _, err := os.Stat("/usr/bin/chromium"); err != nil {
-		t.Skip("chromium is not installed")
+	if _, err := chromiumExecutable(t); err != nil {
+		t.Skipf("chromium is not installed: %v", err)
 	}
 	root := t.TempDir()
 	t.Setenv("HOME", root)
