@@ -173,17 +173,11 @@ func (d *Daemon) runTaskCommand(ctx context.Context, req *stream.Request, option
 	case string(hub.TaskKindStatus):
 		return d.statusReport(ctx)
 	case hub.MethodInspect:
-		// P4b extension point: replace this status-only placeholder with the
-		// combined snapshot/credentials/secrets/keys inspection implementation.
 		var params web.InspectParams
 		if err := req.Decode(&params); err != nil {
 			return nil, &stream.Error{Code: stream.CodeBadRequest, Message: err.Error()}
 		}
-		report, err := d.statusReport(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return web.InspectResult{Status: report}, nil
+		return d.inspect(ctx, params, req.Progress)
 	case string(hub.TaskKindDiff):
 		text, err := d.executorDiff(ctx, web.DiffParams{Adapter: options.Adapter, Category: options.Category, Path: options.Path})
 		if err != nil {
