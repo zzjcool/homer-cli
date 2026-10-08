@@ -426,7 +426,11 @@ func (s *Session) handleEvent(frame *Frame) {
 	}
 	params := append(json.RawMessage(nil), frame.P...)
 	go func() {
-		defer func() { _ = recover() }()
+		defer func() {
+			if recovered := recover(); recovered != nil && s.droppedLog != nil {
+				s.droppedLog.Log("event-handler-panic:"+frame.M, fmt.Sprintf("stream: event handler panic method=%q: %v", frame.M, recovered))
+			}
+		}()
 		handler(ctx, frame.M, params)
 	}()
 }

@@ -348,8 +348,12 @@ func (h *AgentHub) rejectHello(conn stream.Conn, requestID, code, message string
 	frame := &stream.Frame{T: stream.TRes, ID: requestID, E: &stream.Error{Code: code, Message: message}}
 	if encoded, err := stream.EncodeFrame(frame, h.maxFrame()); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), stream.DefaultWriteTimeout)
-		_ = conn.Write(ctx, encoded)
+		if writeErr := conn.Write(ctx, encoded); writeErr != nil {
+			h.throttle.Log("reject-hello-write-failed:"+code, fmt.Sprintf("hub: failed to write hello rejection code=%q request=%q: %v", code, requestID, writeErr))
+		}
 		cancel()
+	} else {
+		h.throttle.Log("reject-hello-encode-failed:"+code, fmt.Sprintf("hub: failed to encode hello rejection code=%q request=%q: %v", code, requestID, err))
 	}
 	_ = conn.Close(closeCode, message)
 }

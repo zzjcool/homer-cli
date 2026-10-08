@@ -100,6 +100,12 @@ func TestDaemonStreamHelloAndStatusHandler(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Error("daemon did not stop")
 		}
+		if !logger.contains("已连接 hub http://hub.example/base") {
+			t.Errorf("successful connection was not logged: %v", logger.snapshot())
+		}
+		if !logger.contains("与 hub http://hub.example/base 的连接已断开，持续 ") {
+			t.Errorf("disconnect and duration were not logged: %v", logger.snapshot())
+		}
 		peer.Close(stream.CloseGoingAway, "test complete")
 	})
 
