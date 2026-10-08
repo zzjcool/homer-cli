@@ -555,7 +555,7 @@ P5+P6a ─► P6b e2e/docker/UI ─► P7 hw 性能验收与部署演练(orchest
 - **文件归属**:`internal/stream/**`(含 `wsconn`、`streamtest`)、`go.mod`、`go.sum`、新文件 `internal/hub/proto.go`(只放 A4 的常量和类型)、`internal/web/inspect_types.go`(A6 类型)。
 - **依赖**:G0。**规模**:~1600 行实现 + ~1800 行测试,1.5d。
 - **步骤**:
-  1. `go get github.com/coder/websocket@v1.8.12`。确认 `go` 行仍是 1.23.4,若被抬高就回退到兼容版本。`go mod tidy` 后 diff 里只多这一个依赖。
+  1. `go get github.com/coder/websocket@v1.8.12`。确认 `go` 行仍是 1.23.4,若被抬高就回退到兼容版本。**不要运行 `go mod tidy`**(基线 go.mod 未 tidy),diff 里只多这一个 require。
   2. 先写 `Frame/Conn/errors/Options` 骨架、`streamtest.Pipe`、能跑通 happy-path 的 `Session`(Call/Handle/Progress/cancel/ping)。**到这一步打 tag `ws/f1-stream-lib` 并回调 orchestrator(F1 检查点)**,P2/P3/P4c 此后开工。
   3. 补齐背压、大帧、心跳超时、竞态、panic 防护。
   4. `wsconn` 加真 socket 测试,`TCPProxy` 加故障注入。
