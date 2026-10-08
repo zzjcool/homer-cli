@@ -46,10 +46,12 @@ type Command struct {
 	Path   string `json:"path,omitempty"`
 	// Adapter is the module this file follows. Collecting or dispatching
 	// that module also carries the keyring.
-	Adapter     string `json:"adapter,omitempty"`
-	Password    string `json:"password,omitempty"`
-	NewPassword string `json:"newPassword,omitempty"`
-	WorkFactor  int    `json:"-"`
+	Adapter string `json:"adapter,omitempty"`
+	// Paths is the batch form of Path, used by "exists".
+	Paths       []string `json:"paths,omitempty"`
+	Password    string   `json:"password,omitempty"`
+	NewPassword string   `json:"newPassword,omitempty"`
+	WorkFactor  int      `json:"-"`
 }
 
 // FileInfo is the public description of one encrypted file.
@@ -82,7 +84,9 @@ type Result struct {
 	Keys    []Summary   `json:"keys,omitempty"`
 	Written []string    `json:"written,omitempty"`
 	Entries []PathEntry `json:"entries,omitempty"`
-	Errors  []string    `json:"errors,omitempty"`
+	// Exists maps each path asked about to whether a regular file is there.
+	Exists map[string]bool `json:"exists,omitempty"`
+	Errors []string        `json:"errors,omitempty"`
 }
 
 type manifest struct {
@@ -114,6 +118,8 @@ func Apply(homerHome string, cmd Command) Result {
 		return passwd(paths, cmd)
 	case "browse":
 		return browse(cmd)
+	case "exists":
+		return exists(cmd)
 	default:
 		return fail("bad-action", "未知的密钥操作")
 	}
@@ -327,6 +333,58 @@ func passwd(paths core.HomerPaths, cmd Command) Result {
 		return fail("error", err.Error())
 	}
 	return Result{OK: true, Status: "rotated", Keys: []Summary{summaryOf(doc)}}
+}
+
+// EncryptedIgnores lists, for one adapter, the files the keyring already
+// holds as ciphertext, written as paths relative to adapterRoot. They must
+// not also travel in plaintext: the scanner ignores them the same way it
+// ignores the tool's own credential files, so the secret scan stops
+// refusing a file the user has already encrypted and the drift count stops
+// calling it "未收取". A file outside the adapter root has no relative path
+// and is skipped.
+func EncryptedIgnores(homerHome, adapterID, adapterRoot string) []string {
+	if adapterID == "" || adapterRoot == "" {
+		return nil
+	}
+	paths := resolvePaths(homerHome)
+	listed := list(paths)
+	root := filepath.Clean(core.ExpandHome(adapterRoot))
+	var out []string
+	seen := map[string]bool{}
+	for _, key := range listed.Keys {
+		for _, file := range key.Files {
+			if file.Adapter != adapterID {
+				continue
+			}
+			rel, err := filepath.Rel(root, filepath.Clean(core.ExpandHome(file.Destination)))
+			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			rel = filepath.ToSlash(rel)
+			if !seen[rel] {
+				seen[rel] = true
+				out = append(out, rel)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// exists answers, for each path, whether a regular file is there. It reads
+// nothing from the files and never lists a directory, so the console can
+// check a handful of credential files in one round trip.
+func exists(cmd Command) Result {
+	out := make(map[string]bool, len(cmd.Paths))
+	for _, path := range cmd.Paths {
+		path = strings.TrimSpace(path)
+		if !validDestination(path) || strings.Contains(path, "..") {
+			return fail("invalid", "路径要以 ~ 或 / 开头，且不能包含 ..: "+path)
+		}
+		info, err := os.Stat(core.ExpandHome(path))
+		out[path] = err == nil && info.Mode().IsRegular()
+	}
+	return Result{OK: true, Status: "checked", Exists: out}
 }
 
 const browseLimit = 80

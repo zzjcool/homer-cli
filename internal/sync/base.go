@@ -42,7 +42,7 @@ func CollectSyncSources(paths core.HomerPaths, config core.HomerConfig, options 
 	}
 
 	base, mode, baseCommit := collectBase(paths, config, &warnings, &errors)
-	local := collectLocal(config, base, &errors, &warnings)
+	local := collectLocal(paths.Home, config, base, &errors, &warnings)
 
 	build := func(remote []core.AdapterSnapshot, remoteRef string) SyncSources {
 		return SyncSources{
@@ -165,7 +165,7 @@ func isReadableCommit(paths core.HomerPaths, commit string) bool {
 	return gitx.Exec(paths.Home, []string{"cat-file", "-e", commit + "^{commit}"}, 0).OK
 }
 
-func collectLocal(config core.HomerConfig, base []core.AdapterSnapshot, errors, warnings *[]string) []core.AdapterSnapshot {
+func collectLocal(homerHome string, config core.HomerConfig, base []core.AdapterSnapshot, errors, warnings *[]string) []core.AdapterSnapshot {
 	adapterIDs := make([]string, 0, len(config.Adapters))
 	for adapterID := range config.Adapters {
 		adapterIDs = append(adapterIDs, adapterID)
@@ -178,7 +178,7 @@ func collectLocal(config core.HomerConfig, base []core.AdapterSnapshot, errors, 
 		if adapterConfig.Enabled != nil && !*adapterConfig.Enabled {
 			continue
 		}
-		outcome := adapter.ScanAdapter(adapterID, adapterConfig)
+		outcome := adapter.ScanAdapter(adapterID, WithEncryptedIgnores(homerHome, adapterID, adapterConfig))
 		if warnings != nil {
 			*warnings = append(*warnings, outcome.Warnings...)
 		}

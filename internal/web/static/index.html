@@ -216,6 +216,7 @@ dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-w
 #dlg-confirm { max-width: 560px; }
 #dlg-view { max-width: 640px; }
 .choice-list { display: grid; gap: 8px; margin-top: 10px; max-height: 42vh; overflow: auto; }
+.cred-note { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; color: var(--danger); }
 .choice-block { border: 1px solid var(--line); border-radius: 4px; }
 .choice-block .choice-item { border: none; }
 .choice-block .view-children { margin: 0 8px 8px 28px; }
@@ -228,7 +229,7 @@ dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-w
 .choice-tools { display: flex; gap: 8px; margin-top: 10px; }
 .dispatch-unlocks { display: grid; gap: 8px; margin-top: 12px; }
 .dispatch-unlocks:empty { display: none; }
-#confirm-err { color: var(--danger); margin: 10px 0 0; }
+#confirm-err { color: var(--danger); margin: 10px 0 0; white-space: pre-line; }
 #confirm-err:empty { display: none; }
 #btn-confirm-back { margin-right: auto; }
 dialog::backdrop { background: #0007; }
@@ -339,6 +340,7 @@ html { scroll-behavior: smooth; }
     <menu>
       <button type="button" id="btn-confirm-back" class="hidden">上一步</button>
       <button type="button" value="cancel" id="btn-confirm-cancel">取消</button>
+      <button type="button" id="btn-confirm-alt" class="hidden">备选</button>
       <button type="button" value="confirm" class="primary" id="btn-confirm-ok">确认</button>
     </menu>
   </form>
@@ -418,6 +420,7 @@ const app = {
   scopeChoices: [],
   scopeStep: "choose",
   scopeHint: "",
+  precheckToken: 0,
   openDiffs: new Set(),   // 展开的 diff 抽屉，key = adapter/category（轮询不重置）
 };
 
@@ -815,15 +818,13 @@ function renderAgents(agents, disabledFeature) {
     keyBtn.addEventListener("click", () => confirmSSHKey(a));
     actions.append(keyBtn);
 
-    // 冲突裁决：这台机器有冲突时给出二选一
+    // 冲突裁决：先看两边差在哪，再在弹窗里选保留哪一边
     if (a.drift && a.drift.conflicts > 0 && !a.stale) {
-      const localBtn = el("button", "small-btn danger-btn", "以这台机器为准");
-      localBtn.type = "button";
-      localBtn.addEventListener("click", () => confirmResolveOn("local", a));
-      const centerBtn = el("button", "small-btn", "以中心为准");
-      centerBtn.type = "button";
-      centerBtn.addEventListener("click", () => confirmResolveOn("center", a));
-      actions.append(localBtn, centerBtn);
+      const resolveBtn = el("button", "small-btn danger-btn", "处理冲突");
+      resolveBtn.type = "button";
+      resolveBtn.title = "先对照这台机器和中心的差别，再选保留哪一边";
+      resolveBtn.addEventListener("click", () => confirmResolve(a));
+      actions.append(resolveBtn);
     }
 
     // 吊销：Tailscale 式单机踢除（凭证失效，行保留观察）。
@@ -1186,6 +1187,10 @@ function updateScopeConfirm() {
     return;
   }
   ok.disabled = selectedAdapters().length === 0;
+  $("btn-confirm-alt").disabled = ok.disabled;
+  if (app.scopeDirection === "collect" && app.scopeStep === "choose") {
+    ok.textContent = unresolvedSecretHits(adaptersWithSecrets(selectedAdapters())).length ? "仍然收取（含疑似密钥）" : "确认收取";
+  }
 }
 function showScopeStep(step) {
   app.scopeStep = step;
@@ -1242,6 +1247,9 @@ function renderScopeChoices(data) {
     tools.append(btn);
   });
   const rows = el("div", "choice-list");
+  // 冲突的适配器默认展开，冲突文件的对照最多自动展开 3 个。
+  const openAdapters = [];
+  const autoDiffBudget = { left: 3 };
   list.forEach(item => {
     // 密钥不是单独一项。勾了它绑定的适配器，确认时会带上。
     if (item.id === "keyring" && app.scopeDirection !== "resolve") return;
@@ -1257,8 +1265,12 @@ function renderScopeChoices(data) {
     const cats = item.categories || [];
     if (cats.length) {
       const node = makeCollapsible(adapterTitle(item.id), "", false);
-      node.setFill(kids => renderOutlineCategories(kids, cats, { adapterId: item.id, drift: true, agentId: app.scopeAgent && app.scopeAgent.agentId }));
+      node.setFill(kids => renderOutlineCategories(kids, cats, {
+        adapterId: item.id, drift: true, agentId: app.scopeAgent && app.scopeAgent.agentId,
+        autoDiff: item.conflicts > 0 ? autoDiffBudget : null,
+      }));
       node.row.classList.add("choice-id");
+      if (item.conflicts > 0) openAdapters.push(node);
       copy.append(node.row);
       block.append(label, node.kids);
     } else {
@@ -1278,6 +1290,7 @@ function renderScopeChoices(data) {
       }
       copy.append(el("span", "muted small", text));
     }
+    if (app.scopeDirection === "collect") { appendCredentialNotes(copy, item); appendSecretHits(copy, item); }
     label.append(input, copy);
     if (!cats.length) block.append(label);
     if (item.conflicts > 0 && app.scopeAgent && app.scopeDirection !== "resolve") {
@@ -1304,11 +1317,126 @@ function renderScopeChoices(data) {
     rows.append(block);
   });
   box.append(tools, rows);
+  openAdapters.forEach(node => node.open());
   app.scopeChoices = list;
   alignKeyring(box);
   updateScopeConfirm();
 }
+// 收取前的预检要问机器两件事（哪些凭证文件在、哪些文件会被密钥扫描拦下），
+// 每件都要等机器下一次轮询。列表先出来，预检结果回来再补上提示，不堵弹窗。
+function loadCollectPrecheck(agent) {
+  const token = ++app.precheckToken;
+  const note = $("confirm-note");
+  const base = note.textContent;
+  note.textContent = base + "　正在检查密钥…";
+  api("/api/sync/precheck?agent=" + encodeURIComponent(agent.agentId))
+    .then(data => {
+      if (token !== app.precheckToken || !$("dlg-confirm").open) return;
+      // 重画列表会重置勾选，先记下用户已经点过的，画完再还原。
+      const checked = {};
+      $("confirm-choices").querySelectorAll("input[data-adapter]").forEach(input => { checked[input.dataset.adapter] = input.checked; });
+      (app.scopeChoices || []).forEach(item => {
+        item.credentials = (data.credentials && data.credentials[item.id]) || [];
+        item.secretHits = (data.secretHits && data.secretHits[item.id]) || [];
+      });
+      renderScopeChoices({ hint: app.scopeHint, adapters: app.scopeChoices });
+      $("confirm-choices").querySelectorAll("input[data-adapter]").forEach(input => {
+        if (!input.disabled && input.dataset.adapter in checked) input.checked = checked[input.dataset.adapter];
+      });
+      alignKeyring($("confirm-choices"));
+      updateScopeConfirm();
+      note.textContent = base;
+    })
+    .catch(() => {
+      if (token !== app.precheckToken) return;
+      note.textContent = base;
+    });
+}
+// 收取时，适配器自己的凭证文件（pi 的 auth.json 等）不会明文同步。
+// 机器上有这个文件、又没加密时，当场说明并给出“加密它”，而不是悄悄略过。
+function appendCredentialNotes(copy, item) {
+  (item.credentials || []).forEach(rule => {
+    if (rule.exists !== "present") return;
+    const bound = secretsBoundTo(item.id).indexOf(rule.destination) >= 0;
+    if (bound) {
+      copy.append(el("span", "muted small", rule.name + " 已加密，会跟着这次一起收取"));
+      return;
+    }
+    const row = el("span", "cred-note small");
+    row.append(el("span", null, rule.name + "（" + (rule.note || "凭证") + "）不会明文同步，新机器拿不到。"));
+    const btn = el("button", "small-btn", "加密它");
+    btn.type = "button";
+    btn.addEventListener("click", ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      encryptCredential(app.scopeAgent, rule, item.id);
+    });
+    row.append(btn);
+    copy.append(row);
+  });
+}
+// 机器端的密钥扫描会拦下的文件：收取之前就列出来，给三条路——
+// 加密它、这次先不收这个适配器、或者确认后仍然收取。
+// 已经在弹窗里提示过的扫描命中。确认收取就是同意带着它们写入。
+function unresolvedSecretHits(adapters) {
+  const picked = {};
+  adapters.forEach(id => { picked[id] = true; });
+  const out = [];
+  (app.scopeChoices || []).forEach(item => {
+    if (!picked[item.id]) return;
+    (item.secretHits || []).forEach(hit => {
+      if (secretsBoundTo(item.id).indexOf(hit.destination) < 0) out.push(hit);
+    });
+  });
+  return out;
+}
+function appendSecretHits(copy, item) {
+  (item.secretHits || []).forEach(hit => {
+    const row = el("span", "cred-note small");
+    const name = hit.destination || hit.path;
+    row.append(el("span", null, name + " 里有像密钥的内容" + (hit.reason ? "（" + hit.reason + "）" : "") + "，收取时会被拦下。"));
+    if (hit.destination) {
+      const btn = el("button", "small-btn", "加密它");
+      btn.type = "button";
+      btn.addEventListener("click", ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        encryptCredential(app.scopeAgent, { name: hit.destination.split("/").pop(), destination: hit.destination }, item.id);
+      });
+      row.append(btn);
+    }
+    copy.append(row);
+  });
+}
+function encryptCredential(agent, rule, adapterId) {
+  if (!agent) return;
+  const keys = app.scopeKeys || [];
+  // 加密流程结束（完成或取消）后回到这台机器的收取弹窗。
+  app.credReturn = agent;
+  $("dlg-confirm").close("cancel");
+  const prefill = () => {
+    const path = $("key-path");
+    const select = $("key-adapter");
+    if (path) path.value = rule.destination;
+    if (select) { select.value = adapterId; select.dataset.touched = "1"; }
+  };
+  const openEncrypt = (key) => {
+    openKeyForm(agent, "encrypt", key);
+    prefill();
+  };
+  if (keys.length) {
+    openEncrypt(keys[0]);
+    return;
+  }
+  toast("这台机器还没有密钥，先新建一把，再加密 " + rule.name);
+  openKeyForm(agent, "create", null);
+  $("form-key")._keyAction.next = (view) => {
+    const made = (view && view.keys && view.keys[0]) || null;
+    if (made) openEncrypt(made);
+  };
+}
 function openScopeDialog(opts) {
+  app.precheckToken++;
   $("confirm-title").textContent = opts.title;
   $("confirm-desc").textContent = "正在读取可选项…";
   $("confirm-note").textContent = "受影响文件会先备份。";
@@ -1321,6 +1449,10 @@ function openScopeDialog(opts) {
   const okBtn = $("btn-confirm-ok");
   okBtn.disabled = true;
   okBtn.textContent = opts.okLabel;
+  const altBtn = $("btn-confirm-alt");
+  altBtn.classList.toggle("hidden", !opts.altLabel);
+  altBtn.textContent = opts.altLabel || "";
+  altBtn.disabled = true;
   app.pendingAction = null;
   app.scopeAgent = opts.agent || null;
   app.scopeDirection = opts.direction || "";
@@ -1341,6 +1473,7 @@ function openScopeDialog(opts) {
       app.scopeKeys = (keysView && keysView.keys) || [];
       renderScopeChoices(data);
       app.pendingAction = opts.action;
+      if (opts.direction === "collect") loadCollectPrecheck(opts.agent);
     })
     .catch(e => {
       if (!$("dlg-confirm").open) return;
@@ -1393,6 +1526,17 @@ function confirmSSHKey(agent) {
   $("dlg-confirm").showModal();
   setTimeout(() => input.focus(), 0);
 }
+function confirmResolve(agent) {
+  const name = agent.hostname || agent.agentId;
+  openScopeDialog({
+    agent: agent,
+    direction: "resolve",
+    title: "处理冲突 · " + name,
+    okLabel: "以中心为准",
+    altLabel: "以这台机器为准",
+    action: { kind: "resolve-on", choice: "center", agentId: agent.agentId, name: name },
+  });
+}
 function confirmResolveOn(choice, agent) {
   const local = choice === "local";
   const name = agent.hostname || agent.agentId;
@@ -1412,6 +1556,7 @@ $("btn-confirm-back").addEventListener("click", ev => {
 });
 $("dlg-confirm").addEventListener("close", () => {
   stopDispatchWait();
+  $("btn-confirm-alt").classList.add("hidden");
   app.pendingAction = null;
   app.scopeStep = "choose";
   clearDispatchUnlocks();
@@ -1438,6 +1583,7 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   const adapters = adaptersWithSecrets(selectedAdapters());
   const unlocks = readDispatchUnlocks();
   if (!adapters.length) return;
+  if (action.kind === "collect") action.knownHits = unresolvedSecretHits(adapters);
   if (action.kind === "dispatch-one" && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
     showScopeStep("unlock");
     return;
@@ -1457,8 +1603,19 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   $("dlg-confirm").returnValue = "confirm";
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
-  if (action.kind === "collect") executeCollect(action.agentId, action.name, adapters);
+  if (action.kind === "collect") executeCollect(action.agentId, action.name, adapters, !!(action.knownHits && action.knownHits.length));
   if (action.kind === "resolve-on") executeResolveOn(action.choice, action.agentId, adapters);
+});
+$("btn-confirm-alt").addEventListener("click", ev => {
+  ev.preventDefault();
+  const action = app.pendingAction;
+  if (!action || action.kind !== "resolve-on") return;
+  const adapters = selectedAdapters();
+  if (!adapters.length) return;
+  $("dlg-confirm").returnValue = "confirm";
+  $("dlg-confirm").close("confirm");
+  app.pendingAction = null;
+  executeResolveOn("local", action.agentId, adapters);
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
@@ -1578,6 +1735,43 @@ function dispatchDialogError(e) {
   if (!lines.length && e && e.message) lines.push(e.message);
   return lines.length ? lines.join("；") : "没有完成";
 }
+// 冲突：关掉下发窗口，当场给出“以哪边为准”的选择；其他失败留在窗口里，
+// 只显示人话（去掉 adapter root 之类的扫描诊断）。
+async function handleDispatchFailure(agentId, name, data) {
+  const view = writeFailureView(data);
+  if (view.conflict) {
+    stopDispatchWait();
+    $("dlg-confirm").close("cancel");
+    presentWriteFailure("下发", agentId, name, data);
+    try { await refresh(); } catch (_) {}
+    return;
+  }
+  const lines = view.rest.concat(view.notes);
+  failDispatchInDialog(lines.length ? lines.join("；") : "下发没有完成");
+}
+// 把一长串 “manifest 安装失败: pi/plugins:xxx: exec: "pi": executable file not found…”
+// 折成一两句：缺命令的按命令归并，其他的截短。
+function summarizeInstallFailures(raw) {
+  const missing = {};
+  const other = [];
+  raw.forEach(line => {
+    const text = String(line).replace(/^manifest 安装失败:\s*/, "");
+    const m = /^(.*?):\s*exec: "([^"]+)": executable file not found/.exec(text);
+    if (m) {
+      const name = m[1].replace(/^[^/]+\/[^:]+:/, "");
+      (missing[m[2]] = missing[m[2]] || []).push(name);
+      return;
+    }
+    other.push(text.length > 90 ? text.slice(0, 90) + "…" : text);
+  });
+  const out = [];
+  Object.keys(missing).forEach(cmd => {
+    const names = missing[cmd];
+    const shown = names.slice(0, 3).join("、") + (names.length > 3 ? " 等" : "");
+    out.push("这台机器上没有 " + cmd + " 命令，" + names.length + " 个插件没装上（" + shown + "）。");
+  });
+  return out.concat(other);
+}
 function installFailures(data) {
   const lines = [];
   const seen = {};
@@ -1592,7 +1786,7 @@ function installFailures(data) {
   ((data && data.warnings) || []).forEach(line => {
     if (String(line).indexOf("安装失败") >= 0) add(line);
   });
-  return lines;
+  return summarizeInstallFailures(lines);
 }
 function pluginsForSelection(adapters) {
   const picked = {};
@@ -1663,7 +1857,7 @@ function finishDispatchInDialog(name, paths, problems) {
   if (failed.length) {
     $("confirm-desc").textContent = "配置已写到「" + name + "」，但有插件没有装上。";
     $("confirm-note").textContent = "这台机器上要有 pi 命令，并且能联网，插件才会装上。";
-    $("confirm-err").textContent = failed.join("；");
+    $("confirm-err").textContent = failed.join("\n");
   } else {
     $("confirm-err").textContent = "";
     $("confirm-note").textContent = "";
@@ -1706,11 +1900,10 @@ async function executeDispatchOne(agentId, name, adapters, unlocks, stay) {
         finishDispatchInDialog(name, paths, installFailures(d));
         try { await refresh(); } catch (_) {}
       } else {
-        const lines = collectErrorLines(d);
-        failDispatchInDialog(lines.length ? lines.join("；") : "下发没有完成");
+        await handleDispatchFailure(agentId, name, d);
       }
     } catch (e) {
-      failDispatchInDialog(dispatchDialogError(e));
+      await handleDispatchFailure(agentId, name, e.report || { status: e.code, errors: e.errors && e.errors.length ? e.errors : [e.message] });
     }
     return;
   }
@@ -1748,11 +1941,13 @@ async function executeSSHKey(agentId, name, githubUser) {
     showAlert("登录公钥没有写入", e.errors && e.errors.length ? e.errors : [e.message], null);
   } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
-async function executeResolveOn(choice, agentId, adapters) {
+async function executeResolveOn(choice, agentId, adapters, allowSecrets) {
   const okBtn = $("btn-confirm-ok");
   setBusy(choice === "local" ? "正在按这台机器的内容处理…" : "正在按中心内容更新…");
+  const url = "/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true"
+    + (allowSecrets ? "&allowSecrets=true" : "");
   try {
-    const d = await api("/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true", { method: "POST", body: { adapters: adapters } });
+    const d = await api(url, { method: "POST", body: { adapters: adapters } });
     if (d.ok) {
       clearAlert();
       toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
@@ -1763,7 +1958,13 @@ async function executeResolveOn(choice, agentId, adapters) {
     }
     await refresh();
   } catch (e) {
-    showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+    if (e.code === "secrets-rejected") {
+      showAlert("这些文件像是带有密钥", secretNoticeLines(e), "确认之后，这台机器的内容仍会写入中心，并下发给其他在线机器。", [
+        { label: "仍然以这台机器为准", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, true) },
+      ]);
+    } else {
+      showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
+    }
   } finally { finishConfirmButton(okBtn); }
 }
 
@@ -1955,6 +2156,12 @@ function outlineLeaf(name, file, opts, plugin) {
       toggleConflictDiff(row, opts.agentId, opts.adapterId, opts.category, storePath);
     });
     row.append(btn);
+    if (opts.autoDiff && opts.autoDiff.left > 0) {
+      opts.autoDiff.left--;
+      setTimeout(() => {
+        if (row.isConnected) toggleConflictDiff(row, opts.agentId, opts.adapterId, opts.category, storePath, true);
+      }, 0);
+    }
   } else if (opts.preview && !plugin && storePath) {
     const btn = el("button", null, name);
     btn.type = "button";
@@ -2057,13 +2264,13 @@ function conflictFilePath(path, category) {
   }
   return rel;
 }
-function toggleConflictDiff(row, agentId, adapterId, category, path) {
+function toggleConflictDiff(row, agentId, adapterId, category, path, keepOthers) {
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains("conflict-diff")) {
     existing.remove();
     return;
   }
-  document.querySelectorAll(".conflict-diff").forEach(node => node.remove());
+  if (!keepOthers) document.querySelectorAll(".conflict-diff").forEach(node => node.remove());
   const box = el("div", "conflict-diff", "读取两边的内容…");
   row.after(box);
   const file = conflictFilePath(path, category);
@@ -2085,11 +2292,18 @@ function renderConflictSides(data) {
   const localOk = !!(data && data.localOk);
   const remoteOk = !!(data && data.remoteOk);
   const aligned = alignConflictLines(localOk ? data.local : "", remoteOk ? data.remote : "", localOk, remoteOk);
+  if (localOk && remoteOk && aligned.rows.length && aligned.rows.every(r => r.kind === "same")) {
+    return el("div", "muted small", "两边的数据一样，只是排版不同（缩进或换行），不用担心选哪边。");
+  }
   const grid = el("div", "conflict-grid");
   grid.append(el("div", "conflict-head", "这台机器" + (localOk ? "" : " · 没有这个文件")));
   grid.append(el("div", "conflict-head", "中心" + (remoteOk ? "" : " · 没有这个文件")));
-  if (aligned.truncated) grid.append(el("div", "conflict-note", "文件较长，只对照前 400 行"));
-  aligned.rows.forEach(line => {
+  if (aligned.truncated) grid.append(el("div", "conflict-note", "文件很长，只对照前 " + CONFLICT_MAX_LINES + " 行"));
+  collapseSameRows(aligned.rows, 2).forEach(line => {
+    if (line.kind === "skip") {
+      grid.append(el("div", "conflict-note", "… 省略 " + line.count + " 行相同内容"));
+      return;
+    }
     grid.append(conflictCell(line.left, line.leftNo, line.kind === "del" || line.kind === "change"));
     grid.append(conflictCell(line.right, line.rightNo, line.kind === "add" || line.kind === "change"));
   });
@@ -2102,21 +2316,45 @@ function conflictCell(text, no, marked) {
   cell.append(el("span", "txt", text == null ? "" : String(text)));
   return cell;
 }
+const CONFLICT_MAX_LINES = 2000;
+// 只保留差异行和前后 ctx 行，其余相同的折成一行提示。
+function collapseSameRows(rows, ctx) {
+  const keep = new Array(rows.length).fill(false);
+  rows.forEach((row, i) => {
+    if (row.kind === "same") return;
+    for (let k = Math.max(0, i - ctx); k <= Math.min(rows.length - 1, i + ctx); k++) keep[k] = true;
+  });
+  const out = [];
+  let skipped = 0;
+  rows.forEach((row, i) => {
+    if (keep[i]) {
+      if (skipped) { out.push({ kind: "skip", count: skipped }); skipped = 0; }
+      out.push(row);
+    } else skipped++;
+  });
+  if (skipped) out.push({ kind: "skip", count: skipped });
+  return out;
+}
 function alignConflictLines(local, remote, localOk, remoteOk) {
   let left = conflictLines(local, localOk);
   let right = conflictLines(remote, remoteOk);
   let truncated = false;
-  if (left.length > 400 || right.length > 400) {
+  if (left.length > CONFLICT_MAX_LINES || right.length > CONFLICT_MAX_LINES) {
     truncated = true;
-    left = left.slice(0, 400);
-    right = right.slice(0, 400);
+    left = left.slice(0, CONFLICT_MAX_LINES);
+    right = right.slice(0, CONFLICT_MAX_LINES);
   }
   return { rows: pairConflictRuns(lcsConflictRows(left, right)), truncated };
 }
 function conflictLines(text, present) {
   if (!present) return [];
-  const norm = String(text).replace(/\r\n/g, "\n");
+  let norm = String(text).replace(/\r\n/g, "\n");
   if (norm === "") return [];
+  // JSON 两边排版不同（一边压成一行）时，先统一排版再逐行对照。
+  const head = norm.trimStart()[0];
+  if (head === "{" || head === "[") {
+    try { norm = JSON.stringify(JSON.parse(norm), null, 2); } catch (_) {}
+  }
   return norm.split("\n");
 }
 function lcsConflictRows(a, b) {
@@ -2511,7 +2749,8 @@ async function submitKeyForm(ev) {
   try {
     const view = await keyApi(spec.agent, body);
     $("dlg-key").close();
-    toast(spec.action === "unlock" ? "已写回文件" : "已完成");
+    if (!spec.next) toast(spec.action === "unlock" ? "已写回文件" : "已完成");
+    if (spec.next) { spec.next(view); return; }
     if (spec.agent) renderKeys(spec.agent, view.keys || []);
     else await loadKeys();
   } catch (e) {
@@ -2540,6 +2779,14 @@ async function openMachineKeys(agent) {
 }
 $("form-key").addEventListener("submit", submitKeyForm);
 $("key-dlg-cancel").addEventListener("click", () => $("dlg-key").close());
+// 从收取弹窗跳来加密凭证文件的，关掉密钥窗口后回到收取弹窗。
+// create→encrypt 衔接时密钥窗口马上又打开，这里不回去。
+$("dlg-key").addEventListener("close", () => {
+  const agent = app.credReturn;
+  if (!agent || $("dlg-key").open) return;
+  app.credReturn = null;
+  confirmCollect(agent);
+});
 
 /* ---------- refresh orchestration ---------- */
 function stampRefresh(failed) {
@@ -2565,7 +2812,9 @@ async function refresh() {
     stampRefresh(false);
   } catch (e) {
     if (e.status === 401) {
-      showGate("login", "会话已过期，请重新登录");
+      // 401 only means "expired session" when a password exists; on a
+      // first-run hub it means setup is still pending.
+      await routeUnauthed("会话已过期，请重新登录");
       return;
     }
     showWorkspace();
@@ -2633,18 +2882,27 @@ $("btn-logout").addEventListener("click", async () => {
 $("btn-refresh").addEventListener("click", refresh);
 
 /* ---------- boot ---------- */
-async function boot() {
+// Returns "setup" (hub unconfigured, setup gate shown), "error" (status
+// unreachable, login gate shown) or "ok" (configured).
+async function routeUnauthed(loginNote) {
   try {
     const gate = await api("/api/auth/status");
     if (!gate.configured) {
-      showGate("setup");
+      if (!$("gate-setup").classList.contains("hidden")) {
+        // already on the setup form: do not re-render (keeps typed input)
+      } else showGate("setup");
       $("row-setup-code").classList.toggle("hidden", !gate.setupCodeRequired);
-      return;
+      return "setup";
     }
   } catch (e) {
     showGate("login", "无法连接服务：" + e.message);
-    return;
+    return "error";
   }
+  if (loginNote) showGate("login", loginNote);
+  return "ok";
+}
+async function boot() {
+  if ((await routeUnauthed()) !== "ok") return;
   // configured: probe with a status call — 401 routes to login, success
   // renders the workspace directly (no separate "authed" flag on the server).
   await refresh();
@@ -2652,8 +2910,11 @@ async function boot() {
 boot();
 
 /* ---------- auto refresh (30s, pauses when hidden) ---------- */
-setInterval(() => { if (!document.hidden) refresh(); }, 30000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+// Only while the workspace is showing: on the setup/login gates a refresh
+// would just 401 and clobber the form the user is filling in.
+const workspaceVisible = () => !$("workspace").classList.contains("hidden");
+setInterval(() => { if (!document.hidden && workspaceVisible()) refresh(); }, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && workspaceVisible()) refresh(); });
 </script>
 </body>
 </html>

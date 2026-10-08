@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -142,12 +143,15 @@ func TestAgentKeyRoute(t *testing.T) {
 
 type recordingKeySource struct {
 	sourceStub
+	keyMu   sync.Mutex
 	agentID string
 	cmd     keyring.Command
 	raw     []byte
 }
 
 func (s *recordingKeySource) AgentKey(_ context.Context, agentID string, cmd keyring.Command) (json.RawMessage, error) {
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
 	s.agentID = agentID
 	s.cmd = cmd
 	return append(json.RawMessage(nil), s.raw...), nil

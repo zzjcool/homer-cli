@@ -288,8 +288,8 @@ func TestConsoleDockerScenarios(t *testing.T) {
 	if outcome := env.waitOutcome(90 * time.Second); !strings.Contains(outcome, "已从 box-a 收取") {
 		t.Fatalf("collect for conflict = %s", outcome)
 	}
-	env.waitRow("box-c", "以中心为准", 70*time.Second)
-	env.confirmRow("box-c", "以中心为准")
+	env.waitRow("box-c", "处理冲突", 70*time.Second)
+	env.confirmRow("box-c", "处理冲突")
 	if outcome := env.waitOutcome(90 * time.Second); !strings.Contains(outcome, "已按中心内容更新该机器") {
 		t.Fatalf("resolve center = %s\n%s", outcome, env.agentLog("box-c"))
 	}
@@ -301,8 +301,11 @@ func TestConsoleDockerScenarios(t *testing.T) {
 	if outcome := env.waitOutcome(90 * time.Second); !strings.Contains(outcome, "已从 box-a 收取") {
 		t.Fatalf("second collect = %s", outcome)
 	}
-	env.waitRow("box-c", "以这台机器为准", 70*time.Second)
-	env.confirmRow("box-c", "以这台机器为准")
+	env.waitRow("box-c", "处理冲突", 70*time.Second)
+	env.clearAlert()
+	env.clickRow("box-c", "处理冲突")
+	env.waitJS(`document.querySelector('#dlg-confirm').open && !document.querySelector('#btn-confirm-alt').disabled`, 15*time.Second)
+	env.click("#btn-confirm-alt")
 	if outcome := env.waitOutcome(120 * time.Second); !strings.Contains(outcome, "已保留该机器的内容并写入中心") {
 		t.Fatalf("resolve local = %s\n%s", outcome, env.agentLog("box-c"))
 	}

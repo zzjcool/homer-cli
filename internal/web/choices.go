@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -31,6 +32,11 @@ type AdapterChoice struct {
 	// Categories is the same outline the storage drawer shows: manifest
 	// categories are a plugin list, never the virtual manifest file.
 	Categories []OutlineCategory `json:"categories,omitempty"`
+	// Credentials are the adapter's credential files that never sync in
+	// plaintext. A collect shows them so the user can encrypt them first.
+	Credentials []CredentialRule `json:"credentials,omitempty"`
+	// SecretHits are files the machine's scanner would refuse on collect.
+	SecretHits []SecretHit `json:"secretHits,omitempty"`
 }
 
 // BuildCollectChoices lists the adapters a machine can upload. Adapters
@@ -512,4 +518,56 @@ func collectChoiceHint(report commands.StatusReport, choices []AdapterChoice) st
 		return "这台机器没有可收取的适配器。"
 	}
 	return "只会把勾选的适配器写入中心。没勾选的适配器保持中心现有内容。绑在适配器上的密钥会跟着走。"
+}
+
+// handleCollectPrecheck answers what a collect would run into, before the
+// user commits to it: credential files that would stay behind, and files the
+// machine's secret scanner would refuse. Each is a queued task on the machine,
+// so this is a second request the dialog fills in after the adapter list is
+// already on screen. Nothing is written.
+func (s *Server) handleCollectPrecheck(w http.ResponseWriter, r *http.Request) {
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent"))
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "缺少 agent 参数", nil)
+		return
+	}
+	if s.opts.Agents == nil {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
+		return
+	}
+	actor, _ := s.opts.Agents.(KeyAgentSource)
+	var credPaths []string
+	for _, rule := range credentialRules() {
+		credPaths = append(credPaths, rule.Destination)
+	}
+	var found map[string]bool
+	var hits map[string][]SecretHit
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); found = probeCredentials(r.Context(), actor, agentID, credPaths) }()
+	go func() { defer wg.Done(); hits = s.preflightSecrets(r.Context(), agentID, nil) }()
+	wg.Wait()
+
+	byAdapter := map[string][]CredentialRule{}
+	holder := []AdapterChoice{}
+	for _, rule := range credentialRules() {
+		holder = append(holder, AdapterChoice{ID: rule.Adapter})
+	}
+	seen := map[string]bool{}
+	unique := holder[:0]
+	for _, item := range holder {
+		if !seen[item.ID] {
+			seen[item.ID] = true
+			unique = append(unique, item)
+		}
+	}
+	applyCredentialProbe(unique, found)
+	for _, item := range unique {
+		byAdapter[item.ID] = item.Credentials
+	}
+	writeJSON(w, http.StatusOK, struct {
+		OK          bool                        `json:"ok"`
+		Credentials map[string][]CredentialRule `json:"credentials"`
+		SecretHits  map[string][]SecretHit      `json:"secretHits"`
+	}{true, byAdapter, hits})
 }

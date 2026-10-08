@@ -189,8 +189,28 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	}
 	result := agentApplyResult{AgentID: agentID, Hostname: name, OK: true}
 	var payload struct {
-		OK     bool   `json:"ok"`
-		Status string `json:"status"`
+		OK      bool   `json:"ok"`
+		Status  string `json:"status"`
+		Secrets []struct {
+			Path string `json:"path"`
+		} `json:"secrets"`
+	}
+	// The machine's push stopped at the secret scanner. Say so, with the
+	// files, so the console can offer "write anyway" instead of a vague
+	// failure.
+	if json.Unmarshal(raw, &payload) == nil && payload.Status == "secrets-rejected" {
+		paths := make([]string, 0, len(payload.Secrets))
+		for _, item := range payload.Secrets {
+			paths = append(paths, item.Path)
+		}
+		writeJSON(w, http.StatusUnprocessableEntity, resolveReport{
+			OK: false, Status: "secrets-rejected", Choice: string(choice),
+			Agents: []agentApplyResult{{
+				AgentID: agentID, Hostname: name, Status: "secrets-rejected",
+			}},
+			Errors: secretConfirmLines(paths),
+		})
+		return
 	}
 	if json.Unmarshal(raw, &payload) != nil || !payload.OK {
 		result.OK = false

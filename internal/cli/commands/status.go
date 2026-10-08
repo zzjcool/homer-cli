@@ -11,6 +11,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/engine"
 	"github.com/zzjcool/homer-cli/internal/gitx"
+	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
 
 // StatusOptions is the read-only status command's option set.  JSON and
@@ -189,6 +190,46 @@ func stripExcludedSnapshots(snapshots []core.AdapterSnapshot, config core.HomerC
 	return result
 }
 
+// NormalizeHubRemote puts the center's snapshot on the same footing as the
+// base and local snapshots: entry kinds follow each category's sync mode
+// (a merge category's JSON is "json", not a raw "file") and excludeKeys are
+// stripped. The wire format carries neither, so without this a merge file
+// that is byte-identical on both sides is judged as a pending pull.
+func NormalizeHubRemote(remote []core.AdapterSnapshot, config *core.HomerConfig) []core.AdapterSnapshot {
+	if remote == nil || config == nil {
+		return remote
+	}
+	out := make([]core.AdapterSnapshot, len(remote))
+	for i, snapshot := range remote {
+		adapterConfig, known := config.Adapters[snapshot.AdapterID]
+		categories := make([]core.CategorySnapshot, len(snapshot.Categories))
+		for j, category := range snapshot.Categories {
+			category.Files = cloneSnapshotFiles(category.Files)
+			if known {
+				if categoryConfig, ok := adapterConfig.Categories[category.Category]; ok {
+					category.Mode = categoryConfig.Mode
+					for path, entry := range category.Files {
+						entry.Kind = core.EntryKindFor(category.Mode, entry.Content)
+						category.Files[path] = entry
+					}
+				}
+			}
+			categories[j] = category
+		}
+		snapshot.Categories = categories
+		out[i] = engine.StripExcludeKeys(snapshot, excludeKeysByCategory(*config, snapshot.AdapterID))
+	}
+	return out
+}
+
+func cloneSnapshotFiles(files core.SnapshotFiles) core.SnapshotFiles {
+	out := make(core.SnapshotFiles, len(files))
+	for path, entry := range files {
+		out[path] = entry
+	}
+	return out
+}
+
 // CollectSnapshotSources gathers store(base), live adapter(local), and the
 // optional git upstream(remote) snapshots.  The implementation deliberately
 // keeps all filesystem/git work here so status/diff tests can inject hand-made
@@ -217,7 +258,7 @@ func CollectSnapshotSources(paths core.HomerPaths, config *core.HomerConfig) (Dr
 		if !enabled(adapterConfig.Enabled) {
 			continue
 		}
-		outcome := adapter.ScanAdapter(adapterID, adapterConfig)
+		outcome := adapter.ScanAdapter(adapterID, syncx.WithEncryptedIgnores(paths.Home, adapterID, adapterConfig))
 		warnings = append(warnings, outcome.Warnings...)
 		if len(outcome.Errors) > 0 {
 			scanErrors = append(scanErrors, SnapshotSourceError{

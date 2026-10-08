@@ -142,6 +142,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleSyncChoices(w, r)
+	case path == "/api/sync/precheck":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleCollectPrecheck(w, r)
 	case path == "/api/ssh-key":
 		// Listen-mode agents only. The hub dials this after fetching the
 		// GitHub user's public keys.

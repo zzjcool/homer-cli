@@ -15,11 +15,9 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/zzjcool/homer-cli/internal/adapter/pi"
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
-	"github.com/zzjcool/homer-cli/internal/keyring"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
 
@@ -683,7 +681,7 @@ func (s *Server) handleStorageListing(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"generation": generation,
 		"adapters":   adapters,
-		"secrets":    piSecretRules(s.opts.HomerHome),
+		"secrets":    credentialRulesView(s.opts.HomerHome),
 	})
 }
 
@@ -812,29 +810,6 @@ func categoryDestination(root string, category core.CategoryConfig, fileRel stri
 		return rel
 	}
 	return root + "/" + rel
-}
-
-// piSecretRules is the credential files Pi stores in the agent directory.
-// They are absent from the plaintext generation. Encrypted is true once a
-// keyring file points at that path.
-func piSecretRules(homerHome string) []map[string]any {
-	encrypted := map[string]bool{}
-	listed := keyring.Apply(homerHome, keyring.Command{Action: "list"})
-	for _, key := range listed.Keys {
-		for _, file := range key.Files {
-			encrypted[filepath.Base(file.Destination)] = true
-		}
-	}
-	out := make([]map[string]any, 0, len(pi.SecretFiles))
-	for _, name := range pi.SecretFiles {
-		out = append(out, map[string]any{
-			"adapter":     pi.PIAdapterID,
-			"name":        name,
-			"destination": pi.SecretDestination(name),
-			"encrypted":   encrypted[name],
-		})
-	}
-	return out
 }
 
 func presentPluginList(cat *OutlineCategory, content string) {

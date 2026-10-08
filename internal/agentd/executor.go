@@ -104,7 +104,7 @@ func (e *localExecutor) statusReport(ctx context.Context, opts commands.StatusOp
 	if downloadErr != nil {
 		return commands.RunStatus(opts)
 	}
-	sources.Remote = remote
+	sources.Remote = commands.NormalizeHubRemote(remote, config)
 	return commands.RunStatus(opts, sources)
 }
 
@@ -358,7 +358,7 @@ func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta [
 		return os.Getenv(key)
 	})
 	if _, err := os.Stat(paths.ConfigFile); err == nil {
-		return nil // already configured
+		return addMissingAdapters(paths, meta)
 	}
 	if len(meta) == 0 {
 		return nil
@@ -367,6 +367,42 @@ func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta [
 		return err
 	}
 	return os.WriteFile(paths.ConfigFile, meta, 0o644)
+}
+
+// addMissingAdapters brings a configured machine up to the center's adapter
+// list. An adapter the center knows (the keyring is added on whichever
+// machine first creates a key) but this machine's homer.json lacks can never
+// be dispatched: the machine only trusts its own config and answers "没有适配器".
+// Only absent adapters are added, from the center's definition; anything the
+// machine already has is left exactly as the user set it.
+func addMissingAdapters(paths core.HomerPaths, meta []byte) error {
+	if len(meta) == 0 {
+		return nil
+	}
+	center, problems := core.ValidateConfig(meta)
+	if center == nil {
+		_ = problems
+		return nil // an unreadable center config must not block a pull
+	}
+	local, err := core.LoadConfig(paths)
+	if err != nil {
+		return nil // a broken local config is reported by the pull itself
+	}
+	added := false
+	for id, adapter := range center.Adapters {
+		if _, ok := local.Adapters[id]; ok {
+			continue
+		}
+		if local.Adapters == nil {
+			local.Adapters = map[string]core.AdapterConfig{}
+		}
+		local.Adapters[id] = adapter
+		added = true
+	}
+	if !added {
+		return nil
+	}
+	return core.SaveConfig(paths, *local)
 }
 
 // uploadHubSnapshot pushes prepared snapshots to the hub.

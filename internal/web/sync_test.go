@@ -48,7 +48,10 @@ func TestCategoryDestination(t *testing.T) {
 	}
 }
 
-func TestStorageListsPiSecretRules(t *testing.T) {
+func TestStorageListsCredentialRules(t *testing.T) {
+	// The keyring lives under the user's home, not HOMER_HOME. Point HOME at
+	// an empty directory so a key the developer really created cannot leak in.
+	t.Setenv("HOME", t.TempDir())
 	fixture := makeFixture(t, "base\n", "local\n")
 	server := newWebServer(t, fixture, "test-token", nil, nil)
 	request := httptest.NewRequest(http.MethodGet, "/api/storage", nil)
@@ -69,10 +72,13 @@ func TestStorageListsPiSecretRules(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Secrets) != 2 || payload.Secrets[0].Name != "auth.json" || payload.Secrets[0].Encrypted || payload.Secrets[0].Destination != "~/.pi/agent/auth.json" {
+	if len(payload.Secrets) != 3 || payload.Secrets[0].Name != "auth.json" || payload.Secrets[0].Encrypted || payload.Secrets[0].Destination != "~/.pi/agent/auth.json" {
 		t.Fatalf("secrets = %+v", payload.Secrets)
 	}
 	if payload.Secrets[1].Name != "mcp-auth.json" || payload.Secrets[1].Adapter != "pi" {
+		t.Fatalf("secrets = %+v", payload.Secrets)
+	}
+	if payload.Secrets[2].Adapter != "opencode" || payload.Secrets[2].Destination != "~/.local/share/opencode/auth.json" {
 		t.Fatalf("secrets = %+v", payload.Secrets)
 	}
 }
@@ -461,6 +467,27 @@ func TestResolveDelegatesToMachine(t *testing.T) {
 	}
 	if !mergedOnAgent {
 		t.Fatal("resolve must delegate the merge to the machine (hub runs no local merge)")
+	}
+}
+
+// "以这台机器为准" runs the machine's push. When the secret scanner stops
+// it, the console must be told (with the files) so it can ask to write
+// anyway; a vague "没有应用这次裁决" leaves the button looking dead.
+func TestResolveLocalSurfacesSecretsRejected(t *testing.T) {
+	home := t.TempDir()
+	fixture := makeFixtureAtHome(t, home, "base\n")
+	source := &sourceStub{
+		list:    []AgentInfo{{AgentID: "box-c", Hostname: "box-c", Mode: "listen", Drift: &AgentDrift{Conflicts: 1}}},
+		pushRaw: json.RawMessage(`{"ok":false,"status":"secrets-rejected","secrets":[{"path":"pi/files/web-search.json"}]}`),
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=local&agent=box-c&confirm=true", `{"adapters":["pi"]}`)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("resolve = %d body=%s", response.Code, response.Body)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"status":"secrets-rejected"`) || !strings.Contains(body, "pi/files/web-search.json") {
+		t.Fatalf("body = %s", body)
 	}
 }
 
