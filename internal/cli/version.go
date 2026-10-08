@@ -85,13 +85,13 @@ func renderVersionChecked(current string, outcome versionCheckOutcome) string {
 //     一下，自己就升级了".
 //  2. GITHUB channel (no hub credential): the original release-based
 //     self-update, unchanged.
-func runUpgrade(force bool, connect, home string, out, errOut io.Writer) int {
+func runUpgrade(force bool, hubURL, home string, out, errOut io.Writer) int {
 	// Hub channel first: commands.RunUpgrade resolves the machine's own
 	// credential (agent.json secret > keys/hub-token) and hub address.
 	// It reports NoCredential when neither exists (GitHub-only installs).
 	report := commands.RunUpgrade(commands.UpgradeOptions{
 		HomerHome: home,
-		Connect:   connect,
+		HubURL:    hubURL,
 		Out:       out,
 		ErrOut:    errOut,
 	})

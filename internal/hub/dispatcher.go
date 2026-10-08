@@ -21,7 +21,6 @@ const agentCallConcurrency = 64
 // Dispatcher adapts stream-connected agents to the web-facing interfaces.
 type Dispatcher struct {
 	Registry *Registry
-	Token    string
 	Hub      *AgentHub
 
 	limitsMu sync.Mutex
@@ -33,8 +32,10 @@ type agentCallLimit struct {
 	refs   int
 }
 
-func NewDispatcher(reg *Registry, token string) *Dispatcher {
-	return &Dispatcher{Registry: reg, Token: token, limits: make(map[string]*agentCallLimit)}
+// NewDispatcher retains token for the frozen constructor signature; stream
+// authentication is handled by AgentHub, so the dispatcher does not read it.
+func NewDispatcher(reg *Registry, _ string) *Dispatcher {
+	return &Dispatcher{Registry: reg, limits: make(map[string]*agentCallLimit)}
 }
 
 func (d *Dispatcher) ListAgents() []web.AgentInfo {
@@ -311,11 +312,11 @@ func (d *Dispatcher) requireOnline(agentID string) (AgentInfo, *stream.Session, 
 
 func (d *Dispatcher) agentInfo(agentID string) (AgentInfo, error) {
 	if d == nil || d.Registry == nil {
-		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("agent %q is not registered", agentID))
+		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("机器 %q 未注册", agentID))
 	}
 	info, ok := d.Registry.Get(agentID)
 	if !ok {
-		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("agent %q is not registered", agentID))
+		return AgentInfo{}, newAgentError("agent-not-found", http.StatusNotFound, fmt.Errorf("机器 %q 未注册", agentID))
 	}
 	return info, nil
 }

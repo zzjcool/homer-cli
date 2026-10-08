@@ -1,8 +1,10 @@
 package agentd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +14,28 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/core"
 )
+
+func TestAddMissingAdaptersLogsHubConfigValidationProblems(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	paths := core.GetHomerPaths(func(key string) string {
+		if key == "HOMER_HOME" {
+			return t.TempDir()
+		}
+		return os.Getenv(key)
+	})
+
+	if err := addMissingAdapters(paths, []byte(`{"version":1,"adapters":{"pi":{"root":"x","categories":{}}}}`)); err != nil {
+		t.Fatalf("addMissingAdapters() error = %v", err)
+	}
+	if got := output.String(); !strings.Contains(got, "invalid hub homer.json config") || !strings.Contains(got, "categories") {
+		t.Fatalf("hub config validation problems were not logged: %q", got)
+	}
+}
 
 // A fresh machine (no homer.json yet) must answer status with a LEGAL
 // report: the built-in adapters fall back to defaults and scan what is

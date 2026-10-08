@@ -110,11 +110,6 @@ func (d *Daemon) runConnection(ctx context.Context) (time.Duration, error) {
 	}
 	session := stream.NewSession(conn, d.cfg.Stream)
 	d.registerHandlers(session)
-	session.OnEvent("agent.reexec", func(context.Context, string, json.RawMessage) { d.requestReexec(session) })
-	session.OnEvent("agent.heartbeat-now", func(context.Context, string, json.RawMessage) { d.signalHeartbeat() })
-	session.OnEvent("agent.shutdown", func(context.Context, string, json.RawMessage) {
-		session.Close(stream.CloseGoingAway, "hub restarting")
-	})
 	ready := make(chan struct{})
 	helloErr := make(chan error, 1)
 	helloDone := make(chan struct{})
@@ -156,20 +151,24 @@ func (d *Daemon) runConnection(ctx context.Context) (time.Duration, error) {
 		}
 	}
 	connectedAt := time.Now()
+	d.logf("已连接 hub %s", d.cfg.HubURL)
+	var disconnectErr error
 	select {
 	case <-ctx.Done():
 		session.Close(stream.CloseNormal, "agent exiting")
 		<-runDone
-		return time.Since(connectedAt), ctx.Err()
+		disconnectErr = ctx.Err()
 	case err := <-runDone:
 		if ctx.Err() != nil {
-			return time.Since(connectedAt), ctx.Err()
+			disconnectErr = ctx.Err()
+		} else if err != nil {
+			disconnectErr = err
+		} else {
+			disconnectErr = io.EOF
 		}
-		if err != nil {
-			return time.Since(connectedAt), err
-		}
-		return time.Since(connectedAt), io.EOF
 	}
+	d.logf("与 hub %s 的连接已断开，持续 %s：%v", d.cfg.HubURL, time.Since(connectedAt).Round(time.Millisecond), disconnectErr)
+	return time.Since(connectedAt), disconnectErr
 }
 
 func streamURL(hubURL string) string {

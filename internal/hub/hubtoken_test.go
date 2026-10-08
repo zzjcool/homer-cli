@@ -89,16 +89,6 @@ func TestHubTokenFileKeepsSecretsOutOfOfWorkspace(t *testing.T) {
 }
 
 func TestLanIPv4(t *testing.T) {
-	// Pure helper: wildcard requirement detection.
-	if !requiresAdvertiseHint("0.0.0.0:7760") {
-		t.Fatal("0.0.0.0 should require an advertise hint")
-	}
-	if requiresAdvertiseHint("192.168.1.5:7760") {
-		t.Fatal("concrete IP should not require an advertise hint")
-	}
-	if requiresAdvertiseHint("[::]:7760") {
-		t.Fatal("IPv6 wildcard handling is explicit, not a hint case")
-	}
 	// Interface enumeration must never guess when ambiguous: the test host
 	// has at least loopback; the function's contract is "exactly one global
 	// IPv4 or error".

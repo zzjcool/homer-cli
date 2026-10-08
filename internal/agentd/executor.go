@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -459,7 +460,7 @@ func addMissingAdapters(paths core.HomerPaths, meta []byte) error {
 	}
 	center, problems := core.ValidateConfig(meta)
 	if center == nil {
-		_ = problems
+		log.Printf("agent: ignoring invalid hub homer.json config while bootstrapping: %s", strings.Join(problems, "; "))
 		return nil // an unreadable center config must not block a pull
 	}
 	local, err := core.LoadConfig(paths)

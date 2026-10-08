@@ -831,7 +831,7 @@ function renderAgents(agents, disabledFeature) {
     // 吊销：Tailscale 式单机踢除（凭证失效，行保留观察）。
     const revoke = el("button", "small-btn danger-btn", "吊销");
     revoke.type = "button";
-    revoke.title = "吊销该机器的接入凭证（其下次心跳立即失效；不影响其他机器）";
+    revoke.title = "吊销该机器的接入凭证（立即失效；不影响其他机器）";
     revoke.addEventListener("click", async () => {
       if (!confirm("吊销 " + (a.hostname || a.agentId) + "?\n该机器将立即失去接入权限（重新接入需生成新接入码）。")) return;
       try {

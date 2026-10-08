@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/stream"
+	"github.com/zzjcool/homer-cli/internal/stream/streamtest"
 	"github.com/zzjcool/homer-cli/internal/stream/wsconn"
 	"github.com/zzjcool/homer-cli/internal/toolctl"
 	"github.com/zzjcool/homer-cli/internal/web"
@@ -360,6 +361,20 @@ func TestFrameBeforeHello(t *testing.T) {
 	var closeErr *stream.CloseError
 	if !errors.As(err, &closeErr) || closeErr.Code != stream.ClosePolicy {
 		t.Fatalf("frame-before-hello error = %T %v, want close 1008", err, err)
+	}
+}
+
+func TestRejectHelloWriteFailureIsLogged(t *testing.T) {
+	logger := &synchronizedLog{}
+	hub := NewAgentHub(NewRegistry(), &Authenticator{}, nil, HubOptions{Logger: logger})
+	left, right := streamtest.Pipe(streamtest.PipeOptions{})
+	defer left.CloseNow()
+	defer right.CloseNow()
+	conn := &streamtest.FaultConn{Conn: left, WriteError: errors.New("write failed")}
+
+	hub.rejectHello(conn, "hello-id", stream.CodeBadRequest, "invalid hello", stream.ClosePolicy)
+	if got := logger.String(); !strings.Contains(got, "failed to write hello rejection") || !strings.Contains(got, "write failed") {
+		t.Fatalf("hello rejection write failure was not logged: %q", got)
 	}
 }
 

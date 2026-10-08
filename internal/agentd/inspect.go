@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -133,7 +132,7 @@ func (d *Daemon) inspect(ctx context.Context, params web.InspectParams, progress
 		if err == nil {
 			configReadable = true
 			tracker = newInspectProgressTracker(progress, 0)
-			status, err = d.inspectStatusFlight(ctx, func(scanCtx context.Context) (commands.StatusReport, error) {
+			status, err = d.statusFlightDo(ctx, func(scanCtx context.Context) (commands.StatusReport, error) {
 				d.execMu.RLock()
 				defer d.execMu.RUnlock()
 				return inspectLocalStatus(scanCtx, local, paths, config, tracker)
@@ -196,88 +195,6 @@ func executorPaths(homerHome string) core.HomerPaths {
 		}
 		return os.Getenv(key)
 	})
-}
-
-// inspectStatusFlight shares the optimized status scan with statusReport. If a
-// status request already owns this write generation, inspect consumes its
-// report; if inspect wins, a concurrent status request can consume this scan.
-func (d *Daemon) inspectStatusFlight(ctx context.Context, scan func(context.Context) (commands.StatusReport, error)) (commands.StatusReport, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	d.statusFlight.mu.Lock()
-	generation := d.statusFlight.writeGen
-	epoch := d.statusFlight.scanEpoch
-	if d.statusFlight.flights == nil {
-		d.statusFlight.flights = make(map[uint64]*statusFlightCall)
-	}
-	call := d.statusFlight.flights[epoch]
-	start := false
-	if call == nil || call.generation != generation {
-		call = &statusFlightCall{done: make(chan struct{}), generation: generation}
-		d.statusFlight.flights[epoch] = call
-		start = true
-	}
-	call.waiters++
-	d.statusFlight.mu.Unlock()
-
-	if start {
-		go d.runInspectStatusFlight(generation, epoch, call, scan)
-	}
-	select {
-	case <-call.done:
-		d.statusFlight.mu.Lock()
-		call.waiters--
-		d.statusFlight.mu.Unlock()
-		return cloneStatusReport(call.report), call.err
-	case <-ctx.Done():
-		d.statusFlight.mu.Lock()
-		call.waiters--
-		d.statusFlight.mu.Unlock()
-		return commands.StatusReport{}, ctx.Err()
-	}
-}
-
-func (d *Daemon) runInspectStatusFlight(generation, epoch uint64, call *statusFlightCall, scan func(context.Context) (commands.StatusReport, error)) {
-	ctx, cancel := context.WithTimeout(context.Background(), DriftTimeout)
-	defer cancel()
-	var report commands.StatusReport
-	var err error
-	func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				report = commands.StatusReport{}
-				err = fmt.Errorf("inspect status scan panic: %v", recovered)
-			}
-		}()
-		report, err = scan(ctx)
-	}()
-	if ctx.Err() != nil && err == nil {
-		err = ctx.Err()
-	}
-	if err == nil {
-		drift := driftFromStatus(report)
-		d.statusFlight.mu.Lock()
-		current := d.statusFlight.writeGen == generation && d.statusFlight.scanEpoch == epoch
-		if current {
-			d.driftMu.Lock()
-			d.lastDrift = cloneDrift(drift)
-			d.lastDriftAt = time.Now()
-			d.driftMu.Unlock()
-		}
-		d.statusFlight.mu.Unlock()
-		if current {
-			d.signalHeartbeat()
-		}
-	}
-	d.statusFlight.mu.Lock()
-	call.report = cloneStatusReport(report)
-	call.err = err
-	if d.statusFlight.flights[epoch] == call {
-		delete(d.statusFlight.flights, epoch)
-	}
-	close(call.done)
-	d.statusFlight.mu.Unlock()
 }
 
 func inspectLocalStatus(ctx context.Context, executor *localExecutor, paths core.HomerPaths, config *core.HomerConfig, progress *inspectProgressTracker) (commands.StatusReport, error) {

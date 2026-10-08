@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -79,13 +80,36 @@ func TestAgentCommandParsesHub(t *testing.T) {
 	}
 }
 
-// listen and connect were removed with the stream transport. They must be
-// plain unknown-option errors, never silently accepted.
+// Removed agent transport flags receive migration guidance rather than a
+// generic unknown-option error, and still exit nonzero through the CLI.
 func TestAgentCommandRejectsRemovedModeFlags(t *testing.T) {
-	for _, flag := range []string{"--listen", "--connect", "--advertise"} {
-		if _, err := parseOptions(CommandAgent, []string{flag, "x"}, false); err == nil {
-			t.Fatalf("%s should be rejected now that listen/connect modes are gone", flag)
-		}
+	tests := []struct {
+		flag string
+		want string
+	}{
+		{"--connect", "--connect 已移除，请改用 --hub <url>"},
+		{"--listen", "--listen 已移除；listen 模式已移除，agent 现在只主动连 hub"},
+		{"--advertise", "--advertise 已移除；listen 模式已移除，agent 现在只主动连 hub"},
+	}
+	for _, test := range tests {
+		t.Run(test.flag, func(t *testing.T) {
+			_, err := parseOptions(CommandAgent, []string{test.flag, "x"}, false)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("parse error = %v, want %q", err, test.want)
+			}
+			_, err = parseOptions(CommandAgent, []string{test.flag + "=x"}, false)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("inline parse error = %v, want %q", err, test.want)
+			}
+
+			var out, errOut bytes.Buffer
+			if code := runWithIO([]string{"homer", "agent", test.flag, "x"}, &out, &errOut); code == 0 {
+				t.Fatalf("removed option exit code = 0, stderr=%q", errOut.String())
+			}
+			if !strings.Contains(errOut.String(), test.want) {
+				t.Fatalf("CLI error = %q, want message %q", errOut.String(), test.want)
+			}
+		})
 	}
 }
 

@@ -1005,6 +1005,44 @@ func TestSessionGoroutinesDoNotLeak(t *testing.T) {
 	}
 }
 
+func TestEventHandlerPanicIsLoggedAndSessionSurvives(t *testing.T) {
+	trackGoroutineBaseline(t)
+	left, right := streamtest.Pipe(streamtest.PipeOptions{})
+	logger := &countLogger{}
+	client := NewSession(left, Options{PingInterval: time.Hour})
+	server := NewSession(right, Options{PingInterval: time.Hour, Logger: logger})
+	started := make(chan struct{}, 2)
+	server.OnEvent("panic-method", func(context.Context, string, json.RawMessage) {
+		started <- struct{}{}
+		panic("event exploded")
+	})
+	server.Handle("alive", func(context.Context, *Request) (any, error) { return "ok", nil })
+	clientDone, serverDone, cancel := runSessions(t, client, server)
+	defer cleanupSessions(t, client, server, clientDone, serverDone, cancel)
+
+	ctx, stop := context.WithTimeout(context.Background(), testTimeout)
+	defer stop()
+	for range 2 {
+		if err := client.Notify(ctx, "panic-method", nil); err != nil {
+			t.Fatalf("Notify panic event: %v", err)
+		}
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(testTimeout):
+			t.Fatal("panicking event handler did not run")
+		}
+	}
+	waitUntil(t, func() bool { return logger.count() == 1 })
+	if !logger.contains("method=\"panic-method\"") || !logger.contains("event exploded") {
+		t.Fatalf("event panic log = %v", logger.snapshot())
+	}
+	if got := callJSON[string](t, client, "alive", nil); got != "ok" {
+		t.Fatalf("session did not survive event panic: %q", got)
+	}
+}
+
 func TestNotifyAndEvent(t *testing.T) {
 	left, right := streamtest.Pipe(streamtest.PipeOptions{})
 	client := NewSession(left, Options{PingInterval: time.Hour})
@@ -1126,6 +1164,19 @@ func (l *countLogger) Printf(format string, args ...any) {
 	l.mu.Unlock()
 }
 func (l *countLogger) count() int { l.mu.Lock(); defer l.mu.Unlock(); return len(l.lines) }
+func (l *countLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+func (l *countLogger) contains(value string) bool {
+	for _, line := range l.snapshot() {
+		if strings.Contains(line, value) {
+			return true
+		}
+	}
+	return false
+}
 
 // recordConn records server writes so race tests can prove that a request ID
 // never receives two terminal responses.

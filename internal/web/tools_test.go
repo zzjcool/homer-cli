@@ -305,7 +305,7 @@ func TestAgentToolUpgradeRouteRefusesAnEmptyReport(t *testing.T) {
 	}
 }
 
-func TestListenModeRoutesAreRemoved(t *testing.T) {
+func TestAgentWebRoutesAreRemoved(t *testing.T) {
 	fixture := makeFixture(t, "base\n", "base\n")
 	server := newWebServer(t, fixture, "test-token", nil, nil)
 	for _, path := range []struct {

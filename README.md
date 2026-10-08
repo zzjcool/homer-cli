@@ -44,9 +44,9 @@ homer agent --hub http://<hub>:7760 --token <token>
 ```
 
 `homer agent` 只有这一种连接方式。首次启动用 `--hub <url>` 指定 hub；
-`--data-url <url>` 可选，默认与 `--hub` 相同，只用于 `/api/snapshot` 和
-`/dl/*` 数据请求，不改变 WebSocket 控制连接。hub 与 agent 在同一台机器时，
-可把数据请求指向 hub 的回环地址以绕开隧道：
+`--data-url <url>` 可选（也可用 `HOMER_DATA_URL` 环境变量设置），默认与 `--hub`
+相同，只用于 `/api/snapshot` 和 `/dl/*` 数据请求，不改变 WebSocket 控制连接。hub
+与 agent 在同一台机器时，可把数据请求指向 hub 的回环地址以绕开隧道：
 
 ```sh
 homer agent --hub https://<hub> --data-url http://127.0.0.1:7760 --token <token>

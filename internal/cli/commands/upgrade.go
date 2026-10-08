@@ -19,7 +19,7 @@ import (
 type UpgradeOptions struct {
 	HomerHome string
 	Home      string
-	Connect   string // hub base URL override (default: agent.json's hubUrl)
+	HubURL    string // hub base URL override (default: agent.json's hubUrl)
 	Out       io.Writer
 	ErrOut    io.Writer
 }
@@ -62,11 +62,11 @@ func RunUpgrade(opts UpgradeOptions) UpgradeReport {
 	// path — keys/hub-token holds a burned hr_ code after enrollment),
 	// then the file token (hub-token deployments), then nothing.
 	credential := ""
-	hubURL := strings.TrimSpace(opts.Connect)
+	hubURL := strings.TrimSpace(opts.HubURL)
 	if hubURL == "" {
 		if cfg, ok := readAgentIdentity(paths.Home); ok {
 			credential = cfg.secret
-			hubURL = cfg.connectURL
+			hubURL = cfg.hubURL
 		}
 	}
 	if credential == "" {
@@ -141,8 +141,8 @@ func RunUpgrade(opts UpgradeOptions) UpgradeReport {
 // agentIdentity is the minimal agent.json projection upgrade needs
 // (agentd cannot be imported here: import cycle).
 type agentIdentity struct {
-	secret     string
-	connectURL string
+	secret string
+	hubURL string
 }
 
 func readAgentIdentity(home string) (agentIdentity, bool) {
@@ -157,5 +157,5 @@ func readAgentIdentity(home string) (agentIdentity, bool) {
 	if json.Unmarshal(data, &cfg) != nil {
 		return agentIdentity{}, false
 	}
-	return agentIdentity{secret: cfg.AgentSecret, connectURL: cfg.HubURL}, true
+	return agentIdentity{secret: cfg.AgentSecret, hubURL: cfg.HubURL}, true
 }

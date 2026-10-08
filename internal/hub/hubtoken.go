@@ -135,20 +135,6 @@ func writeHubToken(home, token string) error {
 	return nil
 }
 
-// requiresAdvertiseHint reports whether a listen address is a wildcard that
-// the hub cannot dial as-is (registering 0.0.0.0 as the agent's addr would
-// make it unreachable).
-func requiresAdvertiseHint(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() && ip.To4() != nil {
-		return true
-	}
-	return false
-}
-
 // LanIPv4 returns the address other machines should use to reach this
 // host. Preference order: the default route's source IP (the unambiguous
 // outbound NIC — docker0/bridges never carry the default route), then a
