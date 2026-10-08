@@ -932,15 +932,19 @@ func (s *Session) terminate(err error) {
 		in.state.CompareAndSwap(0, 2)
 		in.cancel()
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
 	close(s.done)
+	cancel := s.cancel
 	s.mu.Unlock()
 	if localClose {
+		// Keep the read context alive until Conn.Close has had a chance to send
+		// its close frame. coder/websocket cancels a Read immediately when its
+		// context is canceled, which would otherwise abort the close handshake.
 		_ = s.conn.Close(closeFrame.Code, closeFrame.Reason)
 	} else {
 		_ = s.conn.CloseNow()
+	}
+	if cancel != nil {
+		cancel()
 	}
 	s.queueMu.Lock()
 	s.urgentQ = nil
