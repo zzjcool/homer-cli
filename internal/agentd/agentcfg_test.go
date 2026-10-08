@@ -1,28 +1,21 @@
 package agentd
 
 import (
-	"context"
-	"errors"
-	"net"
-	"net/http/httptest"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/zzjcool/homer-cli/internal/hub"
 )
 
-func TestAgentConfigRoundTrip(t *testing.T) {
+func TestAgentCfgRoundTrip(t *testing.T) {
 	home := t.TempDir()
 	want := AgentConfig{
-		AgentID:      "agent-a",
-		Mode:         "listen",
-		HubURL:       "https://hub.example",
-		ListenAddr:   "192.168.1.5:7761",
-		AdvertiseURL: "http://192.168.1.5:7761",
+		AgentID:     "agent-a",
+		HubURL:      "https://hub.example",
+		DataURL:     "http://hub-internal.example",
+		AgentSecret: "secret-a",
 	}
 	if err := SaveAgentConfig(home, want); err != nil {
 		t.Fatal(err)
@@ -41,6 +34,24 @@ func TestAgentConfigRoundTrip(t *testing.T) {
 	if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Fatalf("agent.json mode = %o, want 600", mode)
 	}
+	data, err := os.ReadFile(filepath.Join(home, "agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"agentId", "hubUrl", "dataUrl", "agentSecret"} {
+		if _, ok := fields[name]; !ok {
+			t.Errorf("agent.json is missing %q: %s", name, data)
+		}
+	}
+	for _, old := range []string{"mode", "connectUrl", "listenAddr", "advertiseUrl"} {
+		if _, ok := fields[old]; ok {
+			t.Errorf("agent.json contains removed field %q: %s", old, data)
+		}
+	}
 
 	if err := os.WriteFile(filepath.Join(home, "agent.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
@@ -56,12 +67,13 @@ func TestAgentConfigRoundTrip(t *testing.T) {
 	}
 }
 
-func TestResolveConfigMergesPersisted(t *testing.T) {
+func TestAgentCfgResolveConfig(t *testing.T) {
 	home := t.TempDir()
 	if err := SaveAgentConfig(home, AgentConfig{
-		AgentID:    "saved-agent",
-		Mode:       "connect",
-		ConnectURL: "http://saved-hub",
+		AgentID:     "saved-agent",
+		HubURL:      "https://saved-hub.example",
+		DataURL:     "http://saved-data.example",
+		AgentSecret: "saved-secret",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,199 +82,72 @@ func TestResolveConfigMergesPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AgentID != "saved-agent" || got.ConnectURL != "http://saved-hub" {
-		t.Fatalf("ResolveConfig() = %+v, want persisted agent ID and URL", got)
+	if got.AgentID != "saved-agent" || got.HubURL != "https://saved-hub.example" ||
+		got.DataURL != "http://saved-data.example" || got.AgentSecret != "saved-secret" {
+		t.Fatalf("ResolveConfig() = %+v, want persisted connection state", got)
 	}
 
-	got, err = ResolveConfig(Config{Home: home, ConnectURL: "http://explicit-hub"})
+	got, err = ResolveConfig(Config{
+		Home:        home,
+		AgentID:     "explicit-agent",
+		HubURL:      "https://explicit-hub.example",
+		DataURL:     "http://explicit-data.example",
+		AgentSecret: "explicit-secret",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ConnectURL != "http://explicit-hub" {
-		t.Fatalf("ResolveConfig() ConnectURL = %q, want explicit URL", got.ConnectURL)
-	}
-	if got.AgentID != "saved-agent" {
-		t.Fatalf("ResolveConfig() AgentID = %q, want persisted ID", got.AgentID)
+	if got.AgentID != "explicit-agent" || got.HubURL != "https://explicit-hub.example" ||
+		got.DataURL != "http://explicit-data.example" || got.AgentSecret != "explicit-secret" {
+		t.Fatalf("explicit config did not win: %+v", got)
 	}
 }
 
-func TestResolveConfigNoModeError(t *testing.T) {
+func TestAgentCfgIgnoresLegacyFieldsButDoesNotUseThem(t *testing.T) {
+	home := t.TempDir()
+	legacy := `{"agentId":"legacy-agent","mode":"connect","connectUrl":"https://old-hub.example","listenAddr":"0.0.0.0:7761","advertiseUrl":"http://agent.example:7761"}`
+	if err := os.WriteFile(filepath.Join(home, "agent.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := LoadAgentConfig(home); !ok {
+		t.Fatal("legacy unknown fields must not make agent.json unreadable")
+	}
+	if _, err := ResolveConfig(Config{Home: home}); err == nil || !strings.Contains(err.Error(), "--hub") {
+		t.Fatalf("ResolveConfig() error = %v, want an explicit --hub hint", err)
+	}
+}
+
+func TestAgentCfgExplicitTokenOverridesButPreservesSavedSecret(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveAgentConfig(home, AgentConfig{AgentID: "saved", HubURL: "https://saved.example", AgentSecret: "saved-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveConfig(Config{Home: home, Token: "explicit-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.AgentSecret != "" || resolved.Token != "explicit-token" {
+		t.Fatalf("ResolveConfig with explicit token = %+v, want explicit token without secret override", resolved)
+	}
+	d := New(resolved, nil)
+	if got := d.bearerCredential(); got != "explicit-token" {
+		t.Fatalf("explicit token credential = %q", got)
+	}
+	if err := d.saveAgentConfig(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, ok := LoadAgentConfig(home)
+	if !ok || persisted.AgentSecret != "saved-secret" {
+		t.Fatalf("agent.json secret after explicit-token run = %+v loaded=%v", persisted, ok)
+	}
+}
+
+func TestAgentCfgMissingHubURL(t *testing.T) {
 	_, err := ResolveConfig(Config{Home: t.TempDir()})
-	if err == nil {
-		t.Fatal("ResolveConfig() returned nil error for missing mode")
+	if err == nil || !strings.Contains(err.Error(), "hub") || !strings.Contains(err.Error(), "--hub") {
+		t.Fatalf("ResolveConfig() error = %v, want a clear missing HubURL error", err)
 	}
-	if !strings.Contains(err.Error(), "homer agent --connect <url>") {
-		t.Fatalf("ResolveConfig() error = %q, want bootstrap hint", err)
-	}
-}
-
-func TestResolveConfigExplicitFieldsWin(t *testing.T) {
-	home := t.TempDir()
-	if err := SaveAgentConfig(home, AgentConfig{
-		AgentID:      "saved-agent",
-		Mode:         "listen",
-		HubURL:       "http://saved-hub",
-		ListenAddr:   "0.0.0.0:7761",
-		AdvertiseURL: "http://saved-agent:7761",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ResolveConfig(Config{
-		Home:         home,
-		AgentID:      "explicit-agent",
-		ListenAddr:   "127.0.0.1:7761",
-		AdvertiseURL: "http://explicit-agent:7761",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AgentID != "explicit-agent" || got.ListenAddr != "127.0.0.1:7761" || got.AdvertiseURL != "http://explicit-agent:7761" {
-		t.Fatalf("ResolveConfig() = %+v, explicit fields were not preserved", got)
-	}
-	if got.HubURL != "http://saved-hub" {
-		t.Fatalf("ResolveConfig() HubURL = %q, want persisted completion", got.HubURL)
-	}
-}
-
-func TestAgentdPersistsAfterRegister(t *testing.T) {
-	home := t.TempDir()
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-
-	cfg := Config{
-		Home:         home,
-		ConnectURL:   hubServer.URL,
-		Token:        "token",
-		AgentID:      "persist-agent",
-		PollWait:     10 * time.Millisecond,
-		PollInterval: 5 * time.Millisecond,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, newRecordingExecutor()).Run(ctx) }()
-	waitFor(t, time.Second, func() bool {
-		_, ok := registry.Get(cfg.AgentID)
-		return ok
-	})
-	waitFor(t, time.Second, func() bool {
-		persisted, ok := LoadAgentConfig(home)
-		return ok && persisted.AgentID == cfg.AgentID && persisted.ConnectURL == cfg.ConnectURL
-	})
-
-	cancel()
-	select {
-	case err := <-runDone:
-		if err != nil {
-			t.Fatalf("connect Run() = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("connect daemon did not stop")
-	}
-	body, err := os.ReadFile(filepath.Join(home, "agent.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(body), cfg.Token) {
-		t.Fatalf("agent.json contains token: %s", body)
-	}
-}
-
-func TestFailedRegisterDoesNotPersist(t *testing.T) {
-	home := t.TempDir()
-	d := New(Config{
-		Home:       home,
-		ConnectURL: "http://127.0.0.1:1",
-		AgentID:    "failed-agent",
-	}, newRecordingExecutor())
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := d.register(ctx, hub.AgentModeConnect, "host"); err == nil {
-		t.Fatal("register() returned nil for an unreachable hub")
-	}
-	if _, ok := LoadAgentConfig(home); ok {
-		t.Fatal("failed register persisted agent config")
-	}
-}
-
-func TestAgentdAdvertiseFallbackConcreteIP(t *testing.T) {
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-	d := New(Config{
-		Home:       t.TempDir(),
-		HubURL:     hubServer.URL,
-		ListenAddr: "192.168.1.5:7761",
-		AgentID:    "listen-fallback-agent",
-		Token:      "token",
-	}, newRecordingExecutor())
-	if err := d.register(context.Background(), hub.AgentModeListen, "host"); err != nil {
-		t.Fatal(err)
-	}
-	info, ok := registry.Get(d.cfg.AgentID)
-	if !ok {
-		t.Fatal("agent was not registered")
-	}
-	if info.Addr != "http://192.168.1.5:7761" {
-		t.Fatalf("registered addr = %q, want http://192.168.1.5:7761", info.Addr)
-	}
-}
-
-func TestAdvertiseFallbackConcreteIP(t *testing.T) {
-	got, err := DeriveAdvertiseURL("192.168.1.5:7761")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "http://192.168.1.5:7761" {
-		t.Fatalf("DeriveAdvertiseURL() = %q, want concrete IP URL", got)
-	}
-}
-
-func TestDeriveAdvertiseURL(t *testing.T) {
-	tests := []struct {
-		name      string
-		listen    string
-		want      string
-		wantError string
-	}{
-		{name: "ipv6 wildcard", listen: "[::]:7761", wantError: "--advertise <url>"},
-		{name: "invalid", listen: "not-an-address", wantError: "--advertise <url>"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := DeriveAdvertiseURL(tt.listen)
-			if tt.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-					t.Fatalf("DeriveAdvertiseURL() = %q, %v; want error containing %q", got, err, tt.wantError)
-				}
-				return
-			}
-			if err != nil || got != tt.want {
-				t.Fatalf("DeriveAdvertiseURL() = %q, %v; want %q", got, err, tt.want)
-			}
-		})
-	}
-}
-
-func TestDeriveAdvertiseURLWildcard(t *testing.T) {
-	original := discoverLanIPv4
-	t.Cleanup(func() { discoverLanIPv4 = original })
-
-	discoverLanIPv4 = func() (net.IP, error) {
-		return net.ParseIP("192.168.1.5"), nil
-	}
-	got, err := DeriveAdvertiseURL("0.0.0.0:7761")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "http://192.168.1.5:7761" {
-		t.Fatalf("DeriveAdvertiseURL() = %q, want wildcard fallback", got)
-	}
-
-	discoverLanIPv4 = func() (net.IP, error) {
-		return nil, errors.New("本机有多个网卡；请用 --advertise <url>")
-	}
-	if _, err := DeriveAdvertiseURL("0.0.0.0:7761"); err == nil || !strings.Contains(err.Error(), "--advertise <url>") {
-		t.Fatalf("wildcard ambiguity error = %v, want advertise hint", err)
+	if got, err := ResolveConfig(Config{Home: t.TempDir(), HubURL: "https://explicit.example"}); err != nil || got.HubURL != "https://explicit.example" {
+		t.Fatalf("ResolveConfig(explicit HubURL) = %+v, %v", got, err)
 	}
 }
