@@ -6,189 +6,193 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"reflect"
-	"regexp"
-	"runtime"
 	"strings"
+
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
-	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/hub"
+	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/stream"
+	"github.com/zzjcool/homer-cli/internal/stream/streamtest"
+	"github.com/zzjcool/homer-cli/internal/stream/wsconn"
+	"github.com/zzjcool/homer-cli/internal/toolctl"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
-func TestConfigModeValidation(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  Config
-		want hub.AgentMode
-		ok   bool
-	}{
-		{name: "listen", cfg: Config{ListenAddr: "127.0.0.1:1"}, want: hub.AgentModeListen, ok: true},
-		{name: "connect", cfg: Config{ConnectURL: "http://hub"}, want: hub.AgentModeConnect, ok: true},
-		{name: "both", cfg: Config{ListenAddr: ":1", ConnectURL: "http://hub"}},
-		{name: "neither", cfg: Config{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mode, err := tt.cfg.Mode()
-			if tt.ok {
-				if err != nil || mode != tt.want {
-					t.Fatalf("Mode() = %q, %v; want %q", mode, err, tt.want)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("Mode() = %q, nil; want error", mode)
-			}
-		})
-	}
-}
-
 func TestDefaultAgentID(t *testing.T) {
-	pattern := regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	first := DefaultAgentID()
-	second := DefaultAgentID()
-	if first == "" || second == "" || !pattern.MatchString(first) || !pattern.MatchString(second) {
-		t.Fatalf("DefaultAgentID() = %q, %q", first, second)
+	first, second := DefaultAgentID(), DefaultAgentID()
+	if first == "" || second == "" || first == second {
+		t.Fatalf("DefaultAgentID() = %q, %q; want distinct non-empty IDs", first, second)
 	}
-	parts := regexp.MustCompile(`-([0-9a-f]{4})$`).FindStringSubmatch(first)
-	if len(parts) != 2 {
-		t.Fatalf("DefaultAgentID() = %q, want four hex suffix", first)
+	for _, id := range []string{first, second} {
+		for _, r := range id {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				t.Fatalf("DefaultAgentID() = %q, contains invalid character %q", id, r)
+			}
+		}
 	}
 }
 
-func TestAgentdListenServesWebAndRegisters(t *testing.T) {
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-	listenAddr := freeTCPAddress(t)
-	cfg := Config{
-		HomerHome:    t.TempDir(),
-		Token:        "token",
-		ListenAddr:   listenAddr,
-		AdvertiseURL: "http://" + listenAddr,
-		HubURL:       hubServer.URL,
-		AgentID:      "listen-agent",
+func TestDaemonStreamHelloAndStatusHandler(t *testing.T) {
+	home := t.TempDir()
+	logger := &captureLogger{}
+	exec := &testExecutor{}
+	d := New(Config{
+		Home:       home,
+		HubURL:     "http://hub.example/base",
+		AgentID:    "agent-test",
+		EnrollCode: "hr_once",
+		Stream: stream.Options{
+			Logger:       logger,
+			PingInterval: time.Hour,
+			PingTimeout:  2 * time.Hour,
+		},
+	}, exec)
+	peerSessions := make(chan *stream.Session, 1)
+	helloSeen := make(chan hub.HelloParams, 1)
+	d.dialStream = func(ctx context.Context, gotURL string, options wsconn.DialOptions) (stream.Conn, *http.Response, error) {
+		if gotURL != "ws://hub.example/base/agent/v1/stream" {
+			t.Errorf("dial URL = %q", gotURL)
+		}
+		if got := options.Header.Get("Authorization"); got != "Bearer hr_once" {
+			t.Errorf("Authorization = %q, want enrollment code", got)
+		}
+		agentConn, hubConn := streamtest.Pipe(streamtest.PipeOptions{})
+		peer := stream.NewSession(hubConn, stream.Options{Logger: logger, PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+		peer.Handle(hub.MethodHello, func(_ context.Context, req *stream.Request) (any, error) {
+			var hello hub.HelloParams
+			if err := req.Decode(&hello); err != nil {
+				return nil, err
+			}
+			helloSeen <- hello
+			return hub.WelcomeResult{
+				Proto:          stream.ProtocolVersion,
+				HubVersion:     "test-hub",
+				InstanceID:     "hub-1",
+				AgentSecret:    "agent-secret",
+				PingIntervalMs: 60_000,
+				PingTimeoutMs:  120_000,
+				MaxFrame:       stream.DefaultMaxFrame,
+			}, nil
+		})
+		go func() { _ = peer.Run(ctx) }()
+		peerSessions <- peer
+		return agentConn, nil, nil
 	}
-	daemon := New(cfg, &recordingExecutor{})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
-	go func() { runDone <- daemon.Run(ctx) }()
-	defer func() {
+	go func() { runDone <- d.Run(ctx) }()
+	peer := <-peerSessions
+	t.Cleanup(func() {
 		cancel()
 		select {
 		case err := <-runDone:
 			if err != nil {
-				t.Errorf("listen Run() = %v", err)
+				t.Errorf("Run() = %v", err)
 			}
-		case <-time.After(2 * time.Second):
-			t.Error("listen daemon did not stop")
+		case <-time.After(3 * time.Second):
+			t.Error("daemon did not stop")
 		}
-	}()
+		peer.Close(stream.CloseGoingAway, "test complete")
+	})
 
-	waitFor(t, time.Second, func() bool {
-		info, ok := registry.Get(cfg.AgentID)
-		return ok && info.Mode == hub.AgentModeListen && info.Addr == cfg.AdvertiseURL
-	})
-	infoResponse := getHTTP(t, "http://"+listenAddr+"/agent/v1/info", "token")
-	if infoResponse.StatusCode != http.StatusOK {
-		t.Fatalf("agent info status = %d; body=%s", infoResponse.StatusCode, infoResponse.Body)
-	}
-	var infoBody struct {
-		OK       bool              `json:"ok"`
-		Identity web.AgentIdentity `json:"identity"`
-	}
-	decodeJSON(t, infoResponse.Body, &infoBody)
-	if !infoBody.OK || infoBody.Identity.AgentID != cfg.AgentID || infoBody.Identity.Hostname == "" {
-		t.Fatalf("agent info = %+v", infoBody)
-	}
-	health := getHTTP(t, "http://"+listenAddr+"/api/health", "")
-	if health.StatusCode != http.StatusOK {
-		t.Fatalf("health status = %d; body=%s", health.StatusCode, health.Body)
-	}
-}
-
-func TestAgentdConnectLoop(t *testing.T) {
-	registry := hub.NewRegistry()
-	var pollCount atomic.Int32
-	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/agent/v1/poll" {
-			pollCount.Add(1)
-		}
-		hub.NewAgentAPI(registry, "token").ServeHTTP(w, r)
-	})
-	hubServer := httptest.NewServer(api)
-	defer hubServer.Close()
-	exec := newRecordingExecutor()
-	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "connect-agent", PollWait: time.Second, PollInterval: 10 * time.Millisecond, ReportTimeout: time.Second}
-	daemon := New(cfg, exec)
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- daemon.Run(ctx) }()
-	waitFor(t, time.Second, func() bool {
-		_, ok := registry.Get(cfg.AgentID)
-		return ok
-	})
-	task := hub.Task{TaskID: "connect-status", Kind: hub.TaskKindStatus, CreatedAt: time.Now()}
-	if err := registry.Enqueue(cfg.AgentID, task); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, time.Second, func() bool {
-		result, err := registry.Wait(context.Background(), task.TaskID)
-		return err == nil && result.OK && result.Kind == hub.TaskKindStatus
-	})
-	waitFor(t, time.Second, func() bool { return pollCount.Load() >= 2 })
-	cancel()
 	select {
-	case err := <-runDone:
-		if err != nil {
-			t.Fatalf("connect Run() = %v", err)
+	case hello := <-helloSeen:
+		if hello.AgentID != "agent-test" || hello.Proto != stream.ProtocolVersion || hello.Hostname == "" {
+			t.Fatalf("hello = %+v", hello)
+		}
+		if len(hello.Caps) == 0 || !containsString(hello.Caps, hub.MethodInspect) {
+			t.Fatalf("hello capabilities = %v", hello.Caps)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("connect daemon did not stop")
+		t.Fatal("agent did not send hello")
+	}
+	var persisted AgentConfig
+	var ok bool
+	waitFor(t, time.Second, func() bool {
+		persisted, ok = LoadAgentConfig(home)
+		return ok && persisted.AgentSecret == "agent-secret"
+	})
+	if persisted.HubURL != "http://hub.example/base" {
+		t.Fatalf("agent config after welcome = %+v", persisted)
+	}
+	if got := d.bearerCredential(); got != "agent-secret" {
+		t.Fatalf("snapshot/data-plane credential = %q, want returned per-agent secret", got)
+	}
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), time.Second)
+	defer callCancel()
+	payload, err := peer.Call(callCtx, string(hub.TaskKindStatus), hub.TaskOptions{}, stream.WithBudget(time.Second))
+	if err != nil {
+		t.Fatalf("status call: %v", err)
+	}
+	var status commands.StatusReport
+	if err := json.Unmarshal(payload, &status); err != nil {
+		t.Fatalf("decode status %s: %v", payload, err)
+	}
+	if len(status.Adapters) != 1 || status.Adapters[0].ID != "pi" {
+		t.Fatalf("status = %+v", status)
 	}
 }
 
-func TestAgentdDispatchPerKind(t *testing.T) {
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-	exec := newRecordingExecutor()
-	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "dispatch-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
+func TestDaemonContextCancellationReturnsNil(t *testing.T) {
+	d := New(Config{HubURL: "http://hub.example", AgentID: "cancel-agent"}, &testExecutor{})
+	var attempts atomic.Int32
+	d.dialStream = func(context.Context, string, wsconn.DialOptions) (stream.Conn, *http.Response, error) {
+		attempts.Add(1)
+		return nil, nil, errors.New("network down")
+	}
+	d.retryWait = func(ctx context.Context, _ time.Duration) bool {
+		<-ctx.Done()
+		return false
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, exec).Run(ctx) }()
-	waitFor(t, time.Second, func() bool {
-		_, ok := registry.Get(cfg.AgentID)
-		return ok
-	})
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	waitFor(t, time.Second, func() bool { return attempts.Load() == 1 })
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() after context cancellation = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not return after cancellation")
+	}
+}
 
-	tasks := []hub.Task{
-		{TaskID: "dispatch-status", Kind: hub.TaskKindStatus, CreatedAt: time.Now()},
-		{TaskID: "dispatch-diff", Kind: hub.TaskKindDiff, Options: hub.TaskOptions{Adapter: "pi", Category: "settings"}, CreatedAt: time.Now()},
-		{TaskID: "dispatch-push", Kind: hub.TaskKindPush, Options: hub.TaskOptions{Confirm: true}, CreatedAt: time.Now()},
-		{TaskID: "dispatch-pull", Kind: hub.TaskKindPull, Options: hub.TaskOptions{Confirm: true}, CreatedAt: time.Now()},
-	}
-	for _, task := range tasks {
-		if err := registry.Enqueue(cfg.AgentID, task); err != nil {
-			t.Fatal(err)
+func TestDaemonReconnectLoop(t *testing.T) {
+	logger := &captureLogger{}
+	d := New(Config{
+		HubURL:  "http://hub.example",
+		AgentID: "reconnect-agent",
+		Backoff: stream.Backoff{Base: time.Millisecond, Max: time.Millisecond, Factor: 2},
+		Stream:  stream.Options{Logger: logger, PingInterval: time.Hour, PingTimeout: 2 * time.Hour},
+	}, &testExecutor{})
+	var attempts atomic.Int32
+	connected := make(chan *stream.Session, 1)
+	d.dialStream = func(ctx context.Context, _ string, _ wsconn.DialOptions) (stream.Conn, *http.Response, error) {
+		if attempts.Add(1) == 1 {
+			return nil, nil, errors.New("temporary network error")
 		}
-		result, err := registry.Wait(context.Background(), task.TaskID)
-		if err != nil || !result.OK {
-			t.Fatalf("task %s result = %+v, %v", task.TaskID, result, err)
-		}
+		agentConn, hubConn := streamtest.Pipe(streamtest.PipeOptions{})
+		peer := newTestHubSession(ctx, hubConn, func(hello hub.HelloParams) hub.WelcomeResult {
+			return hub.WelcomeResult{Proto: hello.Proto, HubVersion: "hub", PingIntervalMs: 60_000, PingTimeoutMs: 120_000}
+		})
+		connected <- peer
+		return agentConn, nil, nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- d.Run(ctx) }()
+	peer := <-connected
 	cancel()
 	select {
 	case err := <-runDone:
@@ -196,214 +200,980 @@ func TestAgentdDispatchPerKind(t *testing.T) {
 			t.Fatalf("Run() = %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("dispatch daemon did not stop")
+		t.Fatal("daemon did not stop after reconnect")
 	}
-	calls := exec.snapshot()
-	// The drift summary (uploaded with each poll, throttled to one full
-	// status per DriftInterval) may add leading status calls — filter
-	// them out, then require the task sequence to be intact and in order.
-	taskCalls := make([]call, 0, len(tasks))
-	for _, c := range calls {
-		if c.kind == hub.TaskKindStatus {
-			continue
-		}
-		taskCalls = append(taskCalls, c)
+	peer.Close(stream.CloseGoingAway, "test complete")
+	if attempts.Load() < 2 {
+		t.Fatalf("dial attempts = %d, want a retry", attempts.Load())
 	}
-	want := []call{
-		{kind: hub.TaskKindDiff, adapter: "pi", category: "settings"},
-		{kind: hub.TaskKindPush, confirm: true},
-		{kind: hub.TaskKindPull, confirm: true},
-	}
-	if len(taskCalls) != len(want) {
-		t.Fatalf("task calls = %+v (all: %+v)", taskCalls, calls)
-	}
-	for i := range want {
-		if taskCalls[i] != want[i] {
-			t.Fatalf("call[%d] = %+v, want %+v", i, taskCalls[i], want[i])
-		}
+	if !logger.contains("temporary network error") {
+		t.Fatalf("dial retry was not logged: %v", logger.snapshot())
 	}
 }
 
-func TestAgentdExecutorError(t *testing.T) {
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-	exec := newRecordingExecutor()
-	exec.statusErr = errors.New("status failed")
-	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "error-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, exec).Run(ctx) }()
-	waitFor(t, time.Second, func() bool { _, ok := registry.Get(cfg.AgentID); return ok })
-	task := hub.Task{TaskID: "error-status", Kind: hub.TaskKindStatus, CreatedAt: time.Now()}
-	if err := registry.Enqueue(cfg.AgentID, task); err != nil {
-		t.Fatal(err)
+func TestReconnectPolicy(t *testing.T) {
+	d := New(Config{
+		HubURL:  "http://hub.example",
+		Backoff: stream.Backoff{Base: time.Second, Max: time.Minute, Factor: 2},
+	}, &testExecutor{})
+	unsupported := &stream.Error{Code: stream.CodeUnsupported, Message: "unsupported-version"}
+	tests := []struct {
+		name       string
+		err        error
+		status     int
+		body       string
+		wantDelay  time.Duration
+		wantKey    string
+		wantAlways bool
+		wantText   string
+	}{
+		{name: "dial failure", err: errors.New("network"), wantDelay: time.Second, wantKey: "ws-dial-failed"},
+		{name: "401", err: &wsconn.DialError{Status: http.StatusUnauthorized}, wantDelay: 5 * time.Minute, wantKey: "ws-unauthorized", wantText: "凭证无效/接入码已用"},
+		{name: "410", err: &wsconn.DialError{Status: http.StatusGone, Body: `{"error":{"message":"protocol removed"}}`}, wantDelay: 5 * time.Minute, wantKey: "ws-protocol-removed", wantText: "protocol removed"},
+		{name: "unsupported handshake", err: &wsconn.DialError{Status: http.StatusBadRequest, Body: "unsupported-version"}, wantDelay: 5 * time.Minute, wantKey: "ws-unsupported-version"},
+		{name: "hub restart", err: &stream.CloseError{Code: stream.CloseGoingAway}, wantDelay: time.Second, wantKey: "ws-reconnect", wantAlways: true},
+		{name: "EOF", err: io.EOF, wantDelay: time.Second, wantKey: "ws-reconnect", wantAlways: true},
+		{name: "heartbeat", err: &stream.CloseError{Code: stream.CloseHeartbeat, Reason: "ping timeout"}, wantDelay: time.Second, wantKey: "ws-reconnect", wantAlways: true},
+		{name: "superseded", err: &stream.CloseError{Code: stream.CloseSuperseded}, wantDelay: 30 * time.Second, wantKey: "ws-superseded", wantAlways: true, wantText: "同 id 的另一进程已接管"},
+		{name: "revoked", err: &stream.CloseError{Code: stream.CloseRevoked}, wantDelay: 5 * time.Minute, wantKey: "ws-revoked", wantText: "重新接入"},
+		{name: "removed", err: &stream.CloseError{Code: stream.CloseRemoved}, wantDelay: 5 * time.Minute, wantKey: "ws-removed", wantText: "重新接入"},
+		{name: "hello unsupported", err: unsupported, wantDelay: 5 * time.Minute, wantKey: "ws-unsupported-version", wantText: "升级"},
+		{name: "protocol close unsupported", err: &stream.CloseError{Code: stream.CloseProtocol, Reason: "unsupported-version"}, wantDelay: 5 * time.Minute, wantKey: "ws-unsupported-version", wantText: "升级"},
 	}
-	result, err := registry.Wait(context.Background(), task.TaskID)
-	if err != nil {
-		t.Fatal(err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := d.retryFor(tt.err, 0)
+			if tt.status != 0 {
+				plan = d.retryFor(&wsconn.DialError{Status: tt.status, Body: tt.body}, 0)
+			}
+			if plan.delay != tt.wantDelay || plan.key != tt.wantKey || plan.always != tt.wantAlways {
+				t.Fatalf("retry plan = %+v, want delay=%v key=%q always=%v", plan, tt.wantDelay, tt.wantKey, tt.wantAlways)
+			}
+			if tt.wantText != "" && !strings.Contains(plan.line, tt.wantText) {
+				t.Fatalf("retry line %q does not contain %q", plan.line, tt.wantText)
+			}
+		})
 	}
-	if result.OK || result.Error != "status failed" {
-		t.Fatalf("result = %+v", result)
-	}
-	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("error daemon did not stop")
-	}
-}
-
-func TestAgentdReportTimeout(t *testing.T) {
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-	exec := newRecordingExecutor()
-	exec.blockStatus = true
-	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "timeout-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: 30 * time.Millisecond}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, exec).Run(ctx) }()
-	waitFor(t, time.Second, func() bool { _, ok := registry.Get(cfg.AgentID); return ok })
-	task := hub.Task{TaskID: "timeout-status", Kind: hub.TaskKindStatus, CreatedAt: time.Now()}
-	if err := registry.Enqueue(cfg.AgentID, task); err != nil {
-		t.Fatal(err)
-	}
-	result, err := registry.Wait(context.Background(), task.TaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.OK || !regexp.MustCompile(`timeout`).MatchString(result.Error) {
-		t.Fatalf("timeout result = %+v", result)
-	}
-	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout daemon did not stop")
-	}
-	// The blocked executor goroutine releases once its task context is
-	// cancelled (recordingExecutor waits on ctx.Done). Assert the daemon
-	// settles back to its baseline goroutine count: plan W-B2 requires
-	// "no goroutine leak (runtime.NumGoroutine within ±small delta)".
-	baseline := runtime.NumGoroutine()
-	leaked := true
-	for attempt := 0; attempt < 50; attempt++ {
-		if runtime.NumGoroutine() <= baseline+2 {
-			leaked = false
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if leaked {
-		t.Fatalf("goroutines leaked after timeout: baseline=%d now=%d", baseline, runtime.NumGoroutine())
+	if got := d.retryFor(errors.New("network"), 2).delay; got != 4*time.Second {
+		t.Fatalf("third transient retry delay = %v, want 4s", got)
 	}
 }
 
-func TestAgentdCtxCancel(t *testing.T) {
-	registry := hub.NewRegistry()
-	hubServer := httptest.NewServer(hub.NewAgentAPI(registry, "token"))
-	defer hubServer.Close()
-	cfg := Config{ConnectURL: hubServer.URL, Token: "token", AgentID: "cancel-agent", PollWait: 10 * time.Second, PollInterval: time.Millisecond}
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, newRecordingExecutor()).Run(ctx) }()
-	waitFor(t, time.Second, func() bool { _, ok := registry.Get(cfg.AgentID); return ok })
-	cancel()
-	select {
-	case err := <-runDone:
-		if err != nil {
-			t.Fatalf("Run() after cancel = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancelled daemon did not stop")
+func TestAgentdWSUnauthorizedIsLogged(t *testing.T) {
+	logger := &captureLogger{}
+	d := New(Config{HubURL: "http://hub.example", AgentID: "unauthorized", Stream: stream.Options{Logger: logger}}, &testExecutor{})
+	d.dialStream = func(context.Context, string, wsconn.DialOptions) (stream.Conn, *http.Response, error) {
+		return nil, nil, &wsconn.DialError{Status: http.StatusUnauthorized}
 	}
-}
-
-func TestLocalExecutor(t *testing.T) {
-	home := localExecutorFixture(t)
-	want, err := commands.RunStatus(commands.StatusOptions{HomerHome: home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := NewLocalExecutor(home).Status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Status() = %+v, want %+v", got, want)
-	}
-}
-
-type call struct {
-	kind      hub.TaskKind
-	adapter   string
-	category  string
-	confirm   bool
-	adapters  string
-	overwrite bool
-}
-
-type recordingExecutor struct {
-	mu          sync.Mutex
-	calls       []call
-	statusErr   error
-	blockStatus bool
-}
-
-func newRecordingExecutor() *recordingExecutor { return &recordingExecutor{} }
-
-func (e *recordingExecutor) Status(ctx context.Context) (commands.StatusReport, error) {
-	e.record(call{kind: hub.TaskKindStatus})
-	if e.blockStatus {
+	waited := make(chan time.Duration, 1)
+	d.retryWait = func(ctx context.Context, delay time.Duration) bool {
+		waited <- delay
 		<-ctx.Done()
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+	select {
+	case delay := <-waited:
+		if delay != 5*time.Minute {
+			t.Fatalf("401 retry delay = %v, want 5m", delay)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("agent did not enter the 401 retry path")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if !logger.contains("401") || !logger.contains("凭证无效/接入码已用") {
+		t.Fatalf("401 retry is not visibly logged: %v", logger.snapshot())
+	}
+}
+
+func TestTaskClass(t *testing.T) {
+	readCases := []struct {
+		method string
+		secret string
+	}{
+		{method: string(hub.TaskKindStatus)},
+		{method: string(hub.TaskKindDiff)},
+		{method: hub.MethodInspect},
+		{method: string(hub.TaskKindSecret), secret: "list"},
+		{method: string(hub.TaskKindSecret), secret: "exists"},
+		{method: string(hub.TaskKindSecret), secret: "status"},
+	}
+	for _, tc := range readCases {
+		options := hub.TaskOptions{SecretAction: tc.secret}
+		if got := classifyTask(tc.method, options); got != taskClassRead {
+			t.Errorf("classifyTask(%q, secret=%q) = %v, want read", tc.method, tc.secret, got)
+		}
+	}
+	for _, method := range []string{
+		string(hub.TaskKindPush), string(hub.TaskKindPull), string(hub.TaskKindSSHKey),
+		string(hub.TaskKindUpgrade), string(hub.TaskKindToolUpgrade), "future-method",
+	} {
+		if got := classifyTask(method, hub.TaskOptions{}); got != taskClassWrite {
+			t.Errorf("classifyTask(%q) = %v, want write", method, got)
+		}
+	}
+	for _, action := range []string{"create", "encrypt", "unlock", "save", "push", "pull", "unknown"} {
+		if got := classifyTask(string(hub.TaskKindSecret), hub.TaskOptions{SecretAction: action}); got != taskClassWrite {
+			t.Errorf("secret action %q classified as %v, want write", action, got)
+		}
+	}
+}
+
+func TestTaskClassWriteGateFIFOAndCancelable(t *testing.T) {
+	gate := newTaskGate()
+	firstRelease, queued, err := gate.acquire(context.Background(), nil)
+	if err != nil || queued {
+		t.Fatalf("first acquire = queued %v err %v", queued, err)
+	}
+	var orderMu sync.Mutex
+	var order []int
+	startWaiter := func(id int, ctx context.Context) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			release, _, err := gate.acquire(ctx, func() {})
+			if err == nil {
+				orderMu.Lock()
+				order = append(order, id)
+				orderMu.Unlock()
+				release()
+			}
+			done <- err
+		}()
+		return done
+	}
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	canceled := startWaiter(2, cancelCtx)
+	waitFor(t, time.Second, func() bool { return gate.waiting() == 1 })
+	second := startWaiter(3, context.Background())
+	waitFor(t, time.Second, func() bool { return gate.waiting() == 2 })
+	cancel()
+	if err := <-canceled; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled waiter error = %v", err)
+	}
+	firstRelease()
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	if fmt.Sprint(order) != "[3]" {
+		t.Fatalf("gate acquisition order = %v, want surviving FIFO waiter [3]", order)
+	}
+}
+
+func TestStatusFlight(t *testing.T) {
+	exec := &flightExecutor{started: make(chan int, 4), releases: make(chan struct{}, 4)}
+	d := New(Config{AgentID: "flight-agent"}, exec)
+	const callers = 12
+	results := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			_, err := d.statusReport(context.Background())
+			results <- err
+		}()
+	}
+	select {
+	case n := <-exec.started:
+		if n != 1 {
+			t.Fatalf("first scan number = %d", n)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("status scan did not start")
+	}
+	waitFor(t, time.Second, func() bool { return d.statusFlight.waiting() == callers })
+	select {
+	case n := <-exec.started:
+		t.Fatalf("singleflight started %d scans before release", n)
+	default:
+	}
+	exec.releases <- struct{}{}
+	for i := 0; i < callers; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := exec.calls.Load(); got != 1 {
+		t.Fatalf("status scan calls = %d, want one", got)
+	}
+
+	mixed := &flightExecutor{started: make(chan int, 2), releases: make(chan struct{}, 2)}
+	d = New(Config{AgentID: "status-inspect-flight"}, mixed)
+	statusDone := make(chan error, 1)
+	inspectDone := make(chan error, 1)
+	go func() { _, err := d.statusReport(context.Background()); statusDone <- err }()
+	go func() {
+		result, err := d.runTaskCommand(context.Background(), &stream.Request{
+			Method: hub.MethodInspect, Params: json.RawMessage(`{}`),
+		}, hub.TaskOptions{})
+		if err == nil {
+			if inspect, ok := result.(web.InspectResult); !ok || len(inspect.Status.Adapters) != 1 {
+				err = fmt.Errorf("unexpected inspect result %#v", result)
+			}
+		}
+		inspectDone <- err
+	}()
+	waitFor(t, time.Second, func() bool { return d.statusFlight.waiting() == 2 })
+	mixed.releases <- struct{}{}
+	if err := <-statusDone; err != nil {
+		t.Fatalf("status caller: %v", err)
+	}
+	if err := <-inspectDone; err != nil {
+		t.Fatalf("inspect caller: %v", err)
+	}
+	if calls := mixed.calls.Load(); calls != 1 {
+		t.Fatalf("concurrent status+inspect scans = %d, want one", calls)
+	}
+
+	// A scan that began before a completed write must not be joined by a new
+	// reader or overwrite the post-write drift cache.
+	blocked := &generationExecutor{
+		firstStarted: make(chan struct{}), secondStarted: make(chan struct{}), releaseFirst: make(chan struct{}),
+	}
+	d = New(Config{AgentID: "generation-agent"}, blocked)
+	first := make(chan error, 1)
+	go func() { _, err := d.statusReport(context.Background()); first <- err }()
+	<-blocked.firstStarted
+	d.bumpWriteGen()
+	second := make(chan error, 1)
+	go func() { _, err := d.statusReport(context.Background()); second <- err }()
+	select {
+	case <-blocked.secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("post-write scan joined the pre-write scan")
+	}
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	close(blocked.releaseFirst)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if got := d.cachedDrift(); got == nil || got.Push != 2 {
+		t.Fatalf("cached drift after stale scan completed = %+v, want generation 2", got)
+	}
+
+	// Reads arriving after a write begins must not join the pre-write scan;
+	// they share the post-write epoch and publish its current result.
+	blocked = &generationExecutor{
+		firstStarted: make(chan struct{}), secondStarted: make(chan struct{}), releaseFirst: make(chan struct{}),
+	}
+	d = New(Config{AgentID: "writing-generation"}, blocked)
+	first = make(chan error, 1)
+	go func() { _, err := d.statusReport(context.Background()); first <- err }()
+	<-blocked.firstStarted
+	release, _, err := d.writeGate.acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.beginWriteGen()
+	second = make(chan error, 1)
+	go func() { _, err := d.statusReport(context.Background()); second <- err }()
+	select {
+	case <-blocked.secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reader arriving during a write joined the pre-write scan")
+	}
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	d.bumpWriteGen()
+	release()
+	close(blocked.releaseFirst)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if got := d.cachedDrift(); got == nil || got.Push != 2 {
+		t.Fatalf("cached drift after in-progress write scan = %+v, want current result", got)
+	}
+}
+
+func TestHandlers(t *testing.T) {
+	d := New(Config{AgentID: "handler-agent", TaskTimeout: time.Second}, &testExecutor{})
+	agent, hubPeer := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agent, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	d.registerHandlers(agentSession)
+	hubSession := stream.NewSession(hubPeer, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan struct{}, 2)
+	go func() { _ = agentSession.Run(ctx); runDone <- struct{}{} }()
+	go func() { _ = hubSession.Run(ctx); runDone <- struct{}{} }()
+	defer func() {
+		agentSession.Close(stream.CloseNormal, "test done")
+		hubSession.Close(stream.CloseNormal, "test done")
+		for i := 0; i < 2; i++ {
+			select {
+			case <-runDone:
+			case <-time.After(time.Second):
+				t.Error("test session did not stop")
+			}
+		}
+	}()
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer callCancel()
+	payload, err := hubSession.Call(callCtx, string(hub.TaskKindStatus), hub.TaskOptions{}, stream.WithBudget(time.Second))
+	if err != nil {
+		t.Fatalf("status handler: %v", err)
+	}
+	var status commands.StatusReport
+	if err := json.Unmarshal(payload, &status); err != nil || len(status.Adapters) != 1 {
+		t.Fatalf("status payload %s: %v", payload, err)
+	}
+
+	payload, err = hubSession.Call(callCtx, hub.MethodInspect, web.InspectParams{}, stream.WithBudget(time.Second))
+	if err != nil {
+		t.Fatalf("inspect placeholder: %v", err)
+	}
+	var inspect web.InspectResult
+	if err := json.Unmarshal(payload, &inspect); err != nil || len(inspect.Status.Adapters) != 1 {
+		t.Fatalf("inspect payload %s: %v", payload, err)
+	}
+
+	d.cfg.HomerHome = t.TempDir()
+	command, _ := json.Marshal(keyring.Command{Action: "list"})
+	payload, err = hubSession.Call(callCtx, string(hub.TaskKindSecret), hub.TaskOptions{SecretAction: "list", SecretPayload: command}, stream.WithBudget(time.Second))
+	if err != nil {
+		t.Fatalf("secret handler: %v", err)
+	}
+	var secret keyring.Result
+	if err := json.Unmarshal(payload, &secret); err != nil || !secret.OK {
+		t.Fatalf("secret payload %s: %v", payload, err)
+	}
+}
+
+func TestHandlersUpgradeFlushBeforeReexec(t *testing.T) {
+	agentConn, peerConn := streamtest.Pipe(streamtest.PipeOptions{})
+	d := New(Config{AgentID: "reexec-handler"}, &testExecutor{})
+	var hubSession *stream.Session
+	var agentSession *stream.Session
+	reexecCalled := make(chan struct{}, 2)
+	d.reexec = func() {
+		if agentSession.Stats().FramesOut != 1 {
+			t.Errorf("reexec ran before the upgrade response write completed: framesOut=%d", agentSession.Stats().FramesOut)
+		}
+		reexecCalled <- struct{}{}
+	}
+	agentSession = stream.NewSession(&streamtest.FaultConn{Conn: agentConn, WriteDelay: 50 * time.Millisecond}, stream.Options{
+		PingInterval: time.Hour,
+		PingTimeout:  2 * time.Hour,
+	})
+	agentSession.Handle("test.upgrade", func(_ context.Context, req *stream.Request) (any, error) {
+		d.requestReexec(req.Session)
+		d.requestReexec(req.Session) // repeated triggers must still reexec only once
+		return map[string]string{"result": "upgraded"}, nil
+	})
+	hubSession = stream.NewSession(peerConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	callCtx, callCancel := context.WithTimeout(context.Background(), time.Second)
+	defer callCancel()
+	payload, err := hubSession.Call(callCtx, "test.upgrade", struct{}{}, stream.WithBudget(time.Second))
+	if err != nil {
+		t.Fatalf("upgrade request: %v", err)
+	}
+	if string(payload) != `{"result":"upgraded"}` {
+		t.Fatalf("upgrade response = %s", payload)
+	}
+	select {
+	case <-reexecCalled:
+	case <-time.After(time.Second):
+		t.Fatal("reexec was not called after Flush")
+	}
+	select {
+	case <-reexecCalled:
+		t.Fatal("duplicate upgrade event triggered multiple reexecs")
+	default:
+	}
+	agentSession.Close(stream.CloseNormal, "test done")
+	hubSession.Close(stream.CloseNormal, "test done")
+}
+
+func TestHandlersCanceledWriteRetainsFIFO(t *testing.T) {
+	exec := &testExecutor{pushStarted: make(chan string, 2), pushRelease: make(chan struct{}, 2)}
+	d := New(Config{AgentID: "canceled-write", TaskTimeout: time.Second}, exec)
+	agentConn, peerConn := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agentConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	d.registerHandlers(agentSession)
+	hubSession := stream.NewSession(peerConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	defer func() {
+		agentSession.Close(stream.CloseNormal, "test done")
+		hubSession.Close(stream.CloseNormal, "test done")
+	}()
+
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer firstCancel()
+	start := time.Now()
+	_, err := hubSession.Call(firstCtx, string(hub.TaskKindPush), hub.TaskOptions{Adapters: []string{"cancel-first"}}, stream.WithBudget(35*time.Millisecond))
+	if err == nil || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("canceled write returned after %v with %v", time.Since(start), err)
+	}
+	if got := <-exec.pushStarted; got != "cancel-first" {
+		t.Fatalf("first write = %q", got)
+	}
+
+	queued := make(chan string, 2)
+	secondDone := make(chan error, 1)
+	go func() {
+		callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer callCancel()
+		_, err := hubSession.Call(callCtx, string(hub.TaskKindPush), hub.TaskOptions{Adapters: []string{"second"}},
+			stream.WithBudget(2*time.Second), stream.WithProgress(func(raw json.RawMessage) {
+				var progress struct {
+					Stage string `json:"stage"`
+				}
+				if json.Unmarshal(raw, &progress) == nil {
+					queued <- progress.Stage
+				}
+			}),
+		)
+		secondDone <- err
+	}()
+	select {
+	case stage := <-queued:
+		if stage != "queued" {
+			t.Fatalf("second write progress = %q, want queued", stage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second write did not report queued")
+	}
+	select {
+	case got := <-exec.pushStarted:
+		t.Fatalf("second write %q began while canceled write still ran", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The command is not context-aware and completes naturally after the
+	// caller is gone. Only then may the FIFO write lock pass to the next task.
+	exec.pushRelease <- struct{}{}
+	if got := <-exec.pushStarted; got != "second" {
+		t.Fatalf("second write = %q, want second", got)
+	}
+	exec.pushRelease <- struct{}{}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if got := hubSession.Stats().Pending; got != 0 {
+		t.Fatalf("pending calls after write completion = %d, want no duplicate canceled response", got)
+	}
+}
+
+func TestHandlersCancellationReturnsPromptly(t *testing.T) {
+	exec := &testExecutor{blockDiff: make(chan struct{})}
+	d := New(Config{AgentID: "cancel-handler", TaskTimeout: time.Second}, exec)
+	agent, peer := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agent, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	d.registerHandlers(agentSession)
+	hubSession := stream.NewSession(peer, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	callCtx, callCancel := context.WithTimeout(context.Background(), time.Second)
+	defer callCancel()
+	start := time.Now()
+	_, err := hubSession.Call(callCtx, string(hub.TaskKindDiff), hub.TaskOptions{}, stream.WithBudget(25*time.Millisecond))
+	if err == nil || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("canceled non-context-aware operation returned after %v with %v", time.Since(start), err)
+	}
+	close(exec.blockDiff)
+	hubSession.Close(stream.CloseNormal, "test done")
+	agentSession.Close(stream.CloseNormal, "test done")
+}
+
+func TestHandlersReadLimitAndQueuedWriteFIFO(t *testing.T) {
+	exec := &testExecutor{
+		diffStarted: make(chan struct{}, 5),
+		diffRelease: make(chan struct{}),
+		pushStarted: make(chan string, 2),
+		pushRelease: make(chan struct{}, 2),
+	}
+	d := New(Config{AgentID: "task-scheduling"}, exec)
+	agentConn, peerConn := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agentConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	d.registerHandlers(agentSession)
+	hubSession := stream.NewSession(peerConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	defer func() {
+		agentSession.Close(stream.CloseNormal, "test done")
+		hubSession.Close(stream.CloseNormal, "test done")
+	}()
+
+	call := func(method string, params any, progress func(json.RawMessage)) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			callCtx, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer callCancel()
+			_, err := hubSession.Call(callCtx, method, params, stream.WithBudget(3*time.Second), stream.WithProgress(progress))
+			done <- err
+		}()
+		return done
+	}
+
+	var reads []<-chan error
+	for i := 0; i < 4; i++ {
+		reads = append(reads, call(string(hub.TaskKindDiff), hub.TaskOptions{Adapter: fmt.Sprintf("read-%d", i)}, nil))
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-exec.diffStarted:
+		case <-time.After(time.Second):
+			t.Fatalf("only %d read handlers acquired readSem", i)
+		}
+	}
+	fifthRead := call(string(hub.TaskKindDiff), hub.TaskOptions{Adapter: "read-4"}, nil)
+	select {
+	case <-exec.diffStarted:
+		t.Fatal("fifth read exceeded readSem=4")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(exec.diffRelease)
+	select {
+	case <-exec.diffStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued fifth read never acquired readSem")
+	}
+	for _, done := range reads {
+		if err := <-done; err != nil {
+			t.Fatalf("read handler: %v", err)
+		}
+	}
+	if err := <-fifthRead; err != nil {
+		t.Fatalf("fifth read handler: %v", err)
+	}
+
+	firstWrite := call(string(hub.TaskKindPush), hub.TaskOptions{Adapters: []string{"first"}}, nil)
+	if got := <-exec.pushStarted; got != "first" {
+		t.Fatalf("first write = %q", got)
+	}
+	queuedProgress := make(chan string, 4)
+	secondWrite := call(string(hub.TaskKindPush), hub.TaskOptions{Adapters: []string{"second"}}, func(raw json.RawMessage) {
+		var progress struct {
+			Stage string `json:"stage"`
+		}
+		if json.Unmarshal(raw, &progress) == nil {
+			queuedProgress <- progress.Stage
+		}
+	})
+	select {
+	case stage := <-queuedProgress:
+		if stage != "queued" {
+			t.Fatalf("write progress stage = %q, want queued", stage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting write did not report queued progress")
+	}
+	select {
+	case got := <-exec.pushStarted:
+		t.Fatalf("second write %q began before the first completed", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	exec.pushRelease <- struct{}{}
+	if got := <-exec.pushStarted; got != "second" {
+		t.Fatalf("second write = %q, want FIFO order", got)
+	}
+	exec.pushRelease <- struct{}{}
+	if err := <-firstWrite; err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := <-secondWrite; err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+}
+
+func TestHeartbeat(t *testing.T) {
+	d := New(Config{AgentID: "heartbeat-agent"}, &testExecutor{})
+	d.heartbeatEvery = time.Hour
+	d.setDrift(&hub.AgentDrift{Push: 3, Error: "fresh"})
+	d.setHost(&hub.HostSnapshot{OS: "test"})
+	d.tools.mu.Lock()
+	d.tools.statuses = []toolctl.Status{{ID: "pi", Version: "1.0"}}
+	d.tools.known = true
+	d.tools.mu.Unlock()
+
+	agent, hubConn := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agent, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	hubSession := stream.NewSession(hubConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	events := make(chan hub.HeartbeatParams, 2)
+	hubSession.OnEvent(hub.MethodHeartbeat, func(_ context.Context, _ string, raw json.RawMessage) {
+		var event hub.HeartbeatParams
+		if json.Unmarshal(raw, &event) == nil {
+			events <- event
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	loopDone := make(chan struct{})
+	go func() { d.heartbeatLoop(ctx, agentSession); close(loopDone) }()
+	d.signalHeartbeat()
+	select {
+	case event := <-events:
+		if event.Version != web.Version || event.Drift == nil || event.Drift.Push != 3 || event.Host == nil || event.Host.OS != "test" || event.Tools == nil || len(*event.Tools) != 1 {
+			t.Fatalf("heartbeat event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background heartbeat wake was not delivered")
+	}
+	cancel()
+	agentSession.Close(stream.CloseNormal, "test done")
+	hubSession.Close(stream.CloseNormal, "test done")
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat loop did not stop")
+	}
+}
+
+func TestHeartbeatStatusScanCompletionTriggersUpdate(t *testing.T) {
+	exec := &flightExecutor{started: make(chan int, 1), releases: make(chan struct{}, 1)}
+	d := New(Config{AgentID: "status-heartbeat"}, exec)
+	d.heartbeatEvery = time.Hour
+	agentConn, hubConn := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agentConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	hubSession := stream.NewSession(hubConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	events := make(chan hub.HeartbeatParams, 2)
+	hubSession.OnEvent(hub.MethodHeartbeat, func(_ context.Context, _ string, raw json.RawMessage) {
+		var event hub.HeartbeatParams
+		if json.Unmarshal(raw, &event) == nil {
+			events <- event
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	loopDone := make(chan struct{})
+	go func() { d.heartbeatLoop(ctx, agentSession); close(loopDone) }()
+	scanDone := make(chan error, 1)
+	go func() { _, err := d.statusReport(ctx); scanDone <- err }()
+	select {
+	case <-exec.started:
+	case <-time.After(time.Second):
+		t.Fatal("status scan did not start")
+	}
+	select {
+	case <-events:
+		t.Fatal("heartbeat waited for or preceded the status scan completion")
+	case <-time.After(50 * time.Millisecond):
+	}
+	exec.releases <- struct{}{}
+	if err := <-scanDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Drift == nil || event.Drift.Push != 1 {
+			t.Fatalf("status completion heartbeat = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("status scan completion did not trigger a heartbeat")
+	}
+	cancel()
+	agentSession.Close(stream.CloseNormal, "test done")
+	hubSession.Close(stream.CloseNormal, "test done")
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat loop did not stop")
+	}
+}
+
+func TestHeartbeatToolProbeCompletionTriggersUpdate(t *testing.T) {
+	d := New(Config{AgentID: "tool-heartbeat"}, &testExecutor{})
+	d.SetToolkit(Toolkit{Probe: func(context.Context) []toolctl.Status { return []toolctl.Status{{ID: "pi", Version: "2.0"}} }})
+	agent, hubConn := streamtest.Pipe(streamtest.PipeOptions{})
+	agentSession := stream.NewSession(agent, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	hubSession := stream.NewSession(hubConn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	events := make(chan hub.HeartbeatParams, 4)
+	hubSession.OnEvent(hub.MethodHeartbeat, func(_ context.Context, _ string, raw json.RawMessage) {
+		var event hub.HeartbeatParams
+		if json.Unmarshal(raw, &event) == nil {
+			events <- event
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = agentSession.Run(ctx) }()
+	go func() { _ = hubSession.Run(ctx) }()
+	loopDone := make(chan struct{})
+	go func() { d.heartbeatLoop(ctx, agentSession); close(loopDone) }()
+	_ = d.reportedTools(ctx, 0)
+	found := false
+	deadline := time.After(time.Second)
+	for !found {
+		select {
+		case event := <-events:
+			found = event.Tools != nil && len(*event.Tools) == 1 && (*event.Tools)[0].Version == "2.0"
+		case <-deadline:
+			t.Fatal("tool probe completion did not trigger a heartbeat update")
+		}
+	}
+	cancel()
+	agentSession.Close(stream.CloseNormal, "test done")
+	hubSession.Close(stream.CloseNormal, "test done")
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat loop did not stop")
+	}
+}
+
+func TestDaemonUpgradeUsesDataURLAndAgentSecret(t *testing.T) {
+	var requestPath, authorization string
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		authorization = r.Header.Get("Authorization")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer dataPlane.Close()
+	d := New(Config{
+		HubURL:      "http://control.example",
+		DataURL:     dataPlane.URL,
+		AgentSecret: "upgrade-secret",
+	}, &testExecutor{})
+	report := d.runUpgrade(context.Background())
+	if report.OK || report.Status != "error" || !strings.Contains(report.Note, "401") {
+		t.Fatalf("upgrade report = %+v, want the test server's 401", report)
+	}
+	if requestPath != "/dl/homer" {
+		t.Fatalf("upgrade path = %q, want /dl/homer", requestPath)
+	}
+	if authorization != "Bearer upgrade-secret" {
+		t.Fatalf("upgrade Authorization = %q, want per-agent secret", authorization)
+	}
+}
+
+func TestDaemonTaskBudgetUsesMinimumOfRequestAndKind(t *testing.T) {
+	tests := []struct {
+		method     string
+		configured time.Duration
+		request    time.Duration
+		want       time.Duration
+	}{
+		{method: string(hub.TaskKindStatus), configured: 50 * time.Second, request: time.Minute, want: 50 * time.Second},
+		{method: string(hub.TaskKindStatus), configured: 50 * time.Second, request: 12 * time.Second, want: 12 * time.Second},
+		{method: string(hub.TaskKindUpgrade), configured: 50 * time.Second, request: 4 * time.Minute, want: 3 * time.Minute},
+		{method: string(hub.TaskKindUpgrade), configured: 50 * time.Second, request: 2 * time.Minute, want: 2 * time.Minute},
+		{method: string(hub.TaskKindPull), configured: 50 * time.Second, request: 14 * time.Minute, want: 12 * time.Minute},
+		{method: string(hub.TaskKindPull), configured: 50 * time.Second, request: 8 * time.Minute, want: 8 * time.Minute},
+		{method: string(hub.TaskKindToolUpgrade), configured: 50 * time.Second, request: 0, want: ToolUpgradeBudget},
+		{method: string(hub.TaskKindToolUpgrade), configured: 50 * time.Second, request: 3 * time.Minute, want: 3 * time.Minute},
+	}
+	for _, tc := range tests {
+		if got := taskLimit(tc.configured, tc.method, tc.request); got != tc.want {
+			t.Errorf("taskLimit(%s, %v, %v) = %v, want %v", tc.method, tc.configured, tc.request, got, tc.want)
+		}
+	}
+}
+
+func TestDaemonDriftSummaryPreservesFreshMachineMarkerAndForget(t *testing.T) {
+	d := New(Config{AgentID: "fresh-machine"}, NewLocalExecutor(t.TempDir()))
+	first := d.driftSummary(context.Background())
+	if first == nil || !strings.Contains(first.Error, "未找到 homer 配置") {
+		t.Fatalf("fresh-machine drift = %+v, want the missing homer config marker", first)
+	}
+	d.setDrift(&hub.AgentDrift{Error: "cached test marker"})
+	if cached := d.driftSummary(context.Background()); cached == nil || cached.Error != "cached test marker" {
+		t.Fatalf("drift cache = %+v, want previously cached marker", cached)
+	}
+	d.forgetDrift()
+	afterForget := d.driftSummary(context.Background())
+	if afterForget == nil || !strings.Contains(afterForget.Error, "未找到 homer 配置") {
+		t.Fatalf("drift after forget = %+v, want fresh scan marker", afterForget)
+	}
+}
+
+func TestDaemonConfigSelectsDataPlaneURLAndCredential(t *testing.T) {
+	exec := NewLocalExecutorWithHub(t.TempDir(), "http://constructor.example", "constructor-secret").(*localExecutor)
+	_ = New(Config{
+		AgentID:     "data-plane",
+		HubURL:      "https://control.example",
+		DataURL:     "http://data.example",
+		AgentSecret: "per-agent-secret",
+	}, exec)
+	if exec.hubURL != "http://data.example" || exec.credential != "per-agent-secret" {
+		t.Fatalf("executor transport = (%q, %q), want configured DataURL and secret", exec.hubURL, exec.credential)
+	}
+
+	// An executor constructed with an explicit data-plane URL keeps it when
+	// Config.DataURL is empty, while the daemon still defaults blank DataURL
+	// to HubURL if the executor had no URL of its own.
+	custom := NewLocalExecutorWithHub(t.TempDir(), "http://custom-data.example", "custom-token").(*localExecutor)
+	New(Config{AgentID: "custom-data", HubURL: "https://control.example", Token: "custom-token"}, custom)
+	if custom.hubURL != "https://control.example" || custom.credential != "custom-token" {
+		t.Fatalf("blank DataURL did not default to HubURL: (%q, %q)", custom.hubURL, custom.credential)
+	}
+	overridden := NewLocalExecutorWithHub(t.TempDir(), "http://constructor.example", "constructor-token").(*localExecutor)
+	New(Config{AgentID: "override-data", HubURL: "https://control.example", DataURL: "http://explicit-data.example", Token: "hub-token"}, overridden)
+	if overridden.hubURL != "http://explicit-data.example" || overridden.credential != "hub-token" {
+		t.Fatalf("explicit DataURL transport = (%q, %q)", overridden.hubURL, overridden.credential)
+	}
+	fallback := New(Config{AgentID: "fallback-data", HubURL: "https://control.example", Token: "hub-token"}, nil).exec.(*localExecutor)
+	if fallback.hubURL != "https://control.example" || fallback.credential != "hub-token" {
+		t.Fatalf("default data plane = (%q, %q), want HubURL fallback", fallback.hubURL, fallback.credential)
+	}
+}
+
+func newTestHubSession(ctx context.Context, conn stream.Conn, welcome func(hub.HelloParams) hub.WelcomeResult) *stream.Session {
+	session := stream.NewSession(conn, stream.Options{PingInterval: time.Hour, PingTimeout: 2 * time.Hour})
+	session.Handle(hub.MethodHello, func(_ context.Context, req *stream.Request) (any, error) {
+		var hello hub.HelloParams
+		if err := req.Decode(&hello); err != nil {
+			return nil, err
+		}
+		return welcome(hello), nil
+	})
+	go func() { _ = session.Run(ctx) }()
+	return session
+}
+
+type testExecutor struct {
+	blockDiff   chan struct{}
+	statusErr   error
+	diffStarted chan struct{}
+	diffRelease chan struct{}
+	pushStarted chan string
+	pushRelease chan struct{}
+}
+
+func (e *testExecutor) Status(ctx context.Context) (commands.StatusReport, error) {
+	if err := ctx.Err(); err != nil {
+		return commands.StatusReport{}, err
 	}
 	if e.statusErr != nil {
 		return commands.StatusReport{}, e.statusErr
 	}
-	return commands.StatusReport{Adapters: []commands.StatusAdapterReport{{ID: "pi"}}, Errors: []string{}}, nil
+	return commands.StatusReport{Adapters: []commands.StatusAdapterReport{{ID: "pi", Categories: []commands.StatusCategoryReport{}}}, Errors: []string{}}, nil
 }
 
-func (e *recordingExecutor) Diff(ctx context.Context, params web.DiffParams) (string, error) {
-	e.record(call{kind: hub.TaskKindDiff, adapter: params.Adapter, category: params.Category})
-	return "diff", nil
-}
-
-func (e *recordingExecutor) Push(ctx context.Context, confirm bool, adapters []string, overwrite bool, _ bool) (commands.PushReport, error) {
-	e.record(call{kind: hub.TaskKindPush, confirm: confirm, adapters: strings.Join(adapters, ","), overwrite: overwrite})
-	return commands.PushReport{OK: true, Status: commands.PushStatusPushed}, nil
-}
-
-func (e *recordingExecutor) Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error) {
-	e.record(call{kind: hub.TaskKindPull, confirm: confirm, adapters: strings.Join(adapters, ","), overwrite: preferRemote})
-	return commands.PullReport{OK: true, Status: commands.PullStatusApplied}, nil
-}
-
-func (e *recordingExecutor) record(item call) {
-	e.mu.Lock()
-	e.calls = append(e.calls, item)
-	e.mu.Unlock()
-}
-
-func (e *recordingExecutor) snapshot() []call {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return append([]call(nil), e.calls...)
-}
-
-func freeTCPAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+func (e *testExecutor) Diff(ctx context.Context, params web.DiffParams) (string, error) {
+	if e.diffStarted != nil {
+		e.diffStarted <- struct{}{}
+		select {
+		case <-e.diffRelease:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
+	if e.blockDiff != nil {
+		<-e.blockDiff
 	}
-	return addr
+	return "diff:" + params.Adapter, ctx.Err()
+}
+
+func (e *testExecutor) Push(ctx context.Context, _ bool, adapters []string, _ bool, _ bool) (commands.PushReport, error) {
+	if e.pushStarted != nil {
+		id := strings.Join(adapters, ",")
+		e.pushStarted <- id
+		if id == "cancel-first" {
+			<-e.pushRelease
+		} else {
+			select {
+			case <-e.pushRelease:
+			case <-ctx.Done():
+				return commands.PushReport{}, ctx.Err()
+			}
+		}
+	}
+	return commands.PushReport{OK: true, Status: commands.PushStatusPushed}, ctx.Err()
+}
+
+func (e *testExecutor) Pull(ctx context.Context, _ bool, _ []string, _ bool) (commands.PullReport, error) {
+	return commands.PullReport{OK: true, Status: commands.PullStatusApplied}, ctx.Err()
+}
+
+type flightExecutor struct {
+	calls    atomic.Int32
+	started  chan int
+	releases chan struct{}
+}
+
+func (e *flightExecutor) Status(context.Context) (commands.StatusReport, error) {
+	n := int(e.calls.Add(1))
+	e.started <- n
+	<-e.releases
+	return commands.StatusReport{Adapters: []commands.StatusAdapterReport{{ID: "pi", Push: n}}, Errors: []string{}}, nil
+}
+func (*flightExecutor) Diff(context.Context, web.DiffParams) (string, error) { return "", nil }
+func (*flightExecutor) Push(context.Context, bool, []string, bool, bool) (commands.PushReport, error) {
+	return commands.PushReport{OK: true}, nil
+}
+func (*flightExecutor) Pull(context.Context, bool, []string, bool) (commands.PullReport, error) {
+	return commands.PullReport{OK: true}, nil
+}
+
+type generationExecutor struct {
+	calls         atomic.Int32
+	firstStarted  chan struct{}
+	secondStarted chan struct{}
+	releaseFirst  chan struct{}
+}
+
+func (e *generationExecutor) Status(context.Context) (commands.StatusReport, error) {
+	n := e.calls.Add(1)
+	if n == 1 {
+		close(e.firstStarted)
+		<-e.releaseFirst
+	} else if n == 2 {
+		close(e.secondStarted)
+	}
+	return commands.StatusReport{Adapters: []commands.StatusAdapterReport{{ID: "pi", Push: int(n)}}, Errors: []string{}}, nil
+}
+func (*generationExecutor) Diff(context.Context, web.DiffParams) (string, error) { return "", nil }
+func (*generationExecutor) Push(context.Context, bool, []string, bool, bool) (commands.PushReport, error) {
+	return commands.PushReport{OK: true}, nil
+}
+func (*generationExecutor) Pull(context.Context, bool, []string, bool) (commands.PullReport, error) {
+	return commands.PullReport{OK: true}, nil
+}
+
+type captureLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *captureLogger) Printf(format string, args ...any) {
+	l.mu.Lock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+	l.mu.Unlock()
+}
+func (l *captureLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+func (l *captureLogger) contains(value string) bool {
+	for _, line := range l.snapshot() {
+		if strings.Contains(line, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, item := range haystack {
+		if item == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
@@ -416,326 +1186,4 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition did not become true")
-}
-
-type httpResponse struct {
-	StatusCode int
-	Body       []byte
-}
-
-func getHTTP(t *testing.T, endpoint, token string) httpResponse {
-	t.Helper()
-	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return httpResponse{StatusCode: response.StatusCode, Body: body}
-}
-
-func decodeJSON(t *testing.T, body []byte, target any) {
-	t.Helper()
-	if err := json.Unmarshal(body, target); err != nil {
-		t.Fatalf("decode %s: %v", body, err)
-	}
-}
-
-func localExecutorFixture(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	paths := core.GetHomerPaths(func(key string) string {
-		if key == "HOMER_HOME" {
-			return home
-		}
-		return os.Getenv(key)
-	})
-	tool := filepath.Join(home, "tool")
-	config := core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{
-		"pi": {Root: tool, Categories: map[string]core.CategoryConfig{
-			"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
-		}},
-	}}
-	if err := core.SaveConfig(paths, config); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(tool, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte(`{"ok":true}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := core.WriteSnapshotToStore(paths, core.AdapterSnapshot{AdapterID: "pi", Categories: []core.CategorySnapshot{{AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{"settings.json": {Kind: "file", Content: `{"ok":true}`}}}}}); err != nil {
-		t.Fatal(err)
-	}
-	return home
-}
-
-// No-git data plane wiring: an executor built with a hub transport uploads
-// snapshots on push and downloads them on pull — over the same HTTP
-// channel the daemon already uses (endpoint + credential injected).
-func TestLocalExecutorHubTransport(t *testing.T) {
-	home := t.TempDir()
-	paths := core.GetHomerPaths(func(string) string { return home })
-	tool := filepath.Join(home, "tool")
-	if err := os.MkdirAll(tool, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	config := core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{
-		"pi": {Root: tool, Categories: map[string]core.CategoryConfig{
-			"settings": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
-		}},
-	}}
-	if err := core.SaveConfig(paths, config); err != nil {
-		t.Fatal(err)
-	}
-	store := core.AdapterSnapshot{AdapterID: "pi", Categories: []core.CategorySnapshot{
-		{AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror, Files: core.SnapshotFiles{
-			"settings.json": core.SnapshotEntry{Kind: "file", Content: "base\n"},
-		}},
-	}}
-	if err := core.WriteSnapshotToStore(paths, store); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("base\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// A stub hub: /api/snapshot download serves one file, upload records.
-	var uploaded []core.AdapterSnapshot
-	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/snapshot":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"generation":3,"homerJson":"","store":{"pi":{"settings/settings.json":"from-hub\n"}}}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/snapshot":
-			body, _ := io.ReadAll(r.Body)
-			var payload struct {
-				Store map[string]map[string]string `json:"store"`
-			}
-			if err := json.Unmarshal(body, &payload); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			uploaded = append(uploaded, core.AdapterSnapshot{AdapterID: "pi"})
-			fmt.Fprint(w, `{"ok":true,"generation":4}`)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer hub.Close()
-
-	executor := NewLocalExecutorWithHub(home, hub.URL, "")
-	ctx := context.Background()
-
-	// Pull: the hub's current generation lands in the tool directory.
-	pullReport, err := executor.Pull(ctx, true, nil, false)
-	if err != nil || !pullReport.OK || pullReport.Status != commands.PullStatusApplied {
-		t.Fatalf("pull = %#v err=%v", pullReport, err)
-	}
-	applied, _ := os.ReadFile(filepath.Join(tool, "settings.json"))
-	if string(applied) != "from-hub\n" {
-		t.Fatalf("tool = %q (want hub content)", applied)
-	}
-
-	// Push: a local change uploads to the hub.
-	if err := os.WriteFile(filepath.Join(tool, "settings.json"), []byte("next-change\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	pushReport, err := executor.Push(ctx, true, nil, false, false)
-	if err != nil || !pushReport.OK || pushReport.Status != commands.PushStatusPushed {
-		t.Fatalf("push = %#v err=%v", pushReport, err)
-	}
-	if len(uploaded) == 0 {
-		t.Fatal("hub received no upload")
-	}
-}
-
-// A machine that joins with a one-time code builds its executor before the
-// per-agent secret exists. The first 下发 must still present that secret
-// when it downloads /api/snapshot — poll already uses cfg.AgentSecret, and
-// a stale empty executor credential is a 401 that the console shows as 502.
-func TestEnrollUpdatesSnapshotCredential(t *testing.T) {
-	registry := hub.NewRegistry()
-	api := hub.NewAgentAPI(registry, "hub-token")
-	code, err := api.Enrollment.Mint(time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var snapshotAuth atomic.Value
-	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/snapshot" {
-			snapshotAuth.Store(r.Header.Get("Authorization"))
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"generation":1,"homerJson":"","store":{}}`)
-			return
-		}
-		api.ServeHTTP(w, r)
-	}))
-	defer hubServer.Close()
-
-	home := t.TempDir()
-	executor := NewLocalExecutorWithHub(home, hubServer.URL, "")
-	cfg := Config{
-		Home:          home,
-		HomerHome:     home,
-		ConnectURL:    hubServer.URL,
-		EnrollCode:    code,
-		AgentID:       "fresh-enroll",
-		PollWait:      time.Second,
-		PollInterval:  10 * time.Millisecond,
-		ReportTimeout: 2 * time.Second,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, executor).Run(ctx) }()
-	waitFor(t, 2*time.Second, func() bool {
-		_, ok := registry.Get(cfg.AgentID)
-		return ok
-	})
-	task := hub.Task{TaskID: "enroll-pull", Kind: hub.TaskKindPull, Options: hub.TaskOptions{Confirm: true}, CreatedAt: time.Now()}
-	if err := registry.Enqueue(cfg.AgentID, task); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 2*time.Second, func() bool {
-		_, ok := snapshotAuth.Load().(string)
-		return ok
-	})
-	auth, _ := snapshotAuth.Load().(string)
-	bearer := strings.TrimPrefix(auth, "Bearer ")
-	if !strings.HasPrefix(auth, "Bearer ") || api.Enrollment.AuthorizedAgent(bearer) != cfg.AgentID {
-		t.Fatalf("snapshot Authorization = %q, want the enrolled per-agent secret", auth)
-	}
-	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("daemon did not stop")
-	}
-}
-
-// retryLogger must throttle: the same key logs once per window, never
-// spamming a dead-looped agent's log (the lesson from the silent 401
-// death loop).
-func TestRetryLoggerThrottles(t *testing.T) {
-	logger := newRetryLogger(time.Minute)
-	if !logger.log("poll-failed", "poll 401: unauthorized（重试中）") {
-		t.Fatal("first occurrence must log")
-	}
-	if logger.log("poll-failed", "poll 401: unauthorized（重试中）") {
-		t.Fatal("second occurrence inside the window must be suppressed")
-	}
-	if !logger.log("register-failed", "register failed") {
-		t.Fatal("a different key logs independently")
-	}
-	// After the window passes, the same key logs again.
-	logger.mu.Lock()
-	logger.at = map[string]time.Time{}
-	logger.mu.Unlock()
-	if !logger.log("poll-failed", "poll 401: unauthorized（重试中）") {
-		t.Fatal("occurrence after the window must log again")
-	}
-}
-
-// The silent-401 lesson as a regression: an agent whose credential is
-// rejected must LOG it (stderr), throttled — never silently loop forever.
-func TestAgentdPoll401IsLogged(t *testing.T) {
-	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Reject everything: 401 unauthorized, like the buggy web gate.
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"未授权：请提供有效的 Bearer token"}}`))
-	}))
-	defer hubServer.Close()
-	cfg := Config{ConnectURL: hubServer.URL, Token: "wrong-token", AgentID: "silent-agent", PollWait: time.Second, PollInterval: 5 * time.Millisecond, ReportTimeout: time.Second}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runDone := make(chan error, 1)
-	go func() { runDone <- New(cfg, newRecordingExecutor()).Run(ctx) }()
-	// Give the loop several poll cycles.
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("daemon did not stop")
-	}
-	// The log must contain the poll failure (stderr was swapped? No —
-	// retryLogger writes to stderr; assert via the test's own capture:
-	// the daemon ran in-process, so we assert the logger behavior
-	// directly instead — the 401 line must have been EMITTED. Since we
-	// cannot intercept os.Stderr cleanly here, the contract test is:
-	// New() always has a non-nil retries logger, and log() of the poll
-	// failure key returns true at least once.
-	daemon := New(cfg, newRecordingExecutor())
-	if daemon.retries == nil {
-		t.Fatal("daemon must carry a retry logger (silent-401 lesson)")
-	}
-	if !daemon.retries.log("poll-failed", "poll 失败（重试中）: 401") {
-		t.Fatal("first poll-failed occurrence must log")
-	}
-}
-
-// Fresh-machine drift must carry the fallback marker in Error — the
-// console's "新机器 · 等待下发" badge keys on it, and a fresh machine
-// must not read as "↑N 项未收取" before a baseline exists.
-func TestDriftSummaryPreservesDegradedError(t *testing.T) {
-	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer hubServer.Close()
-	home := t.TempDir() // no homer.json — fresh machine
-	cfg := Config{ConnectURL: hubServer.URL, Token: "t", AgentID: "fresh", PollWait: time.Second, PollInterval: time.Hour, ReportTimeout: time.Second}
-	daemon := New(cfg, NewLocalExecutor(home))
-	drift := daemon.driftSummary(context.Background())
-	if drift == nil || drift.Error == "" {
-		t.Fatalf("fresh machine drift must carry the degraded error, got %+v", drift)
-	}
-	if !strings.Contains(drift.Error, "未找到 homer 配置") {
-		t.Fatalf("drift error should explain the fresh-machine state, got %q", drift.Error)
-	}
-	daemon.driftMu.Lock()
-	daemon.lastDrift = &hub.AgentDrift{Error: "stale"}
-	daemon.lastDriftAt = time.Now()
-	daemon.driftMu.Unlock()
-	if got := daemon.driftSummary(context.Background()); got == nil || got.Error != "stale" {
-		t.Fatalf("cached drift = %+v", got)
-	}
-	daemon.forgetDrift()
-	again := daemon.driftSummary(context.Background())
-	if again == nil || !strings.Contains(again.Error, "未找到 homer 配置") {
-		t.Fatalf("forgetDrift did not drop the cache, got %+v", again)
-	}
-}
-
-// The console's fresh-machine badge keys on drift.Error containing BOTH
-// "homer" and "init" (index.html substring match). This test makes that
-// implicit contract explicit — copy changes anywhere in the chain
-// (status.go message, WrapConfigNotInitialized, executor degradation)
-// turn this red before the badge silently breaks.
-func TestDriftErrorCarriesFreshMachineBadgeMarkers(t *testing.T) {
-	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer hubServer.Close()
-	daemon := New(Config{ConnectURL: hubServer.URL, Token: "t", AgentID: "fresh", PollWait: time.Second, PollInterval: time.Hour, ReportTimeout: time.Second}, NewLocalExecutor(t.TempDir()))
-	drift := daemon.driftSummary(context.Background())
-	if drift == nil || drift.Error == "" {
-		t.Fatalf("fresh machine drift must carry an error, got %+v", drift)
-	}
-	if !strings.Contains(drift.Error, "homer") || !strings.Contains(drift.Error, "init") {
-		t.Fatalf("drift error must contain both badge markers (homer, init) for the console badge, got %q", drift.Error)
-	}
 }

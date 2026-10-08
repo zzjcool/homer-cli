@@ -2,7 +2,6 @@ package agentd
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -40,10 +39,6 @@ var (
 	// a few Node based programs; once every few minutes is plenty for a
 	// console that shows "which version is this machine on".
 	toolInterval = 5 * time.Minute
-	// firstToolWait is how long the very first registration waits for the
-	// first measurement, so a fresh machine usually shows its versions at
-	// once. Later heartbeats never wait.
-	firstToolWait = 5 * time.Second
 	// toolProbeBudget bounds one measurement of every program.
 	toolProbeBudget = toolctl.ProbeTimeout + 10*time.Second
 )
@@ -80,6 +75,9 @@ type toolState struct {
 func (d *Daemon) reportedTools(ctx context.Context, wait time.Duration) *[]toolctl.Status {
 	if d == nil || d.toolkit.Probe == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	state := &d.tools
 	state.mu.Lock()
@@ -134,6 +132,10 @@ func (d *Daemon) measureTools(parent context.Context, done chan struct{}, genera
 	}
 	state.refreshing = nil
 	close(done)
+	updated := complete && generation == state.generation
+	if updated {
+		d.signalHeartbeat()
+	}
 }
 
 // noteToolVersion records the version a tool has just been measured at, so the
@@ -158,6 +160,7 @@ func (d *Daemon) noteToolVersion(id, version string) {
 	// Keep the patched list to send meanwhile, but ask for a re-measurement:
 	// the upgrade may have installed something that was not there before.
 	state.probedAt = time.Time{}
+	d.signalHeartbeat()
 }
 
 // runToolUpgrade upgrades one program on this machine. It reports in the same
@@ -173,15 +176,4 @@ func (d *Daemon) runToolUpgrade(ctx context.Context, id string) toolctl.UpgradeR
 	result := d.toolkit.Upgrade(ctx, id)
 	d.noteToolVersion(result.Tool, result.After)
 	return result
-}
-
-// upgradeToolLocal serves a listen-mode machine's /api/tools/upgrade.
-//
-// The request's own context is deliberately not used: it ends when the hub, or
-// the browser behind it, hangs up, and an installer killed half way can leave
-// the program broken. The upgrade is bounded by its own timeouts instead.
-func (d *Daemon) upgradeToolLocal(ctx context.Context, id string) (json.RawMessage, error) {
-	run, cancel := context.WithTimeout(context.WithoutCancel(ctx), ToolUpgradeBudget)
-	defer cancel()
-	return json.Marshal(d.runToolUpgrade(run, id))
 }
