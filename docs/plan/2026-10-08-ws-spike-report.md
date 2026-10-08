@@ -68,4 +68,6 @@ Command exited with code 254
 
 ## MR 链接
 
-未创建：本次按计划冲突停止，只有阻塞报告，没有可交付的 spike 实现。
+https://github.com/zzjcool/homer-cli/pull/4
+
+此 PR 仅包含本阻塞报告，没有 P0 spike 实现或 Cloudflare 实测数据。
