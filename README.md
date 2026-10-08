@@ -33,31 +33,71 @@ homer serve                     # http://127.0.0.1:7760
 # 浏览器打开即可看本机与中心的差异，并在确认后同步
 ```
 
-多机拓扑（中心节点部署在可达处，其余机器两种接入方式）：
+多机拓扑（中心节点部署在可达处，其余机器主动连接中心）：
 
 ```sh
 # 中心节点（公网/可达机器）：
 HOMER_HUB_TOKEN=<token> homer serve --addr 0.0.0.0:7760
 
-# 机器可达（公网）：等 hub 直连采集
-homer agent --listen 0.0.0.0:7761 \
-  --advertise http://<本机地址>:7761 \
-  --hub http://<hub>:7760 --token <token>
-
-# 机器在 NAT 后：主动拨出（只出不进）
-homer agent --connect http://<hub>:7760 --token <token>
+# 每台机器上的 agent 都主动通过 WebSocket 连接 hub；agent 本机不监听端口
+homer agent --hub http://<hub>:7760 --token <token>
 ```
 
-hub 的 `/api/agents` 仍可按机器采集状态和差异。控制台的「同步」会先把这台 hub 的改动写入中心，再让在线的其他机器应用
-（`POST /api/agents/<id>/push?confirm=true`），配置经 git 远端在机器间真实
-流转。agent 协议为 HTTP 长轮询（零依赖，NAT 友好）；hub 不自建存储，
-同步语义 100% 复用 engine/sync/gitx。
+`homer agent` 只有这一种连接方式。首次启动用 `--hub <url>` 指定 hub；
+`--data-url <url>` 可选，默认与 `--hub` 相同，只用于 `/api/snapshot` 和
+`/dl/*` 数据请求，不改变 WebSocket 控制连接。hub 与 agent 在同一台机器时，
+可把数据请求指向 hub 的回环地址以绕开隧道：
 
-鉴权：单一 Bearer token（`HOMER_HUB_TOKEN` 或 `--token`）；未设 token 时仅
-允许回环地址（非回环拒绝启动）。生产公网建议再加反代 TLS。
+```sh
+homer agent --hub https://<hub> --data-url http://127.0.0.1:7760 --token <token>
+```
+
+旧的双模式 agent 参数已移除，不再监听 agent 入站端口。旧协议端点
+`/agent/v1/enroll`、`/agent/v1/register`、`/agent/v1/poll`、
+`/agent/v1/report` 返回 HTTP 410，提示旧版 agent 升级；新 agent 使用
+WebSocket Stream 与 hub 通信。
+
+hub 的 `/api/agents` 可查看各机器的在线状态和差异。控制台的「同步」会先把这台
+hub 的改动写入中心，再让在线的其他机器应用（`POST /api/agents/<id>/push?confirm=true`），
+配置经 git 远端在机器间真实流转。hub 不自建存储，同步语义复用
+engine/sync/gitx。
+
+鉴权：Bearer token（`HOMER_HUB_TOKEN` 或 `--token`）；未设 token 时仅允许回环地址
+（非回环拒绝启动）。生产公网建议再加反代 TLS。
+
+#### hw 现网 agent 迁移
+
+部署新 hub/agent 版本时，先按旧 unit 的类型停止正在运行的 agent：
+
+```sh
+systemctl --user stop homer-agent.service  # 用户级 unit
+# 若为系统级 unit，则改用：systemctl stop homer-agent.service
+```
+
+编辑 `homer-agent.service` 的 `ExecStart`，把旧命令中的 `--connect=<url>` 改为
+`--hub <url>`，例如：
+
+```ini
+# 旧版本
+ExecStart=/path/to/homer agent --connect=https://<hub> --id hw-7735
+# 新版本
+ExecStart=/path/to/homer agent --hub https://<hub> --id hw-7735
+```
+
+`agent.json` 中已有的 `agentSecret` 继续有效；旧的 `connectUrl` 字段会被忽略，
+不会自动配置新连接地址，因此必须在 `ExecStart` 中显式提供 `--hub`。保留原有
+必要环境变量和 token 配置。保存 unit 后重新加载并启动：
+
+```sh
+systemctl --user daemon-reload
+systemctl --user start homer-agent.service
+```
+
+系统级 unit 请对应使用 `systemctl daemon-reload` 和 `systemctl start homer-agent.service`。
+检查 agent 日志及控制台，确认机器重新上线。
 
 容器化验收：`bash e2e/hub-smoke.sh`（origin + hub + agent-a + agent-b 四容器，
-覆盖双通道采集与配置跨机流转）。
+覆盖两个 WebSocket agent 的状态采集与配置跨机流转）。
 
 ### 应用版本与一键升级
 

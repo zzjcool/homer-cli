@@ -37,11 +37,12 @@ wait_for() {
 echo "==> 1. hub 健康检查"
 wait_for "GET /api/health" "$HUB_URL/api/health"
 
-echo "==> 2. 双 agent 注册（listen 的 agent-a + connect 的 agent-b）"
+echo "==> 2. 双 agent 在线"
 for _ in $(seq 1 30); do
   if curl -fsS -H "$AUTH" "$HUB_URL/api/agents" 2>/dev/null \
-      | jq -e '[.agents[].agentId] | contains(["agent-a","agent-b"])' >/dev/null; then
-    echo "    OK: agent-a 与 agent-b 均已注册"
+      | jq -e '[.agents[] | select(.stale == false) | .agentId]
+          | contains(["agent-a","agent-b"])' >/dev/null; then
+    echo "    OK: agent-a 与 agent-b 均在线"
     break
   fi
   sleep 2
@@ -79,12 +80,12 @@ for id in agent-a agent-b; do
   fi
 done
 
-echo "==> 3. 远程采集（listen 直连）"
+echo "==> 3. agent-a 远程 status 可取"
 curl -fsS -H "$AUTH" -X POST "$HUB_URL/api/agents/agent-a/status" \
   | jq -e '.report.adapters | length >= 1' >/dev/null
 echo "    OK: agent-a status"
 
-echo "==> 4. 远程采集（connect 投递）"
+echo "==> 4. agent-b 远程 status 可取"
 curl -fsS -H "$AUTH" -X POST "$HUB_URL/api/agents/agent-b/status" \
   | jq -e '.report.adapters | length >= 1' >/dev/null
 echo "    OK: agent-b status"
