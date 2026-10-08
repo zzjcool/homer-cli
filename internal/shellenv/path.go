@@ -1,7 +1,8 @@
 // Package shellenv resolves the command PATH for a long-running homer
-// process. The process environment is fixed at startup. Tools installed
-// later, such as Homebrew's pi, show up in a new login shell, so every
-// command lookup reads that shell again.
+// process. The login shell PATH is cached for 30 seconds to avoid repeatedly
+// starting a shell for each command lookup. This trades freshness for speed:
+// newly installed tools become visible after the TTL expires or when
+// Invalidate is called.
 package shellenv
 
 import (
@@ -12,23 +13,102 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
-// ReadLoginPATH is called on every lookup. Tests replace it. A nil func
-// skips the login shell and uses the process environment.
+// ReadLoginPATH is called when the cached login PATH is missing or expired.
+// Tests replace it. An empty result (including a failed read) is not cached.
+// A nil func skips the login shell and uses the process environment.
 var ReadLoginPATH = readLoginPATH
+
+// LoginPATHTTL is how long a successful login-shell PATH is cached.
+var LoginPATHTTL = 30 * time.Second
+
+// loginPATHNow is kept injectable so cache expiry can be tested without sleep.
+var loginPATHNow = time.Now
+
+type loginPATHFlight struct {
+	done       chan struct{}
+	generation uint64
+	path       string
+}
+
+var loginPATHCache struct {
+	sync.Mutex
+	path       string
+	expiresAt  time.Time
+	valid      bool
+	generation uint64
+	flight     *loginPATHFlight
+}
 
 // Path is the PATH a command should use right now.
 func Path() string {
 	home, _ := os.UserHomeDir()
 	base := os.Getenv("PATH")
-	if ReadLoginPATH != nil {
-		if fresh := strings.TrimSpace(ReadLoginPATH()); fresh != "" {
+	if read := ReadLoginPATH; read != nil {
+		if fresh := cachedLoginPATH(read); fresh != "" {
 			base = fresh
 		}
 	}
 	return commandPATH(base, home, os.Getenv("HOMEBREW_PREFIX"), dirExists)
+}
+
+// Invalidate discards the cached login PATH. The next Path call will read the
+// login shell again. An in-progress read may finish for its existing callers,
+// but cannot repopulate the cache after invalidation.
+func Invalidate() {
+	loginPATHCache.Lock()
+	loginPATHCache.path = ""
+	loginPATHCache.expiresAt = time.Time{}
+	loginPATHCache.valid = false
+	loginPATHCache.generation++
+	loginPATHCache.flight = nil
+	loginPATHCache.Unlock()
+}
+
+func cachedLoginPATH(read func() string) string {
+	now := loginPATHNow()
+	loginPATHCache.Lock()
+	if LoginPATHTTL > 0 && loginPATHCache.valid && now.Before(loginPATHCache.expiresAt) {
+		path := loginPATHCache.path
+		loginPATHCache.Unlock()
+		return path
+	}
+	loginPATHCache.valid = false
+	if flight := loginPATHCache.flight; flight != nil {
+		loginPATHCache.Unlock()
+		<-flight.done
+		return flight.path
+	}
+	flight := &loginPATHFlight{
+		done:       make(chan struct{}),
+		generation: loginPATHCache.generation,
+	}
+	loginPATHCache.flight = flight
+	loginPATHCache.Unlock()
+
+	var path string
+	defer func() {
+		// Even if a replacement reader panics, wake callers waiting on this
+		// singleflight. The panic still propagates to the caller that read.
+		readAt := loginPATHNow()
+		loginPATHCache.Lock()
+		if path != "" && LoginPATHTTL > 0 && loginPATHCache.generation == flight.generation && loginPATHCache.flight == flight {
+			loginPATHCache.path = path
+			loginPATHCache.expiresAt = readAt.Add(LoginPATHTTL)
+			loginPATHCache.valid = true
+		}
+		flight.path = path
+		if loginPATHCache.flight == flight {
+			loginPATHCache.flight = nil
+		}
+		close(flight.done)
+		loginPATHCache.Unlock()
+	}()
+	path = strings.TrimSpace(read())
+	return path
 }
 
 // Look resolves file against Path. A path that already contains a slash is
