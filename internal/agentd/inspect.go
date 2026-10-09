@@ -209,7 +209,13 @@ func inspectLocalStatus(ctx context.Context, executor *localExecutor, paths core
 			if !errors.Is(err, errNoHubSnapshot) {
 				return commands.StatusReport{}, err
 			}
-			snapshot = []core.AdapterSnapshot{}
+			// A hub with no snapshot yet is NOT an empty center. Leave remote
+			// nil, which the drift engine reads as "remote == base" (see
+			// DriftSources). The whole-status path does the same by falling
+			// back to RunStatus without a Remote. A non-nil empty slice would
+			// instead say "the center really is empty" and report every file
+			// that exists locally and in the baseline as a pull-delete.
+			snapshot = nil
 		}
 		remote = snapshot
 	}
