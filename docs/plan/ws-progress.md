@@ -82,3 +82,17 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
   - 独立复验(合并后,串行):internal 32 包 -race 全绿、SOP 三守门员、全量 e2e 95s、integration 61s 全绿
   - 进程监控:integration 期间 .test 进程出现 54 个的平台(≈20s,随后回落到 6),查实是 TestFiftyConcurrentTasks 设计内启 50 个真 agent helper(P6a 合并时就有,受 TestMain helperModeEnv 保护,非递归),无泄漏
 - 进度:P0~P6、I1、三路 review 与三批修复(A/B/C)全部合并并复验。剩余:P7 hw 实测与部署(不动生产的前提下做基准,生产部署须经用户确认);final 回归 review
+
+## P7:hw 本机真实部署与实测(2026-10-09 14:13,用户确认本机为开发环境、无生产)
+
+部署:备份旧二进制/unit/agent.json 到 ~/.homer-backup-pre-ws/;`homer` 换成当前 master(a02cba6);homer-agent.service 的 ExecStart 改为 `agent --hub https://homerhw.openaaas.org --data-url http://127.0.0.1:7760`(--data-url 让同机快照绕开 CF tunnel);重启 serve+agent,hw-7735 经 CF tunnel 用 WebSocket 重连成功(agent.json 里旧 mode/connectUrl 字段被忽略,agentSecret 沿用)。
+
+| 指标 | 旧(长轮询,hw 现网实测) | 新(WS,hw 现网实测) |
+|---|---|---|
+| choices 整包,本机,单次 | 1.4~4.7s,多数 ~3.5s | **1.25~1.36s**(15 次,极差 0.11s) |
+| choices 整包,经 Cloudflare tunnel(浏览器真实路径) | 1.6~4.6s(之前 scout 测) | **1.53~1.69s**(8 次) |
+| 4 个并发 choices | 严格串行 0.13/3.5/5.8s | **1.33/1.34/1.57/1.61s**(并行) |
+| stream=1 首字节 | n/a | 本机 0.13s;经 tunnel 0.35s(但 P0 实测 CF 会缓冲 NDJSON,整体仍在 ~1.6s 到齐) |
+| agent 离线时调用 | 等满 60s 再 504 | 1ms 返回 503(隔离环境实测) |
+
+结论:目标「点击到可选项出现 P95<2s」达成(经 tunnel 最大 1.69s)。剩余 ~1.3s 全部是本机扫描成本:homer status 0.77s + pi list 0.26s + code --list-extensions 0.42s + 登录 shell PATH 0.11s(已有 30s TTL 缓存,只在冷启动付一次),传输层不再是瓶颈。
