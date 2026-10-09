@@ -45,7 +45,7 @@ func TestConsoleUserCopy(t *testing.T) {
 		"stream=1", "splitNDJSONLines", "AbortController", "scopeStreamFailed", "已读取 ",
 		"读取收取选项失败（尚未完成）", "没有收到完整的机器检查结果，不能继续收取。",
 		"缺的会逐个下载安装，请留在这个窗口，装完才会结束。",
-		"item.id === \"keyring\" && app.scopeDirection !== \"resolve\"",
+		"if (item.id === \"keyring\") return;",
 		"以这台机器为准", "以中心为准", "/api/resolve?",
 		"需要现在选择保留哪一边",
 		"没有冲突的内容已经写到",
