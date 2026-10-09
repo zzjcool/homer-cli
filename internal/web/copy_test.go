@@ -1,6 +1,8 @@
 package web
 
 import (
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -62,9 +64,39 @@ func TestConsoleUserCopy(t *testing.T) {
 		"应用版本", "全部升级应用", "/tool-upgrade", "a.tools",
 		"正在升级", "有应用没有升级成功", "复制安装命令", "已是已知最新版本",
 		"要用这台机器的包管理器更新",
+		"记录决定", "记录并立即执行", "待执行决定", "条已解决的决定",
+		"/api/resolve/record", "/api/resolve/clear", "撤销决定", "已记录",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("console copy missing %q", required)
 		}
+	}
+}
+
+func TestIndexInlineScriptParses(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node is not installed: %v", err)
+	}
+	scriptPattern := regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script\s*>`)
+	scriptBlocks := scriptPattern.FindAllStringSubmatch(string(staticIndex), -1)
+	if len(scriptBlocks) == 0 {
+		t.Fatal("index.html has no script blocks")
+	}
+	inlineCount := 0
+	for _, scriptBlock := range scriptBlocks {
+		if regexp.MustCompile(`(?i)\bsrc\s*=`).MatchString(scriptBlock[1]) {
+			continue
+		}
+		inlineCount++
+		cmd := exec.Command(node, "--check")
+		cmd.Stdin = strings.NewReader(scriptBlock[2])
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("node --check inline script %d: %v\n%s", inlineCount, err, output)
+		}
+	}
+	if inlineCount == 0 {
+		t.Fatal("index.html has no inline script blocks")
 	}
 }

@@ -139,6 +139,7 @@ pre .ln-meta { color: var(--ink-dim); display: block; }
 .agent-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .agent-head .hostname { font-weight: 600; }
 .agent-head .c-conflict { color: var(--danger); font-weight: 650; }
+.agent-head .c-resolved { color: var(--accent); font-weight: 650; }
 .agent-head .c-clean { color: var(--ink-dim); }
 .agent-head .aid, .agent-head .ip { font-family: var(--mono); font-size: var(--fs-small); color: var(--ink-dim); }
 .agent-head .ip { color: var(--ink); }
@@ -226,7 +227,15 @@ dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-w
 .choice-item .choice-copy { display: grid; gap: 2px; }
 .choice-item .choice-id { font-weight: 650; }
 .choice-item.disabled { opacity: .6; cursor: default; }
-.choice-tools { display: flex; gap: 8px; margin-top: 10px; }
+.choice-tools { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.resolution-choice-row { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 0 10px 8px 40px; font-size: var(--fs-small); }
+.resolution-choice-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.resolution-choice-row input { width: auto; min-height: 0; margin: 0; }
+.resolution-badge { display: inline-block; color: var(--accent); }
+#confirm-resolutions { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; }
+#confirm-resolutions:empty { display: none; }
+#confirm-resolutions .resolution-summary-list { display: grid; gap: 4px; }
+#confirm-resolutions .resolution-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .dispatch-unlocks { display: grid; gap: 8px; margin-top: 12px; }
 .dispatch-unlocks:empty { display: none; }
 #confirm-err { color: var(--danger); margin: 10px 0 0; white-space: pre-line; }
@@ -336,6 +345,7 @@ html { scroll-behavior: smooth; }
     <div id="confirm-choices"></div>
     <div id="dispatch-unlocks" class="dispatch-unlocks hidden"></div>
     <p class="muted small" id="confirm-note">受影响文件会先备份。</p>
+    <div id="confirm-resolutions" class="hidden small"></div>
     <p id="confirm-err" class="small"></p>
     <menu>
       <button type="button" id="btn-confirm-back" class="hidden">上一步</button>
@@ -413,6 +423,9 @@ const app = {
   scopeKeys: [],
   scopeChoices: [],
   scopePrecheck: null,
+  resolutionPreset: "",
+  resolutionScopeAltLabel: "",
+  recordChoiceSelections: {},
   scopeStep: "choose",
   scopeHint: "",
   scopeLoading: false,
@@ -759,6 +772,9 @@ function renderAgents(agents, disabledFeature) {
       } else {
         head.append(el("span", "counts c-clean", "已对齐"));
       }
+      if (d.resolutions > 0) {
+        head.append(el("span", "counts c-resolved", "待执行决定 " + d.resolutions));
+      }
     } else {
       head.append(el("span", "small muted", a.stale ? "离线期间不产生同步" : "等待首次心跳…"));
     }
@@ -1065,6 +1081,45 @@ function selectedAdapters() {
   });
   return picked;
 }
+function resolutionOf(adapterId) {
+  const resolutionItem = (app.scopeChoices || []).find(recordItem => recordItem.id === adapterId);
+  return resolutionItem && resolutionItem.resolution || null;
+}
+function selectedPicks() {
+  const recordPicks = { center: [], local: [], missing: [] };
+  if (app.scopeDirection !== "resolve") return recordPicks;
+  const recordBox = $("confirm-choices");
+  recordBox.querySelectorAll("input[type=checkbox][data-adapter]").forEach(recordInput => {
+    if (!recordInput.checked || recordInput.disabled) return;
+    const resolutionItem = (app.scopeChoices || []).find(recordItem => recordItem.id === recordInput.dataset.adapter);
+    if (!resolutionItem || !(resolutionItem.conflicts > 0)) return;
+    let recordChoice = "";
+    recordBox.querySelectorAll("input[type=radio][data-resolution-adapter]").forEach(recordRadio => {
+      if (recordRadio.checked && recordRadio.dataset.resolutionAdapter === recordInput.dataset.adapter) recordChoice = recordRadio.value;
+    });
+    if (recordChoice === "center" || recordChoice === "local") recordPicks[recordChoice].push(recordInput.dataset.adapter);
+    else recordPicks.missing.push(recordInput.dataset.adapter);
+  });
+  return recordPicks;
+}
+function validDecisionCount() {
+  if (app.scopeDirection !== "dispatch") return 0;
+  let resolutionCount = 0;
+  $("confirm-choices").querySelectorAll("input[type=checkbox][data-adapter]").forEach(recordInput => {
+    if (!recordInput.checked || recordInput.disabled) return;
+    const resolutionView = resolutionOf(recordInput.dataset.adapter);
+    if (resolutionView && !resolutionView.stale) resolutionCount++;
+  });
+  return resolutionCount;
+}
+function resolutionKeySelection() {
+  return app.scopeDirection === "resolve" ? selectedPicks().center : selectedAdapters();
+}
+function resolutionChoiceLabel(choice) {
+  if (choice === "center") return "以中心为准";
+  if (choice === "local") return "以这台机器为准（不改这台机器，把它的内容写入中心）";
+  return "已记录的决定";
+}
 // 下发，以及裁决里「以中心为准」，都是把中心的内容写到这台机器上，
 // 绑定了密钥的适配器必须连同密钥一起写并解开。「以这台机器为准」是把
 // 机器的内容传上来，不写机器，不走这条规则。
@@ -1116,20 +1171,20 @@ function alignKeyring(box) {
 function blockedByKeys() {
   if (!writesFromCenter()) return [];
   if (keyringCanTravel()) return [];
-  return selectedAdapters().filter(id => id !== "keyring" && secretsBoundTo(id).length);
+  return resolutionKeySelection().filter(id => id !== "keyring" && secretsBoundTo(id).length);
 }
 function selectionToken() {
-  return selectedAdapters().slice().sort().join("\n");
+  return resolutionKeySelection().slice().sort().join("\n");
 }
 function dispatchKeysForSelection() {
   if (!writesFromCenter() || !keyringCanTravel()) return [];
   const keyring = keyringChoice();
   if (keyring && !keyring.enabled) return [];
-  const selected = {};
-  selectedAdapters().forEach(id => { if (id !== "keyring") selected[id] = true; });
+  const resolutionSelected = {};
+  resolutionKeySelection().forEach(id => { if (id !== "keyring") resolutionSelected[id] = true; });
   const keys = [];
   (app.scopeKeys || []).forEach(key => {
-    const hit = (key.files || []).some(file => file.adapter && selected[file.adapter]);
+    const hit = (key.files || []).some(file => file.adapter && resolutionSelected[file.adapter]);
     if (hit) keys.push(key);
   });
   return keys;
@@ -1180,18 +1235,61 @@ function clearDispatchUnlocks() {
   clear(host);
 }
 function boundPathsForSelection() {
-  const selected = {};
-  selectedAdapters().forEach(id => { selected[id] = true; });
+  const resolutionSelected = {};
+  resolutionKeySelection().forEach(id => { resolutionSelected[id] = true; });
   const paths = [];
   dispatchKeysForSelection().forEach(key => {
     (key.files || []).forEach(file => {
-      if (selected[file.adapter] && file.destination && paths.indexOf(file.destination) < 0) paths.push(file.destination);
+      if (resolutionSelected[file.adapter] && file.destination && paths.indexOf(file.destination) < 0) paths.push(file.destination);
     });
   });
   return paths;
 }
+function resolutionSummaryUpdate() {
+  const resolutionBox = $("confirm-resolutions");
+  if (!resolutionBox) return;
+  clear(resolutionBox);
+  resolutionBox.classList.add("hidden");
+  if (app.scopeDirection !== "dispatch") return;
+  const resolutionChecks = {};
+  $("confirm-choices").querySelectorAll("input[type=checkbox][data-adapter]").forEach(recordInput => {
+    resolutionChecks[recordInput.dataset.adapter] = recordInput.checked;
+  });
+  const resolutionCount = validDecisionCount();
+  if (resolutionCount > 0) resolutionBox.append(el("p", "small", "将应用 " + resolutionCount + " 条已解决的决定"));
+  const resolutionList = el("div", "resolution-summary-list");
+  (app.scopeChoices || []).forEach(resolutionItem => {
+    const resolutionView = resolutionOf(resolutionItem.id);
+    if (!resolutionView || resolutionItem.id === "keyring") return;
+    if (resolutionView.stale) {
+      const resolutionRow = el("div", "resolution-summary-row");
+      const resolutionReason = resolutionItem.reason || "已记录的决定已过期（中心有新内容），需要重新选择";
+      resolutionRow.append(el("span", null, adapterTitle(resolutionItem.id) + "：" + resolutionChoiceLabel(resolutionView.choice)));
+      resolutionRow.append(el("span", "muted small", resolutionReason));
+      if (app.scopeAgent && resolutionView.choice) {
+        const recordButton = el("button", "small-btn", "重新决定");
+        recordButton.type = "button";
+        recordButton.addEventListener("click", recordEv => {
+          recordEv.preventDefault();
+          const recordAgent = app.scopeAgent;
+          const recordChoice = resolutionView.choice;
+          $("dlg-confirm").close("cancel");
+          setTimeout(() => confirmResolve(recordAgent, recordChoice), 0);
+        });
+        resolutionRow.append(recordButton);
+      }
+      resolutionList.append(resolutionRow);
+      return;
+    }
+    if (!resolutionChecks[resolutionItem.id]) return;
+    resolutionList.append(el("div", "resolution-summary-row", adapterTitle(resolutionItem.id) + "：" + resolutionChoiceLabel(resolutionView.choice)));
+  });
+  if (resolutionList.childNodes.length) resolutionBox.append(resolutionList);
+  if (resolutionBox.childNodes.length) resolutionBox.classList.remove("hidden");
+}
 function updateScopeConfirm() {
   syncDispatchUnlocks();
+  resolutionSummaryUpdate();
   const ok = $("btn-confirm-ok");
   const keys = dispatchKeysForSelection();
   if (app.scopeDirection === "dispatch" && app.scopeStep !== "unlock" && app.scopeStep !== "done") {
@@ -1207,24 +1305,24 @@ function updateScopeConfirm() {
     return;
   }
   if (app.scopeStep === "unlock") {
-    ok.textContent = app.scopeDirection === "resolve" ? "确认以中心为准" : "确认下发";
-    ok.disabled = readDispatchUnlocks().some(row => [...row.password].length < 8);
+    ok.textContent = app.scopeDirection === "resolve" ? "记录并立即执行" : "确认下发";
+    ok.disabled = readDispatchUnlocks().some(recordUnlock => [...recordUnlock.password].length < 8);
     return;
   }
   if (app.scopeDirection === "resolve") {
-    // 「以中心为准」会把中心的内容写到这台机器上，绑定了密钥就要口令；
-    // 「以这台机器为准」只是把机器的内容传上来，不受密钥影响。
-    const base = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
-    const blocked = blockedByKeys();
-    $("btn-confirm-alt").disabled = base;
-    ok.textContent = keys.length ? "下一步" : "以中心为准";
-    ok.disabled = base || blocked.length > 0;
+    const recordPicks = selectedPicks();
+    const recordSelectedCount = recordPicks.center.length + recordPicks.local.length + recordPicks.missing.length;
+    const recordDisabled = app.scopeLoading || app.scopeStreamFailed || recordSelectedCount === 0 || recordPicks.missing.length > 0;
+    const resolutionBlocked = blockedByKeys();
+    ok.textContent = "记录决定";
+    ok.disabled = recordDisabled;
+    const resolutionAltButton = $("btn-confirm-alt");
+    resolutionAltButton.textContent = "记录并立即执行";
+    resolutionAltButton.disabled = recordDisabled || resolutionBlocked.length > 0;
     const err = $("confirm-err");
-    if (err) {
-      err.textContent = blocked.length
-        ? adapterTitle(blocked[0]) + " 绑定了密钥，但密钥这次带不上，所以不能以中心为准。可以改选「以这台机器为准」，或先在加密的那台机器上收取密钥。"
-        : "";
-    }
+    if (err) err.textContent = recordPicks.missing.length
+      ? "请为每个已选的冲突适配器选择一边。"
+      : (resolutionBlocked.length ? adapterTitle(resolutionBlocked[0]) + " 绑定了密钥，但密钥这次带不上，所以不能以中心为准。可以先记录决定，再在下发前处理密钥。" : "");
     return;
   }
   ok.disabled = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
@@ -1241,10 +1339,14 @@ function showScopeStep(step) {
   const err = $("confirm-err");
   if (err) err.textContent = "";
   if (step === "unlock") {
+    if (app.scopeDirection === "resolve" && app.pendingAction && app.pendingAction.kind === "resolve-record" && app.pendingAction.recordImmediate) {
+      app.resolutionScopeAltLabel = $("btn-confirm-alt").textContent || app.resolutionScopeAltLabel || "记录并立即执行";
+      $("btn-confirm-alt").classList.add("hidden");
+    }
     choices.classList.add("hidden");
     unlocks.classList.remove("hidden");
     back.classList.remove("hidden");
-    $("confirm-desc").textContent = "先解开这些密钥，然后才会下发。";
+    $("confirm-desc").textContent = app.scopeDirection === "resolve" ? "先解开这些密钥，然后才会按中心决定处理。" : "先解开这些密钥，然后才会下发。";
     $("confirm-note").textContent = "口令只在这一步使用。解开成功后，文件会写回这台机器。";
     updateScopeConfirm();
     const first = unlocks.querySelector("input");
@@ -1255,6 +1357,10 @@ function showScopeStep(step) {
   choices.classList.remove("hidden");
   unlocks.classList.add("hidden");
   back.classList.add("hidden");
+  if (app.scopeDirection === "resolve" && app.pendingAction && app.pendingAction.kind === "resolve-record" && app.pendingAction.recordImmediate) {
+    $("btn-confirm-alt").textContent = app.resolutionScopeAltLabel || "记录并立即执行";
+    $("btn-confirm-alt").classList.remove("hidden");
+  }
   if (app.scopeHint) $("confirm-desc").textContent = app.scopeHint;
   if (app.scopeDirection === "dispatch") $("confirm-note").textContent = "受影响文件会先备份。";
   updateScopeConfirm();
@@ -1266,8 +1372,8 @@ function renderScopeChoices(data) {
   const box = $("confirm-choices");
   clear(box);
   const list = data.adapters || [];
+  app.scopeChoices = list;
   if (!list.length) {
-    app.scopeChoices = list;
     updateScopeConfirm();
     return;
   }
@@ -1291,6 +1397,28 @@ function renderScopeChoices(data) {
     });
     tools.append(btn);
   });
+  if (app.scopeDirection === "resolve") {
+    [["center", "全部以中心为准"], ["local", "全部以这台机器为准"]].forEach(recordPair => {
+      const recordButton = el("button", "small-btn", recordPair[1]);
+      recordButton.type = "button";
+      recordButton.addEventListener("click", recordEv => {
+        recordEv.preventDefault();
+        const recordChoice = recordPair[0];
+        box.querySelectorAll("input[type=checkbox][data-adapter]").forEach(recordInput => {
+          const resolutionItem = (app.scopeChoices || []).find(recordItem => recordItem.id === recordInput.dataset.adapter);
+          if (recordInput.disabled || !resolutionItem || !(resolutionItem.conflicts > 0)) return;
+          recordInput.checked = true;
+        });
+        box.querySelectorAll("input[type=radio][data-resolution-adapter]").forEach(recordRadio => {
+          if (recordRadio.disabled) return;
+          recordRadio.checked = recordRadio.value === recordChoice;
+          if (recordRadio.checked) app.recordChoiceSelections[recordRadio.dataset.resolutionAdapter] = recordChoice;
+        });
+        updateScopeConfirm();
+      });
+      tools.append(recordButton);
+    });
+  }
   const rows = el("div", "choice-list");
   // 冲突的适配器默认展开，冲突文件的对照最多自动展开 3 个。
   const openAdapters = [];
@@ -1324,6 +1452,13 @@ function renderScopeChoices(data) {
     }
     const detail = [item.detail, item.reason].filter(Boolean).join(" · ");
     if (detail) copy.append(el("span", "muted small", detail));
+    const resolutionView = resolutionOf(item.id);
+    if (resolutionView) {
+      const resolutionBadge = resolutionView.stale
+        ? "已记录的决定已过期：" + resolutionChoiceLabel(resolutionView.choice) + (item.reason ? " · " + item.reason : "")
+        : "已记录：" + resolutionChoiceLabel(resolutionView.choice);
+      copy.append(el("span", "resolution-badge small", resolutionBadge));
+    }
     const bound = secretsBoundTo(item.id);
     if (bound.length) {
       const keyring = list.find(row => row.id === "keyring");
@@ -1339,7 +1474,42 @@ function renderScopeChoices(data) {
     if (app.scopeDirection === "collect") { appendCredentialNotes(copy, item); appendSecretHits(copy, item); }
     label.append(input, copy);
     if (!cats.length) block.append(label);
-    if (item.conflicts > 0 && app.scopeAgent && app.scopeDirection !== "resolve") {
+    if (item.conflicts > 0 && app.scopeDirection === "resolve") {
+      const resolutionRow = el("div", "resolution-choice-row");
+      const resolutionInitialChoice = app.recordChoiceSelections[item.id] || app.resolutionPreset || (resolutionView && resolutionView.choice) || "";
+      [["center", "以中心为准"], ["local", "以这台机器为准"]].forEach(resolutionPair => {
+        const resolutionLabel = el("label");
+        const resolutionInput = document.createElement("input");
+        resolutionInput.type = "radio";
+        resolutionInput.name = "resolution-choice-" + item.id;
+        resolutionInput.value = resolutionPair[0];
+        resolutionInput.dataset.resolutionAdapter = item.id;
+        resolutionInput.checked = resolutionInitialChoice === resolutionPair[0];
+        resolutionInput.disabled = !item.enabled;
+        resolutionInput.addEventListener("change", () => {
+          if (resolutionInput.checked) app.recordChoiceSelections[item.id] = resolutionInput.value;
+          updateScopeConfirm();
+        });
+        resolutionLabel.append(resolutionInput, document.createTextNode(resolutionPair[1]));
+        resolutionRow.append(resolutionLabel);
+      });
+      block.append(resolutionRow);
+    }
+    if (resolutionView) {
+      const resolutionActions = el("div", "secret-actions");
+      const resolutionClear = el("button", "small-btn text", "撤销决定");
+      resolutionClear.type = "button";
+      resolutionClear.addEventListener("click", recordEv => {
+        recordEv.preventDefault();
+        recordEv.stopPropagation();
+        const recordAgentId = app.scopeAgent && app.scopeAgent.agentId;
+        if (recordAgentId) void clearResolution(recordAgentId, item.id);
+      });
+      resolutionActions.append(resolutionClear);
+      block.append(resolutionActions);
+    }
+    const resolutionBlocksImmediate = app.scopeDirection === "dispatch" && resolutionView;
+    if (item.conflicts > 0 && app.scopeAgent && app.scopeDirection !== "resolve" && !resolutionBlocksImmediate) {
       const resolveRow = el("div", "secret-actions");
       const localBtn = el("button", "small-btn danger-btn", "以这台机器为准");
       localBtn.type = "button";
@@ -1364,7 +1534,6 @@ function renderScopeChoices(data) {
   });
   box.append(tools, rows);
   openAdapters.forEach(node => node.open());
-  app.scopeChoices = list;
   alignKeyring(box);
   updateScopeConfirm();
 }
@@ -1617,6 +1786,8 @@ function openScopeDialog(opts) {
   $("confirm-desc").textContent = "正在读取可选项…";
   $("confirm-note").textContent = "受影响文件会先备份。";
   $("confirm-choices").replaceChildren();
+  clear($("confirm-resolutions"));
+  $("confirm-resolutions").classList.add("hidden");
   clearDispatchUnlocks();
   $("confirm-err").textContent = "";
   $("btn-confirm-back").classList.add("hidden");
@@ -1637,6 +1808,9 @@ function openScopeDialog(opts) {
   app.scopeKeys = [];
   app.scopeChoices = [];
   app.scopePrecheck = null;
+  app.resolutionPreset = opts.resolutionPreset || "";
+  app.recordChoiceSelections = {};
+  app.resolutionScopeAltLabel = opts.altLabel || "";
   app.scopeLoading = opts.direction === "collect";
   app.scopeStreamFailed = false;
   $("dlg-confirm").showModal();
@@ -1708,27 +1882,20 @@ function confirmSSHKey(agent) {
   $("dlg-confirm").showModal();
   setTimeout(() => input.focus(), 0);
 }
-function confirmResolve(agent) {
+function confirmResolve(agent, preset) {
   const name = agent.hostname || agent.agentId;
   openScopeDialog({
     agent: agent,
     direction: "resolve",
     title: "处理冲突 · " + name,
-    okLabel: "以中心为准",
-    altLabel: "以这台机器为准",
-    action: { kind: "resolve-on", choice: "center", agentId: agent.agentId, name: name },
+    okLabel: "记录决定",
+    altLabel: "记录并立即执行",
+    resolutionPreset: preset,
+    action: { kind: "resolve-record", agentId: agent.agentId, name: name },
   });
 }
 function confirmResolveOn(choice, agent) {
-  const local = choice === "local";
-  const name = agent.hostname || agent.agentId;
-  openScopeDialog({
-    agent: agent,
-    direction: "resolve",
-    title: local ? "以这台机器为准" : "以中心为准",
-    okLabel: local ? "确认以这台机器为准" : "确认以中心为准",
-    action: { kind: "resolve-on", choice: choice, agentId: agent.agentId, name: name },
-  });
+  return confirmResolve(agent, choice);
 }
 
 $("dlg-confirm").querySelector("form").addEventListener("submit", ev => ev.preventDefault());
@@ -1766,8 +1933,30 @@ $("btn-confirm-ok").addEventListener("click", ev => {
     $("dlg-confirm").close("confirm");
     return;
   }
-  const adapters = adaptersWithSecrets(selectedAdapters());
   const unlocks = readDispatchUnlocks();
+  if (action.kind === "resolve-record") {
+    const recordPicks = selectedPicks();
+    const recordSelectedCount = recordPicks.center.length + recordPicks.local.length + recordPicks.missing.length;
+    if (!recordSelectedCount || recordPicks.missing.length) return;
+    const recordImmediate = !!action.recordImmediate && app.scopeStep === "unlock";
+    if (recordImmediate && app.scopeStep !== "unlock" && recordPicks.center.length && dispatchKeysForSelection().length) {
+      action.recordImmediate = true;
+      app.pendingAction = action;
+      showScopeStep("unlock");
+      return;
+    }
+    if (recordImmediate && app.scopeStep === "unlock") {
+      const recordTooShort = unlocks.find(recordUnlock => [...recordUnlock.password].length < 8);
+      if (recordTooShort) { toast("口令至少 8 位，请补齐后再确认"); return; }
+    }
+    okBtn.disabled = true; okBtn.textContent = "处理中…";
+    $("dlg-confirm").returnValue = "confirm";
+    $("dlg-confirm").close("confirm");
+    app.pendingAction = null;
+    void executeRecordResolve(action.agentId, action.name, recordPicks, recordImmediate, unlocks, false);
+    return;
+  }
+  const adapters = adaptersWithSecrets(selectedAdapters());
   if (!adapters.length) return;
   if (action.kind === "collect") action.knownHits = unresolvedSecretHits(adapters);
   if ((action.kind === "dispatch-one" || (action.kind === "resolve-on" && action.choice === "center")) && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
@@ -1806,7 +1995,25 @@ $("btn-confirm-ok").addEventListener("click", ev => {
 $("btn-confirm-alt").addEventListener("click", ev => {
   ev.preventDefault();
   const action = app.pendingAction;
-  if (!action || action.kind !== "resolve-on") return;
+  if (!action) return;
+  if (action.kind === "resolve-record") {
+    const recordPicks = selectedPicks();
+    const recordSelectedCount = recordPicks.center.length + recordPicks.local.length + recordPicks.missing.length;
+    if (!recordSelectedCount || recordPicks.missing.length) return;
+    if (recordPicks.center.length && dispatchKeysForSelection().length) {
+      action.recordImmediate = true;
+      app.pendingAction = action;
+      showScopeStep("unlock");
+      return;
+    }
+    const recordUnlocks = readDispatchUnlocks();
+    $("dlg-confirm").returnValue = "confirm";
+    $("dlg-confirm").close("confirm");
+    app.pendingAction = null;
+    void executeRecordResolve(action.agentId, action.name, recordPicks, true, recordUnlocks, false);
+    return;
+  }
+  if (action.kind !== "resolve-on") return;
   const adapters = selectedAdapters();
   if (!adapters.length) return;
   $("dlg-confirm").returnValue = "confirm";
@@ -1936,14 +2143,16 @@ function dispatchDialogError(e) {
 // 只显示人话（去掉 adapter root 之类的扫描诊断）。
 async function handleDispatchFailure(agentId, name, data) {
   const view = writeFailureView(data);
+  const resolutionFailures = resolutionOutcomeLines(data).failed;
   if (view.conflict) {
     stopDispatchWait();
     $("dlg-confirm").close("cancel");
-    presentWriteFailure("下发", agentId, name, data);
+    const resolutionFailureData = { ...data, errors: ((data && data.errors) || []).concat(resolutionFailures) };
+    presentWriteFailure("下发", agentId, name, resolutionFailureData);
     try { await refresh(); } catch (_) {}
     return;
   }
-  const lines = view.rest.concat(view.notes);
+  const lines = view.rest.concat(view.notes, resolutionFailures);
   failDispatchInDialog(lines.length ? lines.join("；") : "下发没有完成");
 }
 // 把一长串 “manifest 安装失败: pi/plugins:xxx: exec: "pi": executable file not found…”
@@ -2044,20 +2253,44 @@ function beginDispatchWait(name, plugins, unlocking) {
   tick();
   app.dispatchWaitTimer = setInterval(tick, 1000);
 }
-function finishDispatchInDialog(name, paths, problems) {
+function resolutionOutcomeLines(resolutionData) {
+  const resolutionLines = { done: [], failed: [] };
+  const resolutionStatusLabels = { applied: "已应用", published: "已写入中心", noop: "无需更改", stale: "已过期", failed: "没有完成" };
+  ((resolutionData && resolutionData.resolutions) || []).forEach(resolutionOutcome => {
+    if (!resolutionOutcome || !resolutionOutcome.adapter) return;
+    const resolutionChoice = resolutionChoiceLabel(resolutionOutcome.choice);
+    const resolutionStatus = resolutionOutcome.status || "failed";
+    const resolutionPrefix = adapterTitle(resolutionOutcome.adapter) + "：" + resolutionChoice;
+    const resolutionLabel = resolutionStatusLabels[resolutionStatus] || resolutionStatus;
+    if (resolutionStatus === "applied" || resolutionStatus === "published" || resolutionStatus === "noop") {
+      resolutionLines.done.push(resolutionPrefix + "（" + resolutionLabel + "）");
+      return;
+    }
+    const resolutionMessage = resolutionOutcome.message || resolutionLabel;
+    resolutionLines.failed.push(resolutionPrefix + "（" + resolutionMessage + "）");
+  });
+  return resolutionLines;
+}
+function finishDispatchInDialog(name, paths, problems, resolutionData) {
   stopDispatchWait();
   app.scopeStep = "done";
   $("confirm-choices").classList.add("hidden");
   $("dispatch-unlocks").classList.add("hidden");
   $("btn-confirm-back").classList.add("hidden");
-  const failed = problems || [];
+  clear($("confirm-resolutions"));
+  $("confirm-resolutions").classList.add("hidden");
+  const resolutionLines = resolutionOutcomeLines(resolutionData);
+  const failed = (problems || []).concat(resolutionLines.failed);
+  const resolutionDoneNote = resolutionLines.done.length ? "决定处理结果：" + resolutionLines.done.join("；") : "";
   if (failed.length) {
-    $("confirm-desc").textContent = "配置已写到「" + name + "」，但有插件没有装上。";
-    $("confirm-note").textContent = "这台机器上要有 pi 命令，并且能联网，插件才会装上。";
+    $("confirm-desc").textContent = (problems || []).length
+      ? "配置已写到「" + name + "」，但有插件没有装上。"
+      : "下发已完成，但有已解决的决定没有完成。";
+    $("confirm-note").textContent = [(problems || []).length ? "这台机器上要有 pi 命令，并且能联网，插件才会装上。" : "", resolutionDoneNote].filter(Boolean).join(" ");
     $("confirm-err").textContent = failed.join("\n");
   } else {
     $("confirm-err").textContent = "";
-    $("confirm-note").textContent = "";
+    $("confirm-note").textContent = resolutionDoneNote;
     $("confirm-desc").textContent = paths.length
       ? "已下发到「" + name + "」，并已写回：" + paths.join("、")
       : "已下发到「" + name + "」。";
@@ -2094,7 +2327,7 @@ async function executeDispatchOne(agentId, name, adapters, unlocks, stay) {
     try {
       const d = await api("/api/agents/" + encodeURIComponent(agentId) + "/pull?confirm=true", { method: "POST", body: body });
       if (d.ok) {
-        finishDispatchInDialog(name, paths, installFailures(d));
+        finishDispatchInDialog(name, paths, installFailures(d), d);
         try { await refresh(); } catch (_) {}
       } else {
         await handleDispatchFailure(agentId, name, d);
@@ -2138,36 +2371,122 @@ async function executeSSHKey(agentId, name, githubUser) {
     showAlert("登录公钥没有写入", e.errors && e.errors.length ? e.errors : [e.message], null);
   } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
-async function executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks) {
+async function clearResolution(agentId, adapterId) {
+  try {
+    await api("/api/resolve/clear?agent=" + encodeURIComponent(agentId) + "&confirm=true", {
+      method: "POST",
+      body: { adapters: [adapterId] },
+    });
+    const resolutionChecked = checkedScopeChoices();
+    app.scopeChoices = (app.scopeChoices || []).map(resolutionItem => {
+      if (resolutionItem.id !== adapterId) return resolutionItem;
+      const resolutionNext = { ...resolutionItem, resolution: null };
+      if (Object.prototype.hasOwnProperty.call(resolutionChecked, adapterId)) resolutionNext.checked = resolutionChecked[adapterId];
+      return resolutionNext;
+    });
+    if ($("dlg-confirm").open && app.scopeDirection) renderScopeChoices({ hint: app.scopeHint, adapters: app.scopeChoices });
+    toast("已撤销决定");
+    await refresh();
+  } catch (resolutionError) {
+    showAlert("撤销决定没有完成", resolutionError.errors && resolutionError.errors.length ? resolutionError.errors : [resolutionError.message], null);
+  }
+}
+async function executeRecordResolve(agentId, name, picks, immediate, unlocks, allowSecrets) {
+  const recordGroups = [
+    { choice: "center", adapters: (picks && picks.center || []).slice() },
+    { choice: "local", adapters: (picks && picks.local || []).slice() },
+  ].filter(recordGroup => recordGroup.adapters.length > 0);
+  if (!recordGroups.length) return false;
+  if (immediate) {
+    let recordCount = 0;
+    for (const recordGroup of recordGroups) {
+      const recordAdapters = recordGroup.choice === "center"
+        ? adaptersWithSecrets(recordGroup.adapters)
+        : recordGroup.adapters;
+      const recordUnlocks = recordGroup.choice === "center" ? unlocks : null;
+      const recordOK = await executeResolveOn(recordGroup.choice, agentId, recordAdapters, allowSecrets, recordUnlocks, true);
+      if (!recordOK) return false;
+      recordCount += recordGroup.adapters.length;
+    }
+    toast("已记录并立即执行 " + recordCount + " 条决定");
+    try { await refresh(); } catch (_) {}
+    return true;
+  }
+  let recordCount = 0;
+  setBusy("正在记录决定…");
+  try {
+    for (const recordGroup of recordGroups) {
+      const recordURL = "/api/resolve/record?choice=" + recordGroup.choice
+        + "&agent=" + encodeURIComponent(agentId) + "&confirm=true";
+      const recordData = await api(recordURL, { method: "POST", body: { adapters: recordGroup.adapters } });
+      if (!recordData.ok) {
+        const recordErrors = (recordData.errors || []).concat(recordData.message ? [recordData.message] : []);
+        const recordSaved = recordCount > 0 ? ["已经记录 " + recordCount + " 条决定，其他决定没有记录。"] : [];
+        showAlert("决定没有记录", recordSaved.concat(recordErrors.length ? recordErrors : ["决定没有记录。"]), null);
+        try { await refresh(); } catch (_) {}
+        return false;
+      }
+      recordCount += Array.isArray(recordData.recorded) ? recordData.recorded.length : recordGroup.adapters.length;
+    }
+    toast("已记录 " + recordCount + " 条决定，下发到「" + name + "」时执行");
+    try { await refresh(); } catch (_) {}
+    return true;
+  } catch (recordError) {
+    const recordErrors = recordError.errors && recordError.errors.length ? recordError.errors : [recordError.message || "决定没有记录。"];
+    const recordSaved = recordCount > 0 ? ["已经记录 " + recordCount + " 条决定，其他决定没有记录。"] : [];
+    showAlert("决定没有记录", recordSaved.concat(recordErrors), null);
+    try { await refresh(); } catch (_) {}
+    return false;
+  } finally { clearBusy(); }
+}
+async function executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks, record) {
   const okBtn = $("btn-confirm-ok");
   setBusy(choice === "local" ? "正在按这台机器的内容处理…" : "正在按中心内容更新…");
   const url = "/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true"
-    + (allowSecrets ? "&allowSecrets=true" : "");
+    + (allowSecrets ? "&allowSecrets=true" : "") + (record ? "&record=true" : "");
   const body = { adapters: adapters };
   if (unlocks && unlocks.length) body.unlocks = unlocks;
   try {
     const d = await api(url, { method: "POST", body: body });
+    if (!d.ok && Array.isArray(d.pending) && d.pending.length) {
+      const resolutionErrors = (d.errors || []).concat((d.agents || []).filter(resolutionAgent => resolutionAgent.error).map(resolutionAgent => resolutionAgent.error));
+      showAlert("决定已记录，立即执行没有完成", resolutionErrors.length ? resolutionErrors : ["决定已保留，可稍后下发时再执行。"], "决定已保留，可稍后下发时再执行");
+      try { await refresh(); } catch (_) {}
+      return false;
+    }
     if (d.ok && d.note) {
-      // 这台机器的裁决成功了，但没法自动发给其他机器（绑定了密钥）。
-      // 不当成错误，也不能只弹一个「成功」的提示让人以为别的机器也更新了。
       showAlert("已保留该机器的内容并写入中心", [d.note], null);
     } else if (d.ok) {
       clearAlert();
-      toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
+      if (!record) toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
+    } else {
+      const resolutionErrors = (d.errors || []).concat((d.agents || []).filter(resolutionAgent => resolutionAgent.error).map(resolutionAgent => resolutionAgent.error));
+      showAlert("裁决没有完成", resolutionErrors.length ? resolutionErrors : ["裁决没有完成。"], null);
+      try { await refresh(); } catch (_) {}
+      return false;
     }
-    else {
-      const lines = (d.errors || []).concat((d.agents || []).filter(a => a.error).map(a => a.error));
-      showAlert("裁决没有完成", lines.length ? lines : ["裁决没有完成。"], null);
-    }
-    await refresh();
+    try { await refresh(); } catch (_) {}
+    return true;
   } catch (e) {
-    if (e.code === "secrets-rejected") {
+    const resolutionReport = e.report || {};
+    if (record && Array.isArray(resolutionReport.pending) && resolutionReport.pending.length) {
+      const resolutionErrors = e.errors && e.errors.length ? e.errors : [e.message || "决定已保留，可稍后下发时再执行。"];
+      showAlert("决定已记录，立即执行没有完成", resolutionErrors, "决定已保留，可稍后下发时再执行");
+      try { await refresh(); } catch (_) {}
+      return false;
+    }
+    if (e.code === "agent-outdated") {
+      showAlert("这台机器的 homer 版本太旧，不能记录决定", [e.message || "请先更新程序。"], null, [
+        { label: "直接执行（不记录）", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks, false) },
+      ]);
+    } else if (e.code === "secrets-rejected") {
       showAlert("这些文件像是带有密钥", secretNoticeLines(e), "确认之后，这台机器的内容仍会写入中心，并下发给其他在线机器。", [
-        { label: "仍然以这台机器为准", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, true) },
+        { label: "仍然以这台机器为准", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, true, unlocks, record) },
       ]);
     } else {
       showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);
     }
+    return false;
   } finally { finishConfirmButton(okBtn); }
 }
 
