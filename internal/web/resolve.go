@@ -8,6 +8,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/gens"
+	"github.com/zzjcool/homer-cli/internal/resolutions"
 )
 
 // Conflict resolution (planner-frozen MVP step 4): the console never
@@ -30,6 +31,10 @@ type resolveReport struct {
 	// Note explains a deliberate non-action (for example why other machines
 	// were not written). It is informational and does not make ok false.
 	Note string `json:"note,omitempty"`
+	// Recorded is the set of decisions written before an immediate relay.
+	Recorded []string `json:"recorded,omitempty"`
+	// Pending is the subset retained when an immediate relay fails.
+	Pending []string `json:"pending,omitempty"`
 }
 
 // handleResolve backs POST /api/resolve?choice=local|center&confirm=true.
@@ -146,6 +151,22 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 // the server fans the new generation out to the other online machines);
 // "center" asks it to apply the storage's current generation.
 func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice resolveChoice, agentID string) {
+	recordImmediate := r.URL.Query().Get("record") == "true"
+	// Preserve legacy no-agent precedence while enforcing record=true's
+	// explicit-selection requirement before reporting optional capability.
+	if !recordImmediate && s.opts.Agents == nil {
+		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
+		return
+	}
+	scope, scopeErr := readSyncScope(r)
+	if scopeErr != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", scopeErr.Error(), nil)
+		return
+	}
+	if recordImmediate && !scope.Explicit {
+		writeError(w, http.StatusBadRequest, "bad-request", "请选择至少一个适配器", nil)
+		return
+	}
 	if s.opts.Agents == nil {
 		writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
 		return
@@ -159,20 +180,18 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	// "local" lets the machine resolve and publish (its executor's push
 	// path applies the local-wins merge and uploads the result);
 	// "center" has it apply the storage's current generation.
-	scope, scopeErr := readSyncScope(r)
-	if scopeErr != nil {
-		writeError(w, http.StatusBadRequest, "bad-request", scopeErr.Error(), nil)
-		return
-	}
 	if scope.Explicit {
 		scope.Overwrite = true
-		if choice == resolveCenter {
+		if choice == resolveCenter || recordImmediate {
 			if err := s.requireCenterAdapters(scope.Adapters); err != nil {
-				status := http.StatusBadRequest
+				status, code := http.StatusBadRequest, "bad-request"
 				if errors.Is(err, errNoCenterSnapshot) {
 					status = http.StatusConflict
+					if recordImmediate {
+						code = "no-snapshot"
+					}
 				}
-				writeError(w, status, "bad-request", err.Error(), nil)
+				writeError(w, status, code, err.Error(), nil)
 				return
 			}
 		}
@@ -183,7 +202,7 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	// dispatch like any other: a bound key must travel with it and be opened
 	// first, or nothing is written. The password step is the same one a plain
 	// dispatch uses.
-	if choice == resolveCenter {
+	if choice == resolveCenter || recordImmediate {
 		if s.refuseBoundKeyGap(w, scope) {
 			return
 		}
@@ -198,6 +217,50 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 			return
 		}
 	}
+
+	var recorded []string
+	var pending []string
+	if recordImmediate {
+		actor, ok := s.opts.Agents.(ResolutionSource)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "agents-disabled", "多机 agent 接口未启用", nil)
+			return
+		}
+		generation := s.centerGeneration()
+		if generation < 1 {
+			writeError(w, http.StatusConflict, "no-snapshot", "中心还没有任何快照（先从一台机器收取）", nil)
+			return
+		}
+		recordRaw, recordErr := actor.AgentResolveRecord(r.Context(), agentID, ResolveRecordRequest{
+			Action: resolutions.ActionRecord, Choice: string(choice),
+			Adapters: append([]string(nil), scope.Adapters...), CenterGeneration: generation,
+		})
+		if recordErr != nil {
+			writeErrorValue(w, recordErr)
+			return
+		}
+		recordReport, parseErr := parseResolutionTaskReport(recordRaw)
+		if parseErr != nil {
+			writeError(w, http.StatusBadGateway, "agent-unreachable", "机器没有返回有效的记录结果", []string{parseErr.Error()})
+			return
+		}
+		recorded = resolutionAdapterIDs(recordReport.Recorded)
+		pending = append([]string(nil), recorded...)
+		if !recordReport.OK {
+			writeJSON(w, http.StatusUnprocessableEntity, resolveReport{
+				OK: false, Status: "error", Choice: string(choice),
+				Agents: []agentApplyResult{}, Errors: nonNilStrings(recordReport.Errors),
+				Recorded: recorded, Pending: pending,
+			})
+			return
+		}
+		if len(recorded) == 0 {
+			writeError(w, http.StatusBadGateway, "agent-unreachable", "机器没有返回有效的记录结果", nil)
+			return
+		}
+		scope.ClearResolutions = true
+	}
+
 	var raw json.RawMessage
 	var err error
 	if choice == resolveLocal {
@@ -206,8 +269,23 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 		raw, err = s.opts.Agents.AgentPull(r.Context(), agentID, true, scope)
 	}
 	if err != nil {
-		writeErrorValue(w, err)
+		if recordImmediate {
+			status, _ := errorStatusCode(err)
+			if status == 0 {
+				status = http.StatusBadGateway
+			}
+			writeJSON(w, status, resolveReport{
+				OK: false, Status: "partial", Choice: string(choice),
+				Agents: []agentApplyResult{}, Errors: []string{err.Error()},
+				Recorded: recorded, Pending: pending,
+			})
+		} else {
+			writeErrorValue(w, err)
+		}
 		return
+	}
+	if recordImmediate && remoteReportOK(raw) {
+		pending = nil
 	}
 	if choice == resolveCenter && remoteReportOK(raw) {
 		if messages := s.unlockDispatched(r.Context(), agentID, scope); len(messages) > 0 {
@@ -236,7 +314,7 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 			Agents: []agentApplyResult{{
 				AgentID: agentID, Hostname: name, Status: "secrets-rejected",
 			}},
-			Errors: secretConfirmLines(paths),
+			Errors: secretConfirmLines(paths), Recorded: recorded, Pending: pending,
 		})
 		return
 	}
@@ -275,11 +353,12 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 		status = "resolved-not-fanned-out"
 	}
 	writeJSON(w, reportHTTPStatus(result.OK, status, errorsOut), resolveReport{
-		OK:     result.OK,
-		Status: status,
-		Choice: string(choice),
-		Agents: agents,
-		Errors: errorsOut,
-		Note:   fanoutNote,
+		OK:       result.OK,
+		Status:   status,
+		Choice:   string(choice),
+		Agents:   agents,
+		Errors:   errorsOut,
+		Note:     fanoutNote,
+		Recorded: recorded, Pending: pending,
 	})
 }

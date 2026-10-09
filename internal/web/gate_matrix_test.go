@@ -58,9 +58,11 @@ func TestGateMatrix(t *testing.T) {
 		{name: "revoked per-agent secret", token: "agent-secret-revoked"},
 	}
 	type gatePath struct {
-		name string
-		path string
-		want func(gateCredential) int
+		name   string
+		method string
+		path   string
+		body   string
+		want   func(gateCredential) int
 	}
 	paths := []gatePath{
 		{
@@ -111,6 +113,29 @@ func TestGateMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:   "GET /api/resolve/record",
+			method: http.MethodGet,
+			path:   "/api/resolve/record?agent=box",
+			want: func(credential gateCredential) int {
+				if gateAllowsHumanAPI(credential) {
+					return http.StatusNotImplemented
+				}
+				return http.StatusUnauthorized
+			},
+		},
+		{
+			name:   "POST /api/resolve/clear",
+			method: http.MethodPost,
+			path:   "/api/resolve/clear?agent=box&confirm=true",
+			body:   `{"adapters":["pi"]}`,
+			want: func(credential gateCredential) int {
+				if gateAllowsHumanAPI(credential) {
+					return http.StatusNotImplemented
+				}
+				return http.StatusUnauthorized
+			},
+		},
+		{
 			name: "GET /api/snapshot",
 			path: "/api/snapshot",
 			want: func(credential gateCredential) int {
@@ -154,7 +179,11 @@ func TestGateMatrix(t *testing.T) {
 				credential := credential
 				t.Run(credential.name, func(t *testing.T) {
 					forwardedPath = ""
-					request := httptest.NewRequest(http.MethodGet, path.path, nil)
+					method := path.method
+					if method == "" {
+						method = http.MethodGet
+					}
+					request := httptest.NewRequest(method, path.path, strings.NewReader(path.body))
 					if credential.token != "" {
 						request.Header.Set("Authorization", "Bearer "+credential.token)
 					}
@@ -175,6 +204,23 @@ func TestGateMatrix(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestResolveRecordRouteMethods(t *testing.T) {
+	fixture := authFixture(t)
+	server := newWebServer(t, fixture, "test-token", nil, nil)
+	for _, testCase := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPut, path: "/api/resolve/record"},
+		{method: http.MethodGet, path: "/api/resolve/clear"},
+	} {
+		response := request(t, server.Handler(), testCase.method, testCase.path)
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s = %d %s, want 405", testCase.method, testCase.path, response.Code, response.Body)
+		}
 	}
 }
 

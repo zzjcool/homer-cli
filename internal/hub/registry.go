@@ -152,6 +152,19 @@ func (r *Registry) UpdateDrift(agentID string, drift AgentDrift) {
 	}
 }
 
+// NoteResolutions updates the optimistic staged-decision count without
+// creating a drift summary for agents that have not reported status yet.
+func (r *Registry) NoteResolutions(agentID string, pending int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentID]; ok && agent.info.Drift != nil {
+		agent.info.Drift.Resolutions = pending
+	}
+}
+
 func (r *Registry) UpdateHost(agentID string, host HostSnapshot) {
 	if r == nil {
 		return
@@ -195,7 +208,11 @@ func (r *Registry) NoteWriteOutcome(agentID, status string, ok bool, conflicts i
 		if conflicts < 1 {
 			conflicts = 1
 		}
-		agent.info.Drift = &AgentDrift{Conflicts: conflicts}
+		resolutions := 0
+		if agent.info.Drift != nil {
+			resolutions = agent.info.Drift.Resolutions
+		}
+		agent.info.Drift = &AgentDrift{Conflicts: conflicts, Resolutions: resolutions}
 	case "applied", "no-drift", "resolved", "no-conflicts":
 		if !ok {
 			return

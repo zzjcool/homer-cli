@@ -82,6 +82,8 @@ func agentStatusForCode(code string) int {
 		return http.StatusBadGateway
 	case "agent-offline":
 		return http.StatusServiceUnavailable
+	case "agent-outdated":
+		return http.StatusConflict
 	case "agent-timeout":
 		return http.StatusGatewayTimeout
 	case "agents-disabled":
@@ -111,6 +113,8 @@ func errorMessage(code string) string {
 		return "agent 无法连接"
 	case "agent-offline":
 		return "机器已离线"
+	case "agent-outdated":
+		return "这台机器的 homer 版本太旧，不能记录决定，请先更新程序"
 	case "agent-timeout":
 		return "agent 请求超时"
 	case "bad-request":

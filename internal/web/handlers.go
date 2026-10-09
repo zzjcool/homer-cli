@@ -144,6 +144,18 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeMethodNotAllowed(w)
 		}
+	case path == "/api/resolve/record":
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleResolveRecord(w, r)
+	case path == "/api/resolve/clear":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		s.handleResolveClear(w, r)
 	case path == "/api/resolve":
 		// Conflict resolution (MVP): keep this machine or the center.
 		if r.Method != http.MethodPost {
@@ -547,6 +559,10 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 			writeError(w, status, "bad-request", err.Error(), nil)
 			return
 		}
+	}
+	if confirmValue(r) && scope.Explicit {
+		scope.ApplyResolutions = true
+		scope.CenterGeneration = s.centerGeneration()
 	}
 	if confirmValue(r) {
 		if s.refuseBoundKeyGap(w, scope) {

@@ -355,6 +355,11 @@ func (s *Server) syncToOthers(w http.ResponseWriter, r *http.Request, confirmed 
 const maxConcurrentAgentPulls = 8
 
 func fanoutPullOnlineAgents(ctx context.Context, agents AgentsSource, scope SyncScope) []agentApplyResult {
+	// A fan-out is never a staged-decision consumer or clearer, even when its
+	// caller originated from the immediate resolve fallback.
+	scope.ApplyResolutions = false
+	scope.ClearResolutions = false
+	scope.CenterGeneration = 0
 	if agents == nil {
 		return []agentApplyResult{}
 	}
@@ -715,10 +720,11 @@ func (s *Server) handleConsole(w http.ResponseWriter, _ *http.Request) {
 			}
 			if info.Drift != nil {
 				view.Drift = &AgentDrift{
-					Push:      info.Drift.Push,
-					Pull:      info.Drift.Pull,
-					Conflicts: info.Drift.Conflicts,
-					Error:     info.Drift.Error,
+					Push:        info.Drift.Push,
+					Pull:        info.Drift.Pull,
+					Conflicts:   info.Drift.Conflicts,
+					Error:       info.Drift.Error,
+					Resolutions: info.Drift.Resolutions,
 				}
 			}
 			machines = append(machines, view)

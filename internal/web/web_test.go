@@ -87,6 +87,20 @@ func newWebServer(t *testing.T, fixture webFixture, token string, source AgentsS
 	return server
 }
 
+func TestAgentsAndConsoleCarryDriftResolutions(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	source := &sourceStub{list: []AgentInfo{{
+		AgentID: "box", Hostname: "box", Drift: &AgentDrift{Conflicts: 3, Resolutions: 2},
+	}}}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	for _, path := range []string{"/api/agents", "/api/console"} {
+		response := request(t, server.Handler(), http.MethodGet, path)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"resolutions":2`) {
+			t.Fatalf("%s = %d %s", path, response.Code, response.Body)
+		}
+	}
+}
+
 func TestAgentListMarksOlderVersion(t *testing.T) {
 	old := Version
 	Version = "v1.4.0"
