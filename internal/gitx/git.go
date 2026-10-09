@@ -37,7 +37,7 @@ const (
 )
 
 var (
-	requiredGitignoreLines = [...]string{"state.json", "backups/", "keys/", "agent.json"}
+	requiredGitignoreLines = [...]string{"state.json", "backups/", "keys/", "agent.json", "resolutions.json"}
 	// syncPathspecs is the complete configuration-center commit boundary. The
 	// root config and gitignore are part of the portable repository contract;
 	// state/backups/keys/agent.json remain excluded by .gitignore. agent.json
