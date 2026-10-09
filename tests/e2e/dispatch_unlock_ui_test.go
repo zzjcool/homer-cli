@@ -219,3 +219,120 @@ func (s *dispatchUIStub) AgentKey(_ context.Context, _ string, cmd keyring.Comma
 	s.mu.Unlock()
 	return json.Marshal(keyring.Result{OK: true, Status: "unlocked"})
 }
+
+// An adapter whose credential file is bound to a key must not be dispatchable
+// when the key cannot travel (the center holds no keyring yet). Offering the
+// button anyway writes the adapter's plain files and strands the credentials:
+// the machine looks synced but cannot log in, and nothing says why.
+func TestDispatchBlockedWhenBoundKeyCannotTravel(t *testing.T) {
+	if _, err := chromiumExecutable(t); err != nil {
+		t.Skipf("chromium is not installed: %v", err)
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	homer := filepath.Join(root, ".homer")
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return homer
+		}
+		return ""
+	})
+	if err := core.SaveConfig(paths, core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "auth.json")
+	if err := os.WriteFile(destination, []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const password = "long-password"
+	if r := keyring.Apply(homer, keyring.Command{Action: "create", ID: "pi", Name: "pi", Password: password, WorkFactor: 14}); !r.OK {
+		t.Fatalf("create = %#v", r)
+	}
+	if r := keyring.Apply(homer, keyring.Command{Action: "encrypt", ID: "pi", Path: destination, Adapter: "pi", Password: password, WorkFactor: 14}); !r.OK {
+		t.Fatalf("encrypt = %#v", r)
+	}
+	// The center has pi and herdr content but NO keyring, so the key bound to
+	// pi cannot be delivered with it.
+	if _, err := gens.New(homer).Publish(map[string]map[string]string{
+		"pi":    {"settings/settings.json": "x\n"},
+		"herdr": {"config/config.toml": "x\n"},
+	}, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &dispatchUIStub{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := web.NewServer(web.ServeOptions{Addr: "127.0.0.1:0", HomerHome: homer, Agents: stub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := &http.Server{Handler: server.Handler()}
+	go func() { _ = httpServer.Serve(listener) }()
+	t.Cleanup(func() { _ = httpServer.Close() })
+
+	browser, cancel := newKeyBrowser(t)
+	defer cancel()
+	ctx, stop := context.WithTimeout(browser, 90*time.Second)
+	defer stop()
+
+	admin := "browser-admin-pw"
+	err = chromedp.Run(ctx,
+		chromedp.Navigate("http://"+listener.Addr().String()+"/"),
+		chromedp.WaitVisible(`#in-setup-pw`, chromedp.ByQuery),
+		chromedp.SendKeys(`#in-setup-pw`, admin, chromedp.ByQuery),
+		chromedp.SendKeys(`#in-setup-pw2`, admin, chromedp.ByQuery),
+		chromedp.Click(`#btn-setup`, chromedp.ByQuery),
+		chromedp.WaitVisible(`//div[@id="agent-list"]//button[normalize-space()="下发"]`, chromedp.BySearch),
+		chromedp.Click(`//div[@id="agent-list"]//button[normalize-space()="下发"]`, chromedp.BySearch),
+		chromedp.WaitVisible(`#btn-confirm-ok`, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatalf("open dispatch: %v\n%s", err, browserText(ctx))
+	}
+	type state struct {
+		Disabled bool   `json:"disabled"`
+		Err      string `json:"err"`
+	}
+	read := func(label string) state {
+		t.Helper()
+		var st state
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`({disabled: document.getElementById("btn-confirm-ok").disabled, err: document.getElementById("confirm-err").textContent})`, &st)); err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		return st
+	}
+	setPicked := func(adapter string, checked bool) {
+		t.Helper()
+		js := `(() => { const el = document.querySelector('#confirm-choices input[data-adapter="` + adapter + `"]'); if (!el) return "missing"; if (el.checked !== ` + map[bool]string{true: "true", false: "false"}[checked] + `) { el.checked = ` + map[bool]string{true: "true", false: "false"}[checked] + `; el.dispatchEvent(new Event("change", {bubbles:true})); } return "ok"; })()`
+		var out string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(js, &out)); err != nil || out != "ok" {
+			t.Fatalf("set %s=%v: out=%q err=%v\n%s", adapter, checked, out, err, browserText(ctx))
+		}
+	}
+
+	// pi picked: its key cannot travel, so the button must be off and say why.
+	setPicked("herdr", false)
+	setPicked("pi", true)
+	blocked := read("pi picked")
+	if !blocked.Disabled || !strings.Contains(blocked.Err, "密钥") || !strings.Contains(blocked.Err, "不能下发") {
+		t.Fatalf("pi picked while its key cannot travel: %+v (want disabled with a reason)", blocked)
+	}
+	// herdr alone has no bound key: allowed.
+	setPicked("pi", false)
+	setPicked("herdr", true)
+	allowed := read("herdr only")
+	if allowed.Disabled || allowed.Err != "" {
+		t.Fatalf("herdr has no bound key and must stay dispatchable: %+v", allowed)
+	}
+	// Mixed selection is still blocked by the pi part.
+	setPicked("pi", true)
+	if mixed := read("mixed"); !mixed.Disabled {
+		t.Fatalf("herdr+pi must be blocked by pi's key: %+v", mixed)
+	}
+	if pulls, _ := stub.counts(); pulls != 0 {
+		t.Fatalf("nothing should have been sent, pulls=%d", pulls)
+	}
+}

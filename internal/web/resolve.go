@@ -176,6 +176,11 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	} else {
 		scope.Overwrite = false
 	}
+	// "Center wins" writes the center's content onto this machine, so it is a
+	// dispatch like any other and must not leave a bound key behind.
+	if choice == resolveCenter && s.refuseBoundKeyGap(w, scope) {
+		return
+	}
 	var raw json.RawMessage
 	var err error
 	if choice == resolveLocal {

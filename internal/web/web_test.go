@@ -26,6 +26,10 @@ type webFixture struct {
 
 func makeFixture(t *testing.T, base, local string) webFixture {
 	t.Helper()
+	// The keyring lives under the adapter root resolved from $HOME. Without an
+	// isolated HOME these fixtures read the developer's real ~/.homer/keyring,
+	// so a test's outcome would depend on which keys the machine happens to hold.
+	t.Setenv("HOME", t.TempDir())
 	home := t.TempDir()
 	paths := core.GetHomerPaths(func(key string) string {
 		if key == "HOMER_HOME" {
@@ -232,6 +236,10 @@ func pullFixture(t *testing.T, content string) webFixture {
 
 func makeFixtureAtHome(t *testing.T, home, base string) webFixture {
 	t.Helper()
+	// The keyring lives under the adapter root resolved from $HOME. Without an
+	// isolated HOME these fixtures read the developer's real ~/.homer/keyring,
+	// so a test's outcome would depend on which keys the machine happens to hold.
+	t.Setenv("HOME", t.TempDir())
 	paths := core.GetHomerPaths(func(key string) string {
 		if key == "HOMER_HOME" {
 			return home

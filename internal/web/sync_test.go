@@ -18,6 +18,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/gitx"
+	"github.com/zzjcool/homer-cli/internal/keyring"
 )
 
 // Planner-frozen test names (MVP step 2). The sync API collapses
@@ -871,5 +872,39 @@ func TestSelfBinaryGzipRoundTripAndRange(t *testing.T) {
 	}
 	if !bytes.Equal(rangeRec.Body.Bytes(), gzRec.Body.Bytes()[:4]) {
 		t.Fatal("range bytes are not the start of the gzip body")
+	}
+}
+
+// "Sync to others" pushes this hub's content and then writes every online
+// machine from the center. An adapter with a key bound to it cannot be
+// delivered whole by that fan-out (it has no per-machine password step), so
+// the fan-out is refused instead of stranding the key on every machine.
+func TestSyncToOthersRefusesWhenAdapterHasBoundKey(t *testing.T) {
+	// The keyring lives under the adapter root resolved from $HOME. Without
+	// this the test would create a key in the developer's real ~/.homer.
+	t.Setenv("HOME", t.TempDir())
+	fixture := makeFixture(t, "base\n", "local\n")
+	setGitIdentity(t, fixture.home)
+	secretFile := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(secretFile, []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := keyring.Apply(fixture.home, keyring.Command{Action: "create", ID: "pi", Name: "pi", Password: "long-password", WorkFactor: 14}); !r.OK {
+		t.Fatalf("create = %#v", r)
+	}
+	if r := keyring.Apply(fixture.home, keyring.Command{Action: "encrypt", ID: "pi", Path: secretFile, Adapter: "pi", Password: "long-password", WorkFactor: 14}); !r.OK {
+		t.Fatalf("encrypt = %#v", r)
+	}
+	source := &sourceStub{
+		list:    []AgentInfo{{AgentID: "online-1", Hostname: "box-online"}},
+		pullRaw: json.RawMessage(`{"ok":true}`),
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := syncPost(t, server.Handler(), "direction=to-others&confirm=true")
+	if response.Code != http.StatusUnprocessableEntity || len(source.pullValues) != 0 {
+		t.Fatalf("to-others = %d pulls=%d body=%s (want refused before any machine is written)", response.Code, len(source.pullValues), response.Body)
+	}
+	if !strings.Contains(response.Body.String(), "pi") || !strings.Contains(response.Body.String(), "密钥") {
+		t.Fatalf("refusal should name the adapter and the key: %s", response.Body)
 	}
 }

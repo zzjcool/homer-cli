@@ -549,6 +549,9 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 		}
 	}
 	if confirmValue(r) {
+		if s.refuseBoundKeyGap(w, scope) {
+			return
+		}
 		if messages := s.dispatchUnlockErrors(scope); len(messages) > 0 {
 			code := "unlock-required"
 			status := http.StatusUnprocessableEntity

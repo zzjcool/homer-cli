@@ -156,3 +156,136 @@ func (s *recordingKeySource) AgentKey(_ context.Context, agentID string, cmd key
 	s.cmd = cmd
 	return append(json.RawMessage(nil), s.raw...), nil
 }
+
+// A dispatch of an adapter that has a key bound to it must carry that key and
+// open it, or not happen at all. Writing the adapter's plain files while its
+// credential file stays behind leaves a machine that looks synced but cannot
+// authenticate, and nothing on it says why.
+func dispatchFixtureWithBoundKey(t *testing.T) (*Server, *recordingKeySource) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	homer := filepath.Join(root, ".homer")
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return homer
+		}
+		return ""
+	})
+	if err := core.SaveConfig(paths, core.HomerConfig{Version: 1, Adapters: map[string]core.AdapterConfig{}}); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "auth.json")
+	if err := os.WriteFile(destination, []byte("token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := keyring.Apply(homer, keyring.Command{Action: "create", ID: "pi", Name: "pi", Password: "long-password", WorkFactor: 14}); !r.OK {
+		t.Fatalf("create = %#v", r)
+	}
+	if r := keyring.Apply(homer, keyring.Command{Action: "encrypt", ID: "pi", Path: destination, Adapter: "pi", Password: "long-password", WorkFactor: 14}); !r.OK {
+		t.Fatalf("encrypt = %#v", r)
+	}
+	if _, err := gens.New(homer).Publish(map[string]map[string]string{
+		"pi":      {"settings/settings.json": "x"},
+		"herdr":   {"config/config.toml": "x"},
+		"keyring": {"marker.txt": "x"},
+	}, []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	stub := &recordingKeySource{raw: []byte(`{"ok":true,"status":"unlocked"}`)}
+	stub.pullRaw = []byte(`{"ok":true,"status":"applied"}`)
+	return newWebServer(t, webFixture{home: homer, paths: paths}, "test-token", stub, nil), stub
+}
+
+func TestDispatchRefusesAdapterWithBoundKeyWhenKeyringNotCarried(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	pull := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true", body)
+	}
+	// pi has a key bound to it, but the request does not carry the keyring.
+	refused := pull(`{"adapters":["pi"]}`)
+	if refused.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+		t.Fatalf("pi without keyring = %d pulls=%d body=%s (want refused before anything is written)", refused.Code, len(stub.pullValues), refused.Body)
+	}
+	for _, want := range []string{"pi", "密钥"} {
+		if !strings.Contains(refused.Body.String(), want) {
+			t.Fatalf("refusal should name the adapter and say a key is needed (%q): %s", want, refused.Body)
+		}
+	}
+	// An adapter with no key bound is unaffected.
+	other := pull(`{"adapters":["herdr"]}`)
+	if other.Code != http.StatusOK || len(stub.pullValues) != 1 {
+		t.Fatalf("herdr has no bound key, dispatch = %d pulls=%d body=%s", other.Code, len(stub.pullValues), other.Body)
+	}
+	// Mixed selection: the bound adapter still forces the key.
+	mixed := pull(`{"adapters":["herdr","pi"]}`)
+	if mixed.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 1 {
+		t.Fatalf("herdr+pi without keyring = %d pulls=%d body=%s", mixed.Code, len(stub.pullValues), mixed.Body)
+	}
+	// With the keyring and a correct password it goes through.
+	ok := pull(`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if ok.Code != http.StatusOK || len(stub.pullValues) != 2 {
+		t.Fatalf("pi+keyring+password = %d pulls=%d body=%s", ok.Code, len(stub.pullValues), ok.Body)
+	}
+}
+
+// A dry run (no confirm) only previews, so it must not be refused: the
+// console builds its preview before asking for the password.
+func TestDispatchPreviewIsNotRefusedForBoundKey(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	preview := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull", `{"adapters":["pi"]}`)
+	if preview.Code != http.StatusOK || len(stub.pullValues) != 1 {
+		t.Fatalf("preview = %d pulls=%d body=%s", preview.Code, len(stub.pullValues), preview.Body)
+	}
+}
+
+// Leaving the adapter list out means "everything in the center", which
+// includes every adapter that has a key bound. It must be refused too: the
+// gate cannot depend on the caller remembering to list adapters.
+func TestDispatchUnrestrictedRefusedWhenAnyAdapterHasBoundKey(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	refused := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true", ``)
+	if refused.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+		t.Fatalf("unrestricted dispatch = %d pulls=%d body=%s", refused.Code, len(stub.pullValues), refused.Body)
+	}
+	if !strings.Contains(refused.Body.String(), "pi") {
+		t.Fatalf("refusal should name pi: %s", refused.Body)
+	}
+}
+
+// Every path that writes a machine from the center shares the one gate. The
+// fan-out and the resolve-to-center paths have no per-machine password step,
+// so they must refuse rather than write an adapter and strand its key.
+func TestOtherDispatchPathsRefuseBoundKeyGap(t *testing.T) {
+	cases := []struct {
+		name, url, body string
+	}{
+		{"fanout dispatch, explicit adapter", "/api/sync?direction=dispatch&confirm=true", `{"adapters":["pi"]}`},
+		{"fanout dispatch, unrestricted", "/api/sync?direction=dispatch&confirm=true", ``},
+		{"resolve center", "/api/resolve?choice=center&agent=box&confirm=true", `{"adapters":["pi"]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, stub := dispatchFixtureWithBoundKey(t)
+			stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+			refused := request(t, server.Handler(), http.MethodPost, tc.url, tc.body)
+			if refused.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+				t.Fatalf("%s = %d pulls=%d body=%s (want refused, nothing written)", tc.name, refused.Code, len(stub.pullValues), refused.Body)
+			}
+			if !strings.Contains(refused.Body.String(), "pi") || !strings.Contains(refused.Body.String(), "密钥") {
+				t.Fatalf("%s: refusal should name the adapter and the key: %s", tc.name, refused.Body)
+			}
+		})
+	}
+}
+
+// An adapter with no key bound still dispatches through the fan-out.
+func TestFanoutDispatchStillWorksForAdapterWithoutBoundKey(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	ok := request(t, server.Handler(), http.MethodPost, "/api/sync?direction=dispatch&confirm=true", `{"adapters":["herdr"]}`)
+	if ok.Code != http.StatusOK || len(stub.pullValues) != 1 {
+		t.Fatalf("fanout herdr = %d pulls=%d body=%s", ok.Code, len(stub.pullValues), ok.Body)
+	}
+}

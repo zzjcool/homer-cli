@@ -1101,6 +1101,15 @@ function alignKeyring(box) {
   });
   if (ids.some(id => secretsBoundTo(id).length)) keyring.checked = true;
 }
+// 下发时，选中的适配器如果绑定了密钥，密钥就必须一起下发并解开；
+// 带不上的（中心还没有密钥、或密钥有冲突）整个适配器都不能下发。
+// 只写普通文件、把登录凭证留在原地，机器看起来同步了却登录不上，
+// 而且没有任何一处会提示原因。
+function blockedByKeys() {
+  if (app.scopeDirection !== "dispatch") return [];
+  if (keyringCanTravel()) return [];
+  return selectedAdapters().filter(id => id !== "keyring" && secretsBoundTo(id).length);
+}
 function selectionToken() {
   return selectedAdapters().slice().sort().join("\n");
 }
@@ -1178,8 +1187,15 @@ function updateScopeConfirm() {
   const ok = $("btn-confirm-ok");
   const keys = dispatchKeysForSelection();
   if (app.scopeDirection === "dispatch" && app.scopeStep !== "unlock" && app.scopeStep !== "done") {
+    const blocked = blockedByKeys();
     ok.textContent = keys.length ? "下一步" : "确认下发";
-    ok.disabled = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
+    ok.disabled = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0 || blocked.length > 0;
+    const err = $("confirm-err");
+    if (err) {
+      err.textContent = blocked.length
+        ? adapterTitle(blocked[0]) + " 绑定了密钥，但密钥这次带不上，所以不能下发。取消勾选它，或先在加密的那台机器上收取密钥。"
+        : "";
+    }
     return;
   }
   if (app.scopeStep === "unlock") {
@@ -1289,9 +1305,9 @@ function renderScopeChoices(data) {
       const verb = app.scopeDirection === "collect" ? "收取" : "下发";
       let text = "密钥跟着这次一起" + verb + "：" + bound.join("、");
       if (keyring && !keyring.enabled) {
-        text = "绑定了密钥，但密钥有冲突，这次不会一起同步：" + bound.join("、");
+        text = "绑定了密钥，但密钥有冲突，这次不能下发：" + bound.join("、");
       } else if (app.scopeDirection === "dispatch" && !keyring) {
-        text = "密钥还没收到中心，这次不会一起下发：" + bound.join("、") + "。先在加密的那台机器上收取。";
+        text = "密钥还没收到中心，这个适配器不能下发：" + bound.join("、") + "。先在加密的那台机器上收取。";
       }
       copy.append(el("span", "muted small", text));
     }

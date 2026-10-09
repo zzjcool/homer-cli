@@ -238,6 +238,11 @@ func (s *Server) syncDispatchToMachines(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
+	// A fan-out has no per-machine password step, so an adapter with a key
+	// bound to it cannot be delivered whole. Refuse instead of half applying.
+	if s.refuseBoundKeyGap(w, scope) {
+		return
+	}
 	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents, scope)
 	allOK := true
 	for _, result := range results {
@@ -312,6 +317,11 @@ func (s *Server) syncToOthers(w http.ResponseWriter, r *http.Request, confirmed 
 			OK: false, Status: status, Direction: string(syncToOthers),
 			Agents: []agentApplyResult{}, Errors: []string{humanStatusSentence(status, push.Errors)},
 		})
+		return
+	}
+	// The push above already reached the center; the fan-out below would write
+	// every machine from it. Stop before that if a bound key cannot travel.
+	if s.refuseBoundKeyGap(w, SyncScope{}) {
 		return
 	}
 	results := fanoutPullOnlineAgents(r.Context(), s.opts.Agents, SyncScope{})

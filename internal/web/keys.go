@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/keyring"
@@ -129,6 +130,68 @@ func scopeHasKeyring(adapters []string) bool {
 		}
 	}
 	return false
+}
+
+// boundKeyGaps lists the adapters in this dispatch that have a key bound to
+// them while the dispatch does not carry the keyring. Such a dispatch would
+// write the adapter's ordinary files and leave its credential file behind: the
+// machine looks synced but cannot authenticate, and nothing on it says why.
+// So the dispatch is refused instead of half applied.
+//
+// An unrestricted dispatch (no adapter list) covers every adapter in the
+// center, so every adapter that has a key bound counts as selected.
+func boundKeyGaps(home string, scope SyncScope) []string {
+	if scopeHasKeyring(scope.Adapters) {
+		return nil
+	}
+	listed := keyring.Apply(home, keyring.Command{Action: "list"})
+	if !listed.OK {
+		return nil
+	}
+	selected := map[string]struct{}{}
+	for _, id := range scope.Adapters {
+		if id != "" {
+			selected[id] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	gaps := make([]string, 0)
+	for _, key := range listed.Keys {
+		for _, file := range key.Files {
+			if file.Adapter == "" {
+				continue
+			}
+			if scope.Explicit {
+				if _, ok := selected[file.Adapter]; !ok {
+					continue
+				}
+			}
+			if _, dup := seen[file.Adapter]; dup {
+				continue
+			}
+			seen[file.Adapter] = struct{}{}
+			gaps = append(gaps, file.Adapter)
+		}
+	}
+	sort.Strings(gaps)
+	return gaps
+}
+
+// refuseBoundKeyGap writes the refusal and reports true when the dispatch
+// would leave a bound key behind. Every path that writes another machine from
+// the center goes through this one gate, so the console, the CLI and a script
+// cannot disagree about it.
+func (s *Server) refuseBoundKeyGap(w http.ResponseWriter, scope SyncScope) bool {
+	gaps := boundKeyGaps(s.opts.HomerHome, scope)
+	if len(gaps) == 0 {
+		return false
+	}
+	messages := make([]string, 0, len(gaps))
+	for _, adapter := range gaps {
+		messages = append(messages, adapter+" 绑定了密钥，必须连同密钥一起下发并解开；这次没有带上密钥，所以什么都没有写。请勾选「密钥」并填写口令。")
+	}
+	writeError(w, http.StatusUnprocessableEntity, "unlock-required", "下发带了密钥，要先解开。", messages)
+	return true
 }
 
 // dispatchUnlockKeys are the keys whose plaintext must be written on the
