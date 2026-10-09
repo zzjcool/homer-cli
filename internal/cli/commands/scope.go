@@ -51,12 +51,30 @@ func splitAdapterAvailability(config core.HomerConfig, ids []string) (unknown, d
 // preferRemotePlan turns conflicts into the center's content. A missing
 // remote file becomes a delete; everything else is a write of that content.
 func preferRemotePlan(plan syncx.PullPlan, remote []core.AdapterSnapshot) syncx.PullPlan {
+	return preferRemotePlanFor(plan, remote, nil)
+}
+
+// preferRemotePlanFor turns selected adapters' conflicts into the center's
+// content. A nil adapterIDs selects every adapter; a non-nil empty slice
+// selects none. A missing remote file becomes a delete.
+func preferRemotePlanFor(plan syncx.PullPlan, remote []core.AdapterSnapshot, adapterIDs []string) syncx.PullPlan {
+	selected := make(map[string]struct{}, len(adapterIDs))
+	for _, adapterID := range adapterIDs {
+		selected[adapterID] = struct{}{}
+	}
+
 	actions := make([]syncx.PullAction, len(plan.Actions))
 	copy(actions, plan.Actions)
 	for index, action := range actions {
 		if action.Type != syncx.PullActionConflict {
 			continue
 		}
+		if adapterIDs != nil {
+			if _, ok := selected[action.AdapterID]; !ok {
+				continue
+			}
+		}
+
 		content := action.RemoteContent
 		if content == "" {
 			content = snapshotContent(remote, action.AdapterID, action.Category, action.RelPath)
