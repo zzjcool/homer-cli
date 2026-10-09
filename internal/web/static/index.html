@@ -1938,39 +1938,32 @@ $("btn-confirm-ok").addEventListener("click", ev => {
     const recordPicks = selectedPicks();
     const recordSelectedCount = recordPicks.center.length + recordPicks.local.length + recordPicks.missing.length;
     if (!recordSelectedCount || recordPicks.missing.length) return;
-    const recordImmediate = !!action.recordImmediate && app.scopeStep === "unlock";
-    if (recordImmediate && app.scopeStep !== "unlock" && recordPicks.center.length && dispatchKeysForSelection().length) {
-      action.recordImmediate = true;
-      app.pendingAction = action;
-      showScopeStep("unlock");
-      return;
-    }
-    if (recordImmediate && app.scopeStep === "unlock") {
+    // In the unlock step OK confirms the passwords for the ALT-initiated
+    // 记录并立即执行 (action.recordImmediate was set by the ALT handler).
+    if (action.recordImmediate && app.scopeStep === "unlock") {
       const recordTooShort = unlocks.find(recordUnlock => [...recordUnlock.password].length < 8);
       if (recordTooShort) { toast("口令至少 8 位，请补齐后再确认"); return; }
+      okBtn.disabled = true; okBtn.textContent = "处理中…";
+      $("dlg-confirm").returnValue = "confirm";
+      $("dlg-confirm").close("confirm");
+      app.pendingAction = null;
+      void executeRecordResolve(action.agentId, action.name, recordPicks, true, unlocks, false);
+      return;
     }
+    // Otherwise OK is 记录决定: recording itself never needs a password,
+    // and the unlock transition belongs to the ALT path only.
     okBtn.disabled = true; okBtn.textContent = "处理中…";
     $("dlg-confirm").returnValue = "confirm";
     $("dlg-confirm").close("confirm");
     app.pendingAction = null;
-    void executeRecordResolve(action.agentId, action.name, recordPicks, recordImmediate, unlocks, false);
+    void executeRecordResolve(action.agentId, action.name, recordPicks, false, unlocks, false);
     return;
   }
   const adapters = adaptersWithSecrets(selectedAdapters());
   if (!adapters.length) return;
   if (action.kind === "collect") action.knownHits = unresolvedSecretHits(adapters);
-  if ((action.kind === "dispatch-one" || (action.kind === "resolve-on" && action.choice === "center")) && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
+  if (action.kind === "dispatch-one" && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
     showScopeStep("unlock");
-    return;
-  }
-  if (action.kind === "resolve-on" && action.choice === "center" && app.scopeStep === "unlock") {
-    const tooShort = unlocks.find(row => [...row.password].length < 8);
-    if (tooShort) { toast("口令至少 8 位，请补齐后再确认"); return; }
-    okBtn.disabled = true; okBtn.textContent = "处理中…";
-    $("dlg-confirm").returnValue = "confirm";
-    $("dlg-confirm").close("confirm");
-    app.pendingAction = null;
-    executeResolveOn("center", action.agentId, adapters, false, unlocks);
     return;
   }
   if (action.kind === "dispatch-one" && app.scopeStep === "unlock") {
@@ -1990,7 +1983,6 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   $("dlg-confirm").close("confirm");
   app.pendingAction = null;
   if (action.kind === "collect") executeCollect(action.agentId, action.name, adapters, !!(action.knownHits && action.knownHits.length));
-  if (action.kind === "resolve-on") executeResolveOn(action.choice, action.agentId, adapters);
 });
 $("btn-confirm-alt").addEventListener("click", ev => {
   ev.preventDefault();
@@ -2013,13 +2005,9 @@ $("btn-confirm-alt").addEventListener("click", ev => {
     void executeRecordResolve(action.agentId, action.name, recordPicks, true, recordUnlocks, false);
     return;
   }
-  if (action.kind !== "resolve-on") return;
-  const adapters = selectedAdapters();
-  if (!adapters.length) return;
-  $("dlg-confirm").returnValue = "confirm";
-  $("dlg-confirm").close("confirm");
-  app.pendingAction = null;
-  executeResolveOn("local", action.agentId, adapters);
+  // resolve-on (the pre-staging immediate semantics) is only reachable as a
+  // fallback from the agent-outdated alert; the dialog itself no longer
+  // produces that kind.
 });
 $("btn-confirm-cancel").addEventListener("click", ev => {
   ev.preventDefault();
@@ -2469,6 +2457,15 @@ async function executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks
     return true;
   } catch (e) {
     const resolutionReport = e.report || {};
+    // A secrets rejection carries its own confirmation escape hatch (D7):
+    // it must be handled before the generic pending-decision branch, or the
+    // retry button disappears and the agent-side guidance loops forever.
+    if (e.code === "secrets-rejected") {
+      showAlert("这些文件像是带有密钥", secretNoticeLines(e), "确认之后，这台机器的内容仍会写入中心，并下发给其他在线机器。", [
+        { label: "仍然以这台机器为准", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, true, unlocks, record) },
+      ]);
+      return false;
+    }
     if (record && Array.isArray(resolutionReport.pending) && resolutionReport.pending.length) {
       const resolutionErrors = e.errors && e.errors.length ? e.errors : [e.message || "决定已保留，可稍后下发时再执行。"];
       showAlert("决定已记录，立即执行没有完成", resolutionErrors, "决定已保留，可稍后下发时再执行");
@@ -2478,10 +2475,6 @@ async function executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks
     if (e.code === "agent-outdated") {
       showAlert("这台机器的 homer 版本太旧，不能记录决定", [e.message || "请先更新程序。"], null, [
         { label: "直接执行（不记录）", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks, false) },
-      ]);
-    } else if (e.code === "secrets-rejected") {
-      showAlert("这些文件像是带有密钥", secretNoticeLines(e), "确认之后，这台机器的内容仍会写入中心，并下发给其他在线机器。", [
-        { label: "仍然以这台机器为准", primary: true, onClick: () => executeResolveOn(choice, agentId, adapters, true, unlocks, record) },
       ]);
     } else {
       showAlert("裁决没有完成", e.errors && e.errors.length ? e.errors : [e.message], null);

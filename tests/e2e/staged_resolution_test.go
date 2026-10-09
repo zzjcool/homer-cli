@@ -140,6 +140,35 @@ func TestStagedResolutionStory(t *testing.T) {
 		return err != nil || !strings.Contains(string(data), `"adapter":"pi"`)
 	})
 
+	// Phase 2b: record=true (record AND execute now). The relay executes on
+	// the machine and the agent-side CAS clear empties the entry after
+	// success — and a plain resolve without record must never produce a
+	// resolutions.json in the first place.
+	if err := os.WriteFile(bSettings, []byte("{\n  \"theme\": \"machine-b-2b\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aSettings, []byte("{\n  \"theme\": \"center-2b\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if collect := apiPost(t, hubURL+"/api/sync?direction=collect&agent=agent-a&confirm=true", auth); !strings.Contains(collect, `"status"`) {
+		t.Fatalf("collect A (phase 2b) = %s", collect)
+	}
+	waitForCondition(t, 45*time.Second, func() bool {
+		return agentReportsPiConflict(apiPost(t, hubURL+"/api/agents/agent-b/status", auth))
+	})
+	recordImmediateStatus, recordImmediate := apiPostJSON(t, hubURL+"/api/resolve?choice=center&agent=agent-b&confirm=true&record=true", auth, map[string]any{"adapters": []string{"pi"}})
+	if recordImmediateStatus != 200 || !strings.Contains(recordImmediate, `"ok":true`) {
+		t.Fatalf("record=true immediate resolve = %d %s", recordImmediateStatus, recordImmediate)
+	}
+	content, err = os.ReadFile(bSettings)
+	if err != nil || !strings.Contains(string(content), "center-2b") {
+		t.Fatalf("record=true must execute immediately: %q err=%v", content, err)
+	}
+	waitForCondition(t, 10*time.Second, func() bool {
+		data, err := os.ReadFile(resolutionsFile)
+		return err != nil || !strings.Contains(string(data), `"adapter":"pi"`)
+	})
+
 	// Phase 3: diverge again and record a LOCAL decision. The dispatch must
 	// keep the machine's file and publish it to the center. Both sides move:
 	// B rewrites locally and A moves the center, so the next status is a
@@ -215,16 +244,18 @@ func TestStagedResolutionStory(t *testing.T) {
 	// adapter disabled.
 	choices := apiGet(t, hubURL+"/api/sync/choices?direction=dispatch&agent=agent-b", auth, hubProc)
 	if !strings.Contains(choices, `"stale":true`) {
-		t.Fatalf("choices must mark the decision stale: resolution view = %s",
-			strings.Join([]string{choices[strings.Index(choices, `"id":"pi"`):min(len(choices), strings.Index(choices, `"id":"pi"`)+1200)]}, ""))
+		t.Fatalf("choices must mark the decision stale: %s", choices[:min(len(choices), 2000)])
 	}
-	// A dispatch does not apply the stale decision: the conflict stays.
+	// A dispatch does not apply the stale decision: the report must mark it
+	// stale, the conflicting file must keep the machine's content, and the
+	// conflict itself stays for a fresh decision.
 	staleDispatchStatus, staleDispatch := apiPostJSON(t, hubURL+"/api/agents/agent-b/pull?confirm=true", auth, map[string]any{"adapters": []string{"pi"}})
-	if staleDispatchStatus == 200 && strings.Contains(staleDispatch, `"ok":true`) {
-		content, _ := os.ReadFile(bSettings)
-		if strings.Contains(string(content), "center-even-newer") {
-			t.Fatalf("stale decision was applied: %s", content)
-		}
+	if staleDispatchStatus != 422 || !strings.Contains(staleDispatch, `"status":"stale"`) || !strings.Contains(staleDispatch, "conflicts-remain") {
+		t.Fatalf("stale decision must stay unconsumed with conflicts-remain: status=%d body=%s", staleDispatchStatus, staleDispatch)
+	}
+	content, err = os.ReadFile(bSettings)
+	if err != nil || !strings.Contains(string(content), "machine-b-stale") {
+		t.Fatalf("stale decision must not touch the machine's file: %q err=%v", content, err)
 	}
 	// The stale entry survives for a fresh decision.
 	if data, err := os.ReadFile(resolutionsFile); err != nil || !strings.Contains(string(data), `"adapter":"pi"`) {

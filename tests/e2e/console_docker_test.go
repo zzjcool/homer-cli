@@ -288,7 +288,12 @@ func TestConsoleDockerScenarios(t *testing.T) {
 	}
 	env.waitRow("box-c", "处理冲突", 70*time.Second)
 	env.confirmRow("box-c", "处理冲突")
-	if outcome := env.waitOutcome(90 * time.Second); !strings.Contains(outcome, "已按中心内容更新该机器") {
+	// Staged-resolution dialog: pick the center radio, then 记录并立即执行.
+	env.waitJS(`document.querySelector('#confirm-choices input[type=radio][data-resolution-adapter="pi"]') !== null`, 15*time.Second)
+	env.setValue(`#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="center"]`, "center")
+	env.eval(`(() => { const r = document.querySelector('#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="center"]'); r.checked = true; r.dispatchEvent(new Event('change', {bubbles:true})); return 'ok'; })()`)
+	env.click("#btn-confirm-alt")
+	if outcome := env.waitOutcome(90 * time.Second); !strings.Contains(outcome, "已记录并立即执行") {
 		t.Fatalf("resolve center = %s\n%s", outcome, env.agentLog("box-c"))
 	}
 	env.waitFileContains("box-c", "/root/.pi/agent/settings.json", "box-a-v2", 40*time.Second)
@@ -302,9 +307,12 @@ func TestConsoleDockerScenarios(t *testing.T) {
 	env.waitRow("box-c", "处理冲突", 70*time.Second)
 	env.clearAlert()
 	env.clickRow("box-c", "处理冲突")
+	// Same dialog, this time the machine-wins radio feeds the local group.
+	env.waitJS(`document.querySelector('#confirm-choices input[type=radio][data-resolution-adapter="pi"]') !== null`, 15*time.Second)
+	env.eval(`(() => { const r = document.querySelector('#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="local"]'); r.checked = true; r.dispatchEvent(new Event('change', {bubbles:true})); return 'ok'; })()`)
 	env.waitJS(`document.querySelector('#dlg-confirm').open && !document.querySelector('#btn-confirm-alt').disabled`, 15*time.Second)
 	env.click("#btn-confirm-alt")
-	if outcome := env.waitOutcome(120 * time.Second); !strings.Contains(outcome, "已保留该机器的内容并写入中心") {
+	if outcome := env.waitOutcome(120 * time.Second); !strings.Contains(outcome, "已记录并立即执行") {
 		t.Fatalf("resolve local = %s\n%s", outcome, env.agentLog("box-c"))
 	}
 	env.waitFileContains("box-a", "/root/.pi/agent/settings.json", "box-c-v2", 60*time.Second)

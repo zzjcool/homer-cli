@@ -230,8 +230,10 @@ func (e *localExecutor) PullApplyingResolutions(ctx context.Context, req Resolve
 		case pushReport.Status == commands.PushStatusNoDrift:
 			status = resolutions.OutcomeNoop
 		case pushReport.Status == commands.PushStatusSecretsRejected:
+			// The plan's §2.7 wording used "pi" as an EXAMPLE adapter name;
+			// the message must name the actual adapter(s) of this decision.
 			status = resolutions.OutcomeFailed
-			message = "pi 没有写入中心：发现疑似密钥，决定已保留。到「处理冲突」选「记录并立即执行」并确认密钥提示"
+			message = strings.Join(localIDs, "、") + " 没有写入中心：发现疑似密钥，决定已保留。到「处理冲突」选「记录并立即执行」并确认密钥提示"
 		default:
 			status = resolutions.OutcomeFailed
 			reason := strings.Join(pushReport.Errors, "；")
