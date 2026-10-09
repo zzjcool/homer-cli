@@ -40,7 +40,11 @@ case "$GOARCH_ACTUAL" in
   x86_64|amd64) GOARCH_ACTUAL=amd64 ;;
   aarch64|arm64) GOARCH_ACTUAL=arm64 ;;
 esac
-
+# POSIX portability: a bare variable reference must never sit directly
+# before a multi-byte character. macOS /bin/sh (bash 3.2) without a UTF-8
+# locale swallows the lead byte of a following fullwidth punctuation mark
+# into the variable name, so the platform-mismatch notice used to die with
+# "unbound variable" under set -eu. Braced references make the name explicit.
 HOMER_HOME="${HOMER_HOME:-$HOME/.homer}"
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$HOMER_HOME/keys" "$BIN_DIR"
@@ -95,7 +99,7 @@ download() {
   return 1
 }
 if [ "$GOOS_ACTUAL" = "$GOOS_EXPECT" ] && [ "$GOARCH_ACTUAL" = "$GOARCH_EXPECT" ]; then
-  echo ">> 平台匹配（$GOOS_ACTUAL/$GOARCH_ACTUAL），下载 homer 二进制…"
+  echo ">> 平台匹配（${GOOS_ACTUAL}/${GOARCH_ACTUAL}），下载 homer 二进制…"
   if command -v gzip >/dev/null 2>&1; then
     download "$HUB/dl/homer.gz" "$BIN_DIR/homer.gz"
     gzip -dc "$BIN_DIR/homer.gz" > "$BIN_DIR/homer.tmp"
@@ -128,12 +132,38 @@ if [ "$GOOS_ACTUAL" = "$GOOS_EXPECT" ] && [ "$GOARCH_ACTUAL" = "$GOARCH_EXPECT" 
       ;;
   esac
 else
-  # 3. 平台不匹配 → 源码构建指引（hub 二进制仅覆盖自身平台）
-  echo "!! 平台不匹配（本机 $GOOS_ACTUAL/$GOARCH_ACTUAL，hub 提供 $GOOS_EXPECT/$GOARCH_EXPECT）"
-  echo "   请从源码构建:"
-  echo "     git clone https://github.com/zzjcool/homer-cli && cd homer-cli"
-  echo "     go install ./cmd/homer"
-  echo "   （需要 Go 1.22+；token 已写入 $HOMER_HOME/keys/hub-token）"
+  # 3. 平台不匹配 → 交叉下载预编译产物；GitHub 不可达时退回源码构建指引。
+  echo ">> 平台不匹配（本机 ${GOOS_ACTUAL}/${GOARCH_ACTUAL}，hub 提供 ${GOOS_EXPECT}/${GOARCH_EXPECT}）"
+  RELEASE_BASE="https://github.com/zzjcool/homer-cli/releases/latest/download"
+  RELEASE_ARCHIVE="homer_${GOOS_ACTUAL}_${GOARCH_ACTUAL}.tar.gz"
+  RELEASE_FALLBACK=0
+  if download "$RELEASE_BASE/$RELEASE_ARCHIVE" "$BIN_DIR/homer-rel.tar.gz"; then
+    if tar -xzf "$BIN_DIR/homer-rel.tar.gz" -C "$BIN_DIR" homer 2>/dev/null \
+      || tar -xzf "$BIN_DIR/homer-rel.tar.gz" -C "$BIN_DIR"; then
+      if [ -f "$BIN_DIR/homer" ] && [ ! -x "$BIN_DIR/homer" ]; then
+        chmod 755 "$BIN_DIR/homer"
+      fi
+      if [ -x "$BIN_DIR/homer" ]; then
+        rm -f "$BIN_DIR/homer-rel.tar.gz"
+        echo ">> 已从 GitHub Releases 安装 $RELEASE_ARCHIVE 到 $BIN_DIR/homer"
+      else
+        echo "!! Release 归档里没有可执行的 homer" >&2
+        RELEASE_FALLBACK=1
+      fi
+    else
+      echo "!! Release 归档解压失败" >&2
+      RELEASE_FALLBACK=1
+    fi
+  else
+    RELEASE_FALLBACK=1
+  fi
+  if [ "$RELEASE_FALLBACK" -eq 1 ]; then
+    rm -f "$BIN_DIR/homer-rel.tar.gz"
+    echo "   请从源码构建:"
+    echo "     git clone https://github.com/zzjcool/homer-cli && cd homer-cli"
+    echo "     go install ./cmd/homer"
+    echo "   （需要 Go 1.22+；token 已写入 $HOMER_HOME/keys/hub-token）"
+  fi
 fi
 
 # 4. 零参数接入。和 Tailscale 一样：安装脚本自己退出，daemon 交给
@@ -202,7 +232,7 @@ EOF
     else
       nohup "$AGENT_BIN" $AGENT_ARGS >>"$LOG" 2>&1 &
     fi
-    echo ">> agent 已在后台启动（日志: $LOG，PID: $!）"
+    echo ">> agent 已在后台启动（日志: ${LOG}，PID: ${!}）"
     if [ -f /.dockerenv ]; then
       echo ">> 这个容器没有 systemd。请让容器自己保持运行，否则主进程退出时 agent 会一起停。"
     fi
