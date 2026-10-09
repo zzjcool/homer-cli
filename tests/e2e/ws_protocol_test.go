@@ -719,8 +719,12 @@ func TestOldAgentFlagsRejected(t *testing.T) {
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
 				t.Fatalf("homer agent %s error = %v; output=%s", oldFlag, err, output)
 			}
-			if !strings.Contains(string(output), "未知选项") || !strings.Contains(string(output), oldFlag) {
-				t.Fatalf("homer agent %s did not clearly reject the removed flag: %s", oldFlag, output)
+			// The CLI answers a removed flag with a migration hint rather than a
+			// bare "unknown option": it names the flag, says it was removed, and
+			// points at --hub so a systemd restart loop is self-explanatory.
+			text := string(output)
+			if !strings.Contains(text, oldFlag) || !strings.Contains(text, "已移除") || !strings.Contains(text, "--hub") {
+				t.Fatalf("homer agent %s did not clearly reject the removed flag with a --hub migration hint: %s", oldFlag, output)
 			}
 		})
 	}
