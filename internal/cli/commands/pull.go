@@ -98,12 +98,13 @@ type ResolutionOutcome struct {
 // newPullCommandReport builds a report with non-nil slices for every status.
 func newPullCommandReport(status PullStatus) PullReport {
 	return PullReport{
-		OK:        status == PullStatusApplied || status == PullStatusNoDrift,
-		Status:    status,
-		Applied:   emptyApplyResult(),
-		Conflicts: []syncx.PullConflictAction{},
-		Warnings:  []string{},
-		Errors:    []string{},
+		OK:          status == PullStatusApplied || status == PullStatusNoDrift,
+		Status:      status,
+		Applied:     emptyApplyResult(),
+		Conflicts:   []syncx.PullConflictAction{},
+		Resolutions: []ResolutionOutcome{},
+		Warnings:    []string{},
+		Errors:      []string{},
 	}
 }
 
@@ -479,6 +480,8 @@ func RunPull(options PullOptions, deps *PullDeps) (report PullReport) {
 	plan := syncx.PlanPull(*config, sources.Base, sources.Local, sources.Remote)
 	if options.PreferRemote {
 		plan = preferRemotePlan(plan, sources.Remote)
+	} else if len(options.PreferRemoteAdapters) > 0 {
+		plan = preferRemotePlanFor(plan, sources.Remote, options.PreferRemoteAdapters)
 	}
 	remainingPlan, manifestTasks, manifestWarnings := syncx.SplitManifestActions(*config, plan, sources.Local)
 	manifestTasks = syncx.SupplementManifestInstalls(*config, sources.Local, sources.Remote, manifestTasks)

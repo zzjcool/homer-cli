@@ -316,6 +316,102 @@ func TestScopedPullPreferRemoteResolvesOnlyTheSelection(t *testing.T) {
 	}
 }
 
+func TestPreferRemotePlanFor_SubsetOnly(t *testing.T) {
+	plan := syncx.PullPlan{Actions: []syncx.PullAction{
+		{Type: syncx.PullActionConflict, AdapterID: "pi", Category: "settings", RelPath: "settings.json", LocalContent: "pi-local", RemoteContent: "pi-center"},
+		{Type: syncx.PullActionConflict, AdapterID: "pad", Category: "settings", RelPath: "settings.json", LocalContent: "pad-local", RemoteContent: "pad-center"},
+		{Type: syncx.PullActionWrite, AdapterID: "pi", Category: "settings", RelPath: "other.json", Content: "already-written"},
+	}}
+
+	got := preferRemotePlanFor(plan, nil, []string{"pi"})
+	if len(got.Actions) != len(plan.Actions) {
+		t.Fatalf("actions = %#v, want %d actions", got.Actions, len(plan.Actions))
+	}
+	if action := got.Actions[0]; action.Type != syncx.PullActionWrite || action.Content != "pi-center" {
+		t.Fatalf("selected conflict = %#v, want center write", action)
+	}
+	if action := got.Actions[1]; action.Type != syncx.PullActionConflict || action.Content != "" || action.RemoteContent != "pad-center" {
+		t.Fatalf("unselected conflict = %#v, want unchanged conflict", action)
+	}
+	if action := got.Actions[2]; action.Type != syncx.PullActionWrite || action.Content != "already-written" {
+		t.Fatalf("non-conflict action = %#v, want unchanged write", action)
+	}
+	if plan.Actions[0].Type != syncx.PullActionConflict || plan.Actions[0].Content != "" {
+		t.Fatalf("input plan was mutated: %#v", plan.Actions[0])
+	}
+}
+
+func TestPreferRemotePlanFor_NilMeansAll_EmptyMeansNone(t *testing.T) {
+	plan := syncx.PullPlan{Actions: []syncx.PullAction{
+		{Type: syncx.PullActionConflict, AdapterID: "pi", Category: "settings", RelPath: "settings.json"},
+		{Type: syncx.PullActionConflict, AdapterID: "pad", Category: "settings", RelPath: "settings.json"},
+	}}
+	remote := []core.AdapterSnapshot{scopeAdapterSnap("pi", "center-pi"), scopeAdapterSnap("pad", "center-pad")}
+
+	var nilIDs []string
+	all := preferRemotePlanFor(plan, remote, nilIDs)
+	for index, want := range []string{"center-pi", "center-pad"} {
+		if action := all.Actions[index]; action.Type != syncx.PullActionWrite || action.Content != want {
+			t.Fatalf("nil selection action[%d] = %#v, want write %q", index, action, want)
+		}
+	}
+
+	emptyIDs := []string{}
+	none := preferRemotePlanFor(plan, remote, emptyIDs)
+	for index, action := range none.Actions {
+		if action.Type != syncx.PullActionConflict {
+			t.Fatalf("empty selection action[%d] = %#v, want conflict", index, action)
+		}
+	}
+}
+
+func TestPreferRemotePlanFor_RemoteMissingBecomesDelete(t *testing.T) {
+	plan := syncx.PullPlan{Actions: []syncx.PullAction{{
+		Type: syncx.PullActionConflict, AdapterID: "pi", Category: "settings", RelPath: "settings.json", LocalContent: "local",
+	}}}
+
+	got := preferRemotePlanFor(plan, nil, []string{"pi"})
+	if len(got.Actions) != 1 || got.Actions[0].Type != syncx.PullActionDelete || got.Actions[0].Content != "" {
+		t.Fatalf("plan = %#v, want one delete for the missing center file", got)
+	}
+}
+
+func TestPreferRemotePlan_CharacterizationUnchanged(t *testing.T) {
+	config := core.HomerConfig{Adapters: map[string]core.AdapterConfig{
+		"pi": {Categories: map[string]core.CategoryConfig{
+			"settings": {Mode: core.SyncModeMerge, ExcludeKeys: []string{"apiKey"}},
+		}},
+	}}
+	base := mergeScopeAdapterSnap("pi", `{"apiKey":"base-value","theme":"base"}`)
+	local := mergeScopeAdapterSnap("pi", `{"apiKey":"local-value","theme":"local"}`)
+	remote := mergeScopeAdapterSnap("pi", `{"apiKey":"center-value","theme":"center"}`)
+	plan := syncx.PlanPull(config, []core.AdapterSnapshot{base}, []core.AdapterSnapshot{local}, []core.AdapterSnapshot{remote})
+	if len(plan.Actions) != 1 || plan.Actions[0].Type != syncx.PullActionConflict {
+		t.Fatalf("planned actions = %#v, want one merge conflict", plan.Actions)
+	}
+	if plan.Actions[0].RemoteContent != "" {
+		t.Fatalf("merge conflict RemoteContent = %q, want empty so the center snapshot fallback is characterized", plan.Actions[0].RemoteContent)
+	}
+
+	// Characterize the existing excludeKeys gap without fixing it: PlanPull
+	// strips apiKey for conflict detection, but preferRemotePlan's raw snapshot
+	// fallback still writes the center's apiKey as part of the whole file.
+	got := preferRemotePlan(plan, []core.AdapterSnapshot{remote})
+	want := `{"apiKey":"center-value","theme":"center"}`
+	if len(got.Actions) != 1 || got.Actions[0].Type != syncx.PullActionWrite || got.Actions[0].Content != want {
+		t.Fatalf("rewritten actions = %#v, want center write %q (including the characterized apiKey behavior)", got.Actions, want)
+	}
+}
+
+func mergeScopeAdapterSnap(id, content string) core.AdapterSnapshot {
+	return core.AdapterSnapshot{AdapterID: id, Categories: []core.CategorySnapshot{{
+		AdapterID: id,
+		Category:  "settings",
+		Mode:      core.SyncModeMerge,
+		Files:     core.SnapshotFiles{"settings.json": {Kind: "json", Content: content}},
+	}}}
+}
+
 func writeScopeHome(t *testing.T) core.HomerPaths {
 	t.Helper()
 	home := t.TempDir()
