@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -296,16 +297,53 @@ func (buffer *limitedBuffer) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
+// commandDepthEnv carries how many manifest commands deep this process is.
+// A listCmd/applyCmd that (by misconfiguration or a test double) runs the homer
+// binary again would otherwise re-run the same manifest scan in the child and
+// fork without bound: that exhausted the pids cgroup of a whole login session
+// during development. The child inherits depth+1 and refuses to go past
+// maxCommandDepth, so a loop ends after a handful of processes instead.
+const commandDepthEnv = "HOMER_MANIFEST_CMD_DEPTH"
+
+// maxCommandDepth is how many nested manifest commands are allowed. A real
+// listCmd never launches another homer scan, so 3 is already generous.
+const maxCommandDepth = 3
+
+// testObservableEnv is the exact set of variables forwarded to a manifest
+// command purely so tests can observe what it did. It is an allow-list of
+// names, not a prefix: HOMER_* variables in general (tokens, secrets) must stay
+// out of the child environment, and an existing test asserts exactly that.
+var testObservableEnv = []string{"HOMER_TEST_INSPECT_SCAN_COUNTER"}
+
+func currentCommandDepth() int {
+	value := strings.TrimSpace(os.Getenv(commandDepthEnv))
+	if value == "" {
+		return 0
+	}
+	depth, err := strconv.Atoi(value)
+	if err != nil || depth < 0 {
+		// An unparseable value must not silently disable the guard.
+		return maxCommandDepth
+	}
+	return depth
+}
+
 func minimalCommandEnv() []string {
 	path := shellenv.Path()
 	keys := []string{"PATH", "HOME", "TERM", "LANG"}
-	env := make([]string, 0, len(keys))
+	env := make([]string, 0, len(keys)+2)
 	for _, key := range keys {
 		value, _ := os.LookupEnv(key)
 		if key == "PATH" {
 			value = path
 		}
 		env = append(env, key+"="+value)
+	}
+	env = append(env, commandDepthEnv+"="+strconv.Itoa(currentCommandDepth()+1))
+	for _, key := range testObservableEnv {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
+		}
 	}
 	return env
 }
@@ -326,6 +364,9 @@ func run(argv []string, timeout time.Duration) ([]byte, error) {
 	// minimal env, output cap) is hygiene, not a security boundary.
 	// Resolve PATH before the command timeout starts. A login shell can
 	// take longer than a short command budget, and it is not the command.
+	if depth := currentCommandDepth(); depth >= maxCommandDepth {
+		return nil, fmt.Errorf("manifest 命令嵌套过深（%d 层）：%s 又触发了 manifest 扫描，已拒绝执行以免无限递归；请检查 listCmd/applyCmd 是否指回 homer 自己", depth, argv[0])
+	}
 	env := minimalCommandEnv()
 	if resolved, err := shellenv.LookIn(argv[0], envValue(env, "PATH")); err == nil && resolved != "" {
 		argv[0] = resolved
