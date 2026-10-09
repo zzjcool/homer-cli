@@ -114,8 +114,8 @@ func TestDaemonStreamHelloAndStatusHandler(t *testing.T) {
 		if hello.AgentID != "agent-test" || hello.Proto != stream.ProtocolVersion || hello.Hostname == "" {
 			t.Fatalf("hello = %+v", hello)
 		}
-		if len(hello.Caps) == 0 || !containsString(hello.Caps, hub.MethodInspect) {
-			t.Fatalf("hello capabilities = %v", hello.Caps)
+		if !containsString(hello.Caps, hub.MethodInspect) || !containsString(hello.Caps, string(hub.TaskKindResolveRecord)) {
+			t.Fatalf("hello capabilities = %v; want inspect and resolve-record", hello.Caps)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("agent did not send hello")
@@ -304,6 +304,7 @@ func TestTaskClass(t *testing.T) {
 	}{
 		{method: string(hub.TaskKindStatus)},
 		{method: string(hub.TaskKindDiff)},
+		{method: string(hub.TaskKindResolveRecord)},
 		{method: hub.MethodInspect},
 		{method: string(hub.TaskKindSecret), secret: "list"},
 		{method: string(hub.TaskKindSecret), secret: "exists"},

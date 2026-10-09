@@ -17,6 +17,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/hub"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/resolutions"
 	"github.com/zzjcool/homer-cli/internal/sshkey"
 	"github.com/zzjcool/homer-cli/internal/stream"
 	"github.com/zzjcool/homer-cli/internal/web"
@@ -29,7 +30,7 @@ func (d *Daemon) registerHandlers(session *stream.Session) {
 	for _, method := range []string{
 		string(hub.TaskKindStatus), string(hub.TaskKindDiff), string(hub.TaskKindPush),
 		string(hub.TaskKindPull), string(hub.TaskKindSSHKey), string(hub.TaskKindSecret),
-		string(hub.TaskKindUpgrade), string(hub.TaskKindToolUpgrade), hub.MethodInspect,
+		string(hub.TaskKindUpgrade), string(hub.TaskKindToolUpgrade), string(hub.TaskKindResolveRecord), hub.MethodInspect,
 	} {
 		method := method
 		session.Handle(method, func(ctx context.Context, req *stream.Request) (any, error) {
@@ -202,10 +203,36 @@ func (d *Daemon) runTaskCommand(ctx context.Context, req *stream.Request, option
 		return struct {
 			Text string `json:"text"`
 		}{Text: text}, nil
+	case string(hub.TaskKindResolveRecord):
+		report, err := d.runResolveRecord(ctx, options)
+		if err == nil && report.OK && options.ResolutionAction != resolutions.ActionList {
+			d.bumpWriteGen()
+			d.forgetDrift()
+			d.signalHeartbeat()
+		}
+		return report, err
 	case string(hub.TaskKindPush):
-		return d.executorPush(ctx, options.Confirm, options.Adapters, options.Overwrite, options.AllowSecrets)
+		guard := d.beginClear(options)
+		report, err := d.executorPush(ctx, options.Confirm, options.Adapters, options.Overwrite, options.AllowSecrets)
+		if err == nil {
+			report.Warnings = append(report.Warnings, guard.finish(report.OK)...)
+		}
+		return report, err
 	case string(hub.TaskKindPull):
-		return d.executorPull(ctx, options.Confirm, options.Adapters, options.Overwrite)
+		if options.ApplyResolutions {
+			return d.executorPullResolved(ctx, ResolvedPullRequest{
+				Confirm:          options.Confirm,
+				Adapters:         options.Adapters,
+				CenterGeneration: options.CenterGeneration,
+				AllowSecrets:     options.AllowSecrets,
+			})
+		}
+		guard := d.beginClear(options)
+		report, err := d.executorPull(ctx, options.Confirm, options.Adapters, options.Overwrite)
+		if err == nil {
+			report.Warnings = append(report.Warnings, guard.finish(report.OK)...)
+		}
+		return report, err
 	case string(hub.TaskKindSSHKey):
 		home, err := os.UserHomeDir()
 		if err != nil {

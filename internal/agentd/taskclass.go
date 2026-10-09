@@ -23,7 +23,7 @@ func classifyTask(method string, options hub.TaskOptions) taskClass {
 		return taskClassWrite
 	}
 	switch method {
-	case string(hub.TaskKindStatus), string(hub.TaskKindDiff), hub.MethodInspect:
+	case string(hub.TaskKindStatus), string(hub.TaskKindDiff), string(hub.TaskKindResolveRecord), hub.MethodInspect:
 		return taskClassRead
 	case string(hub.TaskKindSecret):
 		switch options.SecretAction {
