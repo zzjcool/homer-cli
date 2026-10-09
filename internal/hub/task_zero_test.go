@@ -24,9 +24,9 @@ func TestTaskOptionsZeroValueOmitsResolutionFields(t *testing.T) {
 	filled, err := json.Marshal(TaskOptions{
 		ResolutionAction: "record",
 		ResolutionChoice: "center",
-		CenterGeneration:  7,
-		ApplyResolutions:  true,
-		ClearResolutions:  true,
+		CenterGeneration: 7,
+		ApplyResolutions: true,
+		ClearResolutions: true,
 	})
 	if err != nil {
 		t.Fatal(err)

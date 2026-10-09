@@ -89,8 +89,8 @@ func TestInspectEquivalence(t *testing.T) {
 				AdapterID: "pi", Category: "settings", Mode: core.SyncModeMirror,
 				Files: core.SnapshotFiles{"settings.json": {Kind: "file", Content: "baseline\n"}},
 			}}}},
-			files:      map[string]map[string]string{"pi": {"settings.json": "local\n"}},
-			wantIDs:    []string{"opencode", "pi"},
+			files:   map[string]map[string]string{"pi": {"settings.json": "local\n"}},
+			wantIDs: []string{"opencode", "pi"},
 			// Root-missing degraded to a waiting-for-dispatch warning (S/P0):
 			// a fresh machine is a legal state, not an error.
 			wantWarn: []string{"等待首次下发"},

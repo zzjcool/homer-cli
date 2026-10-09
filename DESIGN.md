@@ -146,6 +146,12 @@ pi 扩展形态：`pi install npm:homer-cli` 后提供 `/homer status` 等命令
 3. 目录文件：文件级三路判定 + 应用前本地备份到 `~/.homer/backups/`（详见 §2.7）
 4. 首次对接新机器：Pull（远端覆盖）/ Merge / Skip 三选一
 5. **never auto-push**：自动同步只做安全 pull（参考 @dbaida/pi-sync 的保守策略）
+6. **分阶段解决（hub 形态，2026-10-09）**：控制台的「处理冲突」先**记录决定**
+   （`~/.homer/resolutions.json`，adapter 粒度，0600）再由单机「下发」消费——
+   center 决定按中心内容改写本机，local 决定不动本机并把本机内容发布到中心；
+   执行成功即清除该条目，失败保留重试。中心世代前进会使未执行的决定过期
+   （需重新确认），防止旧决定盲覆盖新内容。保留「记录并立即执行」作为旧语义
+   fallback。设计详见 docs/plan/staged-resolution.md。
 
 ### 2.6 安全设计
 
