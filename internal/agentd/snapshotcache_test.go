@@ -226,13 +226,18 @@ func TestSnapshotCacheInvalidationRaceRetriesUnconditional(t *testing.T) {
 	}
 }
 
-func TestSnapshotCacheRejectsOlderETag(t *testing.T) {
+func TestSnapshotCacheTreatsETagsAsOpaqueAcrossGenerationReset(t *testing.T) {
 	var cache snapshotCache
-	cache.store(0, `"g2"`, []core.AdapterSnapshot{{AdapterID: "newer"}}, []byte("newer"))
-	cache.store(0, `"g1"`, []core.AdapterSnapshot{{AdapterID: "older"}}, []byte("older"))
-	snapshots, meta, ok := cache.get(`"g2"`, 0)
-	if !ok || len(snapshots) != 1 || snapshots[0].AdapterID != "newer" || string(meta) != "newer" {
-		t.Fatalf("out-of-order cache state = %#v %q ok=%v", snapshots, meta, ok)
+	oldETag := `"g3-deadbeefdeadbeef"`
+	newETag := `"g1-cafebabecafebabe"`
+	cache.store(0, oldETag, []core.AdapterSnapshot{{AdapterID: "old"}}, []byte("old"))
+	cache.store(0, newETag, []core.AdapterSnapshot{{AdapterID: "new"}}, []byte("new"))
+	snapshots, meta, ok := cache.get(newETag, 0)
+	if !ok || len(snapshots) != 1 || snapshots[0].AdapterID != "new" || string(meta) != "new" {
+		t.Fatalf("cache state after hub generation reset = %#v %q ok=%v", snapshots, meta, ok)
+	}
+	if _, _, ok := cache.get(oldETag, 0); ok {
+		t.Fatal("cache retained the old opaque ETag after storing the reset hub snapshot")
 	}
 }
 

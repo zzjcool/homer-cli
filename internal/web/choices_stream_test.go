@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -293,14 +294,20 @@ func TestSnapshotETag(t *testing.T) {
 		t.Fatalf("publish = %d %s", response.Code, response.Body)
 	}
 	first := requestWithETag("")
-	if first.Code != http.StatusOK || first.Header().Get("ETag") != `"g1"` || first.Body.Len() == 0 {
-		t.Fatalf("first download = %d etag=%q body=%s", first.Code, first.Header().Get("ETag"), first.Body)
+	firstETag := first.Header().Get("ETag")
+	if first.Code != http.StatusOK || !regexp.MustCompile(`^"g1-[0-9a-f]{16}"$`).MatchString(firstETag) || first.Body.Len() == 0 {
+		t.Fatalf("first download = %d etag=%q body=%s", first.Code, firstETag, first.Body)
 	}
-	for _, tag := range []string{`"g1"`, `W/"g1"`, `"other", "g1"`, `*`} {
+	for _, tag := range []string{firstETag, "W/" + firstETag, `"other", ` + firstETag, `*`} {
 		response := requestWithETag(tag)
-		if response.Code != http.StatusNotModified || response.Body.Len() != 0 || response.Header().Get("ETag") != `"g1"` {
+		if response.Code != http.StatusNotModified || response.Body.Len() != 0 || response.Header().Get("ETag") != firstETag {
 			t.Errorf("If-None-Match %q = %d etag=%q body=%q", tag, response.Code, response.Header().Get("ETag"), response.Body.String())
 		}
+	}
+	// A legacy generation-only validator cannot identify the content and must
+	// be treated as stale, even when its generation number matches.
+	if response := requestWithETag(`"g1"`); response.Code != http.StatusOK || response.Body.Len() == 0 {
+		t.Fatalf("legacy generation-only ETag = %d %s, want full body", response.Code, response.Body)
 	}
 	if response := requestWithETag(`"g0"`); response.Code != http.StatusOK || response.Body.Len() == 0 {
 		t.Fatalf("stale tag = %d %s", response.Code, response.Body)
@@ -309,7 +316,7 @@ func TestSnapshotETag(t *testing.T) {
 		t.Fatalf("second publish = %d %s", response.Code, response.Body)
 	}
 	second := requestWithETag("")
-	if second.Code != http.StatusOK || second.Header().Get("ETag") != `"g2"` {
+	if second.Code != http.StatusOK || !regexp.MustCompile(`^"g2-[0-9a-f]{16}"$`).MatchString(second.Header().Get("ETag")) {
 		t.Fatalf("second download = %d etag=%q", second.Code, second.Header().Get("ETag"))
 	}
 }
