@@ -275,6 +275,8 @@ func (d *Daemon) runUpgrade(ctx context.Context) commands.UpgradeReport {
 	return commands.UpgradeReport{OK: true, Status: "upgraded", FromHub: dataURL, Binary: self, SizeBytes: size, Hash: hash}
 }
 
+const reexecInflightWait = 10 * time.Second
+
 func (d *Daemon) requestReexec(session *stream.Session) {
 	if d == nil || session == nil || d.reexec == nil {
 		return
@@ -294,14 +296,27 @@ func (d *Daemon) requestReexec(session *stream.Session) {
 		}()
 		// stream.Handler enqueues the result before removing the inbound call.
 		// Wait for that transition so Flush cannot run before this upgrade
-		// result has entered the send queue.
+		// result has entered the send queue, but do not let unrelated incoming
+		// reads postpone reexec forever.
 		ticker := time.NewTicker(5 * time.Millisecond)
 		defer ticker.Stop()
+		deadline := time.NewTimer(reexecInflightWait)
+		defer deadline.Stop()
+		inflightTimedOut := false
 		for session.Stats().InflightIn > 0 {
 			select {
 			case <-session.Done():
 				return
+			case <-deadline.C:
+				inflightTimedOut = true
 			case <-ticker.C:
+			}
+			if inflightTimedOut {
+				logger := d.logger
+				if logger != nil {
+					logger.Printf("agent upgrade: reexec wait for in-flight requests timed out after %s; flushing and restarting", reexecInflightWait)
+				}
+				break
 			}
 		}
 		flushCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
