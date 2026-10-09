@@ -206,7 +206,10 @@ func inspectLocalStatus(ctx context.Context, executor *localExecutor, paths core
 			if ctx.Err() != nil {
 				return commands.StatusReport{}, ctx.Err()
 			}
-			return commands.StatusReport{}, err
+			if !errors.Is(err, errNoHubSnapshot) {
+				return commands.StatusReport{}, err
+			}
+			snapshot = []core.AdapterSnapshot{}
 		}
 		remote = snapshot
 	}

@@ -1,8 +1,6 @@
 package agentd
 
 import (
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/zzjcool/homer-cli/internal/core"
@@ -98,15 +96,8 @@ func (c *snapshotCache) store(epoch uint64, etag string, snapshots []core.Adapte
 		c.clearLocked()
 		return c.epoch
 	}
-	if c.valid {
-		oldGeneration, oldOK := generationFromETag(c.etag)
-		newGeneration, newOK := generationFromETag(etag)
-		// Concurrent GETs can complete out of order. Do not let a response
-		// for an older g<N> replace a newer decoded generation.
-		if oldOK && newOK && newGeneration < oldGeneration {
-			return c.epoch
-		}
-	}
+	// ETags are opaque validators: a hub reset may reuse a generation number
+	// while changing the snapshot contents, so ordering based on g<N> is unsafe.
 	c.etag = etag
 	c.snapshots = cloneAdapterSnapshots(snapshots)
 	c.meta = append([]byte(nil), meta...)
@@ -132,16 +123,6 @@ func (c *snapshotCache) invalidateIf(etag string, epoch uint64) {
 		c.clearLocked()
 	}
 	c.mu.Unlock()
-}
-
-func generationFromETag(etag string) (int64, bool) {
-	etag = strings.TrimSpace(etag)
-	etag = strings.Trim(etag, `"`)
-	if !strings.HasPrefix(etag, "g") {
-		return 0, false
-	}
-	generation, err := strconv.ParseInt(strings.TrimPrefix(etag, "g"), 10, 64)
-	return generation, err == nil && generation >= 0
 }
 
 func (c *snapshotCache) clearLocked() {

@@ -18,6 +18,7 @@ const (
 	DefaultSendQueue     = 256
 	DefaultMaxInflightIn = 128
 	progressQueueSize    = 64
+	eventQueueSize       = 64
 )
 
 type outbound struct {
@@ -40,6 +41,13 @@ type inboundCall struct {
 	cancel context.CancelFunc
 	state  atomic.Uint32 // 0 running, 1 handler completed, 2 cancellation completed
 	seq    atomic.Uint64
+}
+
+type queuedEvent struct {
+	ctx     context.Context
+	method  string
+	params  json.RawMessage
+	handler EventHandler
 }
 
 type Session struct {
@@ -75,6 +83,7 @@ type Session struct {
 	flushQ     chan chan struct{}
 
 	heartbeatChanged chan struct{}
+	eventQueue       chan queuedEvent
 	lastRecvMu       sync.Mutex
 	lastRecv         time.Time
 	pingRTT          atomic.Int64
@@ -84,6 +93,7 @@ type Session struct {
 	framesIn        atomic.Uint64
 	framesOut       atomic.Uint64
 	progressDropped atomic.Uint64
+	eventDropped    atomic.Uint64
 	droppedLog      *ThrottledLogger
 }
 
@@ -128,6 +138,7 @@ func NewSession(conn Conn, opts Options) *Session {
 		wakeQ:            make(chan struct{}, 1),
 		flushQ:           make(chan chan struct{}, 1),
 		heartbeatChanged: make(chan struct{}, 1),
+		eventQueue:       make(chan queuedEvent, eventQueueSize),
 		lastRecv:         clock.Now(),
 		pings:            make(map[string]time.Time),
 		droppedLog:       NewThrottledLogger(opts.Logger, time.Minute),
@@ -194,10 +205,11 @@ func (s *Session) Run(ctx context.Context) error {
 
 	finished := make(chan error, 3)
 	var loops sync.WaitGroup
-	loops.Add(3)
+	loops.Add(4)
 	go func() { defer loops.Done(); finished <- s.readLoop() }()
 	go func() { defer loops.Done(); finished <- s.writerLoop() }()
 	go func() { defer loops.Done(); finished <- s.pingLoop() }()
+	go func() { defer loops.Done(); s.eventLoop() }()
 
 	err := <-finished
 	s.terminate(err)
@@ -424,15 +436,58 @@ func (s *Session) handleEvent(frame *Frame) {
 	if handler == nil {
 		return
 	}
-	params := append(json.RawMessage(nil), frame.P...)
-	go func() {
-		defer func() {
-			if recovered := recover(); recovered != nil && s.droppedLog != nil {
-				s.droppedLog.Log("event-handler-panic:"+frame.M, fmt.Sprintf("stream: event handler panic method=%q: %v", frame.M, recovered))
+	event := queuedEvent{
+		ctx: ctx, method: frame.M,
+		params: append(json.RawMessage(nil), frame.P...), handler: handler,
+	}
+	select {
+	case <-s.done:
+		return
+	case s.eventQueue <- event:
+		return
+	default:
+		dropped := s.eventDropped.Add(1)
+		if s.droppedLog != nil {
+			s.droppedLog.Log("event-queue-full", fmt.Sprintf("stream: dropping event because event queue is full method=%q dropped=%d", frame.M, dropped))
+		}
+	}
+}
+
+func (s *Session) eventLoop() {
+	for {
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+		select {
+		case <-s.done:
+			return
+		case event := <-s.eventQueue:
+			if s.isDone() {
+				return
 			}
-		}()
-		handler(ctx, frame.M, params)
+			eventDone := make(chan struct{})
+			go func() {
+				defer close(eventDone)
+				s.dispatchEvent(event)
+			}()
+			select {
+			case <-s.done:
+				return
+			case <-eventDone:
+			}
+		}
+	}
+}
+
+func (s *Session) dispatchEvent(event queuedEvent) {
+	defer func() {
+		if recovered := recover(); recovered != nil && s.droppedLog != nil {
+			s.droppedLog.Log("event-handler-panic:"+event.method, fmt.Sprintf("stream: event handler panic method=%q: %v", event.method, recovered))
+		}
 	}()
+	event.handler(event.ctx, event.method, event.params)
 }
 
 func (s *Session) handlePong(id string) {
@@ -932,15 +987,19 @@ func (s *Session) terminate(err error) {
 		in.state.CompareAndSwap(0, 2)
 		in.cancel()
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
 	close(s.done)
+	cancel := s.cancel
 	s.mu.Unlock()
 	if localClose {
+		// Keep the read context alive until Conn.Close has had a chance to send
+		// its close frame. coder/websocket cancels a Read immediately when its
+		// context is canceled, which would otherwise abort the close handshake.
 		_ = s.conn.Close(closeFrame.Code, closeFrame.Reason)
 	} else {
 		_ = s.conn.CloseNow()
+	}
+	if cancel != nil {
+		cancel()
 	}
 	s.queueMu.Lock()
 	s.urgentQ = nil

@@ -82,8 +82,9 @@ type Daemon struct {
 	toolkit Toolkit
 	tools   toolState
 
-	retries *stream.ThrottledLogger
-	logger  stream.Logger
+	retries       *stream.ThrottledLogger
+	writeTaskLogs *stream.ThrottledLogger
+	logger        stream.Logger
 
 	statusFlight statusFlight
 	readSem      chan struct{}
@@ -127,6 +128,7 @@ func New(cfg Config, exec Executor) *Daemon {
 		enrollCode:     strings.TrimSpace(cfg.EnrollCode),
 		logger:         logger,
 		retries:        stream.NewThrottledLogger(logger, time.Minute),
+		writeTaskLogs:  stream.NewThrottledLogger(logger, time.Minute),
 		readSem:        make(chan struct{}, 4),
 		writeGate:      newTaskGate(),
 		heartbeatWake:  make(chan struct{}, 1),
@@ -362,6 +364,15 @@ func (d *Daemon) logf(format string, args ...any) {
 		return
 	}
 	d.logger.Printf(format, args...)
+}
+
+func (d *Daemon) logWriteTaskStillRunning(method string, heldFor time.Duration) {
+	if d == nil || d.writeTaskLogs == nil {
+		return
+	}
+	key := "write-task-still-running:" + method
+	line := fmt.Sprintf("agent: write task timed out but command is still running method=%s held=%s", method, heldFor.Round(time.Millisecond))
+	d.writeTaskLogs.Log(key, line)
 }
 
 // syncExecutorCredential updates the snapshot/data-plane bearer once the

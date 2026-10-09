@@ -3,6 +3,9 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -527,7 +530,32 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusConflict, "no-snapshot", "中心还没有任何快照（先从一台机器同步到其他机器）", nil)
 		return
 	}
-	etag := fmt.Sprintf("\"g%d\"", head.Generation)
+	contentHash := sha256.New()
+	writeHashField := func(value []byte) {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = contentHash.Write(length[:])
+		_, _ = contentHash.Write(value)
+	}
+	writeHashField(head.Meta)
+	_ = filepath.WalkDir(head.StoreDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(head.StoreDir, path)
+		if relErr != nil || len(strings.SplitN(filepath.ToSlash(rel), "/", 2)) != 2 {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		writeHashField([]byte(filepath.ToSlash(rel)))
+		writeHashField(data)
+		return nil
+	})
+	contentDigest := hex.EncodeToString(contentHash.Sum(nil))[:16]
+	etag := fmt.Sprintf("\"g%d-%s\"", head.Generation, contentDigest)
 	w.Header().Set("ETag", etag)
 	if ifNoneMatch(r.Header.Values("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)

@@ -73,7 +73,7 @@ func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, 
 		}
 	} else {
 		var err error
-		release, _, err = d.writeGate.acquireWithGrant(ctx, func() {
+		release, _, err = d.writeGate.acquireWithMethod(ctx, req.Method, func() {
 			req.Progress(map[string]string{"stage": "queued"})
 		}, d.beginWriteGen)
 		if err != nil {
@@ -81,6 +81,7 @@ func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, 
 		}
 	}
 
+	var onTimeout func()
 	if class == taskClassWrite {
 		onComplete = func() {
 			// The command layer may keep running after a canceled request. Keep
@@ -91,8 +92,14 @@ func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, 
 			d.signalHeartbeat()
 			release()
 		}
+		onTimeout = func() {
+			method, heldFor, stillHeld := d.writeGate.runningDuration(time.Now())
+			if stillHeld && method == req.Method {
+				d.logWriteTaskStillRunning(method, heldFor)
+			}
+		}
 	}
-	return d.runTask(ctx, req, options, onComplete)
+	return d.runTask(ctx, req, options, onComplete, onTimeout)
 }
 
 func taskLimit(configured time.Duration, method string, requestBudget time.Duration) time.Duration {
@@ -130,7 +137,7 @@ type taskOutcome struct {
 	err    error
 }
 
-func (d *Daemon) runTask(ctx context.Context, req *stream.Request, options hub.TaskOptions, onComplete func()) (any, error) {
+func (d *Daemon) runTask(ctx context.Context, req *stream.Request, options hub.TaskOptions, onComplete, onTimeout func()) (any, error) {
 	completed := make(chan taskOutcome, 1)
 	go func() {
 		outcome := taskOutcome{}
@@ -161,6 +168,15 @@ func (d *Daemon) runTask(ctx context.Context, req *stream.Request, options hub.T
 		// Most command execution is not context-aware. Return promptly and let
 		// its goroutine finish naturally; cancellation does not roll back a
 		// write that the command layer already started.
+		select {
+		case <-completed:
+			// The command finished concurrently with the timeout; it no longer
+			// holds the write gate in the background.
+		default:
+			if onTimeout != nil {
+				onTimeout()
+			}
+		}
 		return nil, taskContextError(ctx.Err())
 	}
 }
@@ -275,6 +291,8 @@ func (d *Daemon) runUpgrade(ctx context.Context) commands.UpgradeReport {
 	return commands.UpgradeReport{OK: true, Status: "upgraded", FromHub: dataURL, Binary: self, SizeBytes: size, Hash: hash}
 }
 
+const reexecInflightWait = 10 * time.Second
+
 func (d *Daemon) requestReexec(session *stream.Session) {
 	if d == nil || session == nil || d.reexec == nil {
 		return
@@ -294,14 +312,27 @@ func (d *Daemon) requestReexec(session *stream.Session) {
 		}()
 		// stream.Handler enqueues the result before removing the inbound call.
 		// Wait for that transition so Flush cannot run before this upgrade
-		// result has entered the send queue.
+		// result has entered the send queue, but do not let unrelated incoming
+		// reads postpone reexec forever.
 		ticker := time.NewTicker(5 * time.Millisecond)
 		defer ticker.Stop()
+		deadline := time.NewTimer(reexecInflightWait)
+		defer deadline.Stop()
+		inflightTimedOut := false
 		for session.Stats().InflightIn > 0 {
 			select {
 			case <-session.Done():
 				return
+			case <-deadline.C:
+				inflightTimedOut = true
 			case <-ticker.C:
+			}
+			if inflightTimedOut {
+				logger := d.logger
+				if logger != nil {
+					logger.Printf("agent upgrade: reexec wait for in-flight requests timed out after %s; flushing and restarting", reexecInflightWait)
+				}
+				break
 			}
 		}
 		flushCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
