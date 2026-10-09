@@ -39,6 +39,7 @@ func TestServeSmoke(t *testing.T) {
 	writeFile(t, filepath.Join(piRoot(machineA), "settings.json"), "{\n  \"served\": true\n}\n")
 
 	serve := exec.Command(binary, "serve", "--home", machineA.homerHome, "--addr", "127.0.0.1:0", "--token", "e2e-serve-token")
+	orphanGuard(serve)
 	serve.Env = serveEnv(machineA, global)
 	serveOut := &lockedBuilder{}
 	serve.Stdout = serveOut
@@ -176,6 +177,7 @@ func TestServeNonLoopbackAutoToken(t *testing.T) {
 func startServeProc(t *testing.T, binary, home, global, addr string) *exec.Cmd {
 	t.Helper()
 	command := exec.Command(binary, "serve", "--addr", addr, "--home", home)
+	orphanGuard(command)
 	command.Env = []string{
 		"HOME=" + t.TempDir(),
 		"HOMER_HOME=" + home,
@@ -359,6 +361,7 @@ func TestServeTokenAuthSmoke(t *testing.T) {
 	}
 
 	serve := exec.Command(binary, "serve", "--home", machine.homerHome, "--addr", "127.0.0.1:0")
+	orphanGuard(serve)
 	serve.Env = append(serveEnv(machine, global), "HOMER_HUB_TOKEN=e2e-token")
 	serveOut := &lockedBuilder{}
 	serve.Stdout = serveOut

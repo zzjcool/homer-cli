@@ -385,6 +385,7 @@ func startV13PairProcess(t *testing.T, binary, global, homerHome, fakeHome, path
 		t.Fatal(err)
 	}
 	command := exec.Command(binary, args...)
+	orphanGuard(command)
 	command.Dir = repoRoot()
 	command.Env = baseEnv(global)
 	command.Env = setEnv(command.Env, "PATH", path)

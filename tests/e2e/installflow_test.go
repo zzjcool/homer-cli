@@ -18,6 +18,16 @@ import (
 // WebSocket hello redeems the code and persists an agent secret → heartbeat
 // reports drift. It never substitutes a shared hub token for enrollment.
 func TestInstallScriptEnrollFlow(t *testing.T) {
+	// install.sh, run as root on a host with systemd, writes
+	// /etc/systemd/system/homer-agent.service and enables it. The test's fake
+	// HOME does not change that path, so it would install a real, persistent
+	// agent on the machine running the tests (and could shadow a production
+	// unit of the same name).
+	if os.Geteuid() == 0 {
+		if _, err := os.Stat("/run/systemd/system"); err == nil {
+			t.Skip("root + systemd: install.sh would register a real homer-agent.service on this host")
+		}
+	}
 	root := t.TempDir()
 	global := filepath.Join(root, "gitconfig")
 	writeFile(t, global, "[user]\n\tname = Homer W11 E2E\n\temail = homer-w11@example.invalid\n")

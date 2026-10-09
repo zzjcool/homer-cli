@@ -168,6 +168,7 @@ func (l *processLog) String() string {
 func startHermetic(t *testing.T, binary string, m machine, global, bin string, args ...string) *exec.Cmd {
 	t.Helper()
 	command := exec.Command(binary, args...)
+	orphanGuard(command)
 	command.Env = append(serveEnv(m, global), "PATH="+bin, "SHELL=/nonexistent")
 	logs := &processLog{}
 	command.Stdout, command.Stderr = logs, logs

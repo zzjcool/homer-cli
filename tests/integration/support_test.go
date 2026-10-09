@@ -129,6 +129,7 @@ func startChild(t *testing.T, binary, logPath, global string, env map[string]str
 		childEnv["HOME"] = filepath.Dir(logPath)
 	}
 	cmd := exec.Command(binary, args...)
+	orphanGuard(cmd)
 	cmd.Dir = repositoryRoot()
 	cmd.Env = processEnv(childEnv)
 	cmd.Stdout = file

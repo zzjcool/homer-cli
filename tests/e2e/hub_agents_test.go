@@ -114,6 +114,7 @@ var procOutput = map[*exec.Cmd]string{}
 func startHomer(t *testing.T, binary string, m machine, global string, args ...string) *exec.Cmd {
 	t.Helper()
 	command := exec.Command(binary, args...)
+	orphanGuard(command)
 	command.Env = []string{
 		"HOME=" + m.fakeHome,
 		"HOMER_HOME=" + m.homerHome,
@@ -356,6 +357,7 @@ func agentRegistered(t *testing.T, hubURL, token, agentID string) bool {
 func startHomerWithEnv(t *testing.T, binary string, m machine, global string, extraEnv []string, args ...string) *exec.Cmd {
 	t.Helper()
 	command := exec.Command(binary, args...)
+	orphanGuard(command)
 	command.Env = append(serveEnv(m, global), extraEnv...)
 	var combined strings.Builder
 	command.Stdout = &combined

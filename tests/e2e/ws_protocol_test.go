@@ -54,6 +54,7 @@ type e2eChildProcess struct {
 func startE2EChild(t *testing.T, binary, fakeHome, homerHome, gitConfig string, args ...string) *e2eChildProcess {
 	t.Helper()
 	cmd := exec.Command(binary, args...)
+	orphanGuard(cmd)
 	cmd.Env = []string{
 		"HOME=" + fakeHome,
 		"HOMER_HOME=" + homerHome,
