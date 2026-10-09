@@ -19,6 +19,11 @@ import (
 type ScanError struct {
 	Path    string
 	Message string
+	// RootMissing marks "the adapter root does not exist yet" (a fresh
+	// machine waiting for its first dispatch) as distinct from permission
+	// or I/O failures, so the report layer can phrase it as a state
+	// instead of an error.
+	RootMissing bool
 }
 
 // ScanOutcome contains the snapshot and diagnostics from one adapter scan.
@@ -162,6 +167,13 @@ func isWithinRoot(child, root string) bool {
 
 func addScanError(errors *[]ScanError, path, message string) {
 	*errors = append(*errors, ScanError{Path: path, Message: message})
+}
+
+// addRootScanError records an adapter-root problem, classifying a plain
+// os.ErrNotExist as RootMissing so callers can distinguish "root not there
+// yet" (a legal fresh-machine state) from a real unreadable root.
+func addRootScanError(out *[]ScanError, root string, err error) {
+	*out = append(*out, ScanError{Path: root, Message: err.Error(), RootMissing: errors.Is(err, os.ErrNotExist)})
 }
 
 // visitSymlink applies the containment policy before following a symlink.
@@ -427,7 +439,7 @@ func ScanAdapter(adapterID string, config core.AdapterConfig, deps ...ScanDeps) 
 	root := expandHome(config.Root)
 	rootInfo, err := os.Stat(root)
 	if err != nil {
-		addScanError(&outcome.Errors, root, err.Error())
+		addRootScanError(&outcome.Errors, root, err)
 		outcome.Snapshot.Categories = []core.CategorySnapshot{}
 		return outcome
 	}

@@ -1775,7 +1775,8 @@ $("btn-confirm-ok").addEventListener("click", ev => {
     return;
   }
   if (action.kind === "resolve-on" && action.choice === "center" && app.scopeStep === "unlock") {
-    if (unlocks.some(row => [...row.password].length < 8)) return;
+    const tooShort = unlocks.find(row => [...row.password].length < 8);
+    if (tooShort) { toast("口令至少 8 位，请补齐后再确认"); return; }
     okBtn.disabled = true; okBtn.textContent = "处理中…";
     $("dlg-confirm").returnValue = "confirm";
     $("dlg-confirm").close("confirm");
@@ -1784,7 +1785,8 @@ $("btn-confirm-ok").addEventListener("click", ev => {
     return;
   }
   if (action.kind === "dispatch-one" && app.scopeStep === "unlock") {
-    if (unlocks.some(row => [...row.password].length < 8)) return;
+    const tooShort = unlocks.find(row => [...row.password].length < 8);
+    if (tooShort) { toast("口令至少 8 位，请补齐后再确认"); return; }
     executeDispatchOne(action.agentId, action.name, adapters, unlocks, true);
     return;
   }

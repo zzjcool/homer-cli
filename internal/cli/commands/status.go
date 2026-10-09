@@ -134,6 +134,43 @@ func SourceErrorMessages(errors SnapshotSourceErrors) []string {
 	return sourceErrorMessages(errors)
 }
 
+// RootMissingMessages extracts the "adapter root does not exist yet" rows
+// from the scan diagnostics. On a fresh machine waiting for its first
+// dispatch this is a legal state, not a fault: the rows are reported as
+// Warnings ("等待下发") instead of Errors so a new machine does not look
+// broken in the console.
+func RootMissingMessages(errors SnapshotSourceErrors) []string {
+	messages := make([]string, 0)
+	for _, entry := range errors {
+		for _, scanError := range entry.Errors {
+			if !scanError.RootMissing {
+				continue
+			}
+			messages = append(messages, fmt.Sprintf("%s: 还没有 %s 目录，等待首次下发（同步时会自动创建）", entry.AdapterID, scanError.Path))
+		}
+	}
+	return messages
+}
+
+// withoutRootMissing returns only the scan rows that are real faults.
+func withoutRootMissing(errors SnapshotSourceErrors) SnapshotSourceErrors {
+	out := make(SnapshotSourceErrors, 0, len(errors))
+	for _, entry := range errors {
+		filtered := entry
+		filtered.Errors = nil
+		for _, scanError := range entry.Errors {
+			if scanError.RootMissing {
+				continue
+			}
+			filtered.Errors = append(filtered.Errors, scanError)
+		}
+		if len(filtered.Errors) > 0 {
+			out = append(out, filtered)
+		}
+	}
+	return out
+}
+
 func rootUnreadable(outcome adapter.ScanOutcome) bool {
 	return len(outcome.Snapshot.Categories) == 0 && len(outcome.Errors) > 0
 }
@@ -510,8 +547,10 @@ func runStatusWithConfig(opts StatusOptions, paths core.HomerPaths, config *core
 
 	errorMessages := append([]string(nil), sources.Errors...)
 	errorMessages = append(errorMessages, sources.ErrorMessages...)
-	errorMessages = append(errorMessages, sourceErrorMessages(sources.ScanErrors)...)
-	report := BuildStatusReport(engine.ComputeDrift(sources.Base, sources.Local, sources.Remote), errorMessages, sources.Warnings)
+	warnings := append([]string(nil), sources.Warnings...)
+	warnings = append(warnings, RootMissingMessages(sources.ScanErrors)...)
+	errorMessages = append(errorMessages, sourceErrorMessages(withoutRootMissing(sources.ScanErrors))...)
+	report := BuildStatusReport(engine.ComputeDrift(sources.Base, sources.Local, sources.Remote), errorMessages, warnings)
 	report.Disabled = DisabledSummaries(*config)
 	// Manifest categories surface package names, never the virtual file.
 	kinds := map[string]map[string]string{}
