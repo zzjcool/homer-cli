@@ -68,22 +68,38 @@ esac
 
 # 2. 安装二进制。hub 在慢速隧道后面时，一次连接往往传不完，
 #    所以优先下载 gzip（大约少一半），并用断点续传把多次连接拼起来。
-#    /dl/homer 与 /dl/homer.gz 都要 Bearer 鉴权，token 同携带。
+#    /dl/homer 与 /dl/homer.gz 都要 Bearer 鉴权，token 同携带；
+#    公开的 GitHub Release 下载永远不带 token（send_auth=0），避免把
+#    hub 凭证发给 github.com 及其 CDN。
 download() {
   url="$1"
   dest="$2"
+  send_auth="${3:-1}"
   attempt=0
   while [ "$attempt" -lt 12 ]; do
     status=0
     if command -v curl >/dev/null 2>&1; then
-      curl -fL --connect-timeout 20 --speed-time 30 --speed-limit 1024 -C - \
-        -H "Authorization: Bearer $TOKEN" "$url" -o "$dest" || status=$?
+      if [ "$send_auth" -eq 1 ]; then
+        curl -fL --connect-timeout 20 --speed-time 30 --speed-limit 1024 -C - \
+          -H "Authorization: Bearer $TOKEN" "$url" -o "$dest" || status=$?
+      else
+        curl -fL --connect-timeout 20 --speed-time 30 --speed-limit 1024 \
+          "$url" -o "$dest" || status=$?
+      fi
       if [ "$status" -eq 22 ]; then
-        echo "!! 下载被拒绝（凭证无效或已过期）" >&2
+        if [ "$send_auth" -eq 1 ]; then
+          echo "!! 下载被拒绝（凭证无效或已过期）" >&2
+        else
+          echo "!! Release 下载被拒绝（HTTP 4xx，可能没有本平台的归档）" >&2
+        fi
         return 1
       fi
     elif command -v wget >/dev/null 2>&1; then
-      wget -q -c --timeout=20 --header="Authorization: Bearer $TOKEN" -O "$dest" "$url" || status=$?
+      if [ "$send_auth" -eq 1 ]; then
+        wget -q -c --timeout=20 --header="Authorization: Bearer $TOKEN" -O "$dest" "$url" || status=$?
+      else
+        wget -q -c --timeout=20 -O "$dest" "$url" || status=$?
+      fi
     else
       echo "!! 需要 curl 或 wget" >&2
       return 1
@@ -92,7 +108,7 @@ download() {
       return 0
     fi
     attempt=$((attempt + 1))
-    echo ">> 下载中断，从已收到的部分继续（第 ${attempt} 次）…"
+    echo ">> 下载中断，从已收到的部分继续（第 ${attempt} 次）…" >&2
     sleep 2
   done
   echo "!! 下载 homer 二进制失败" >&2
@@ -132,33 +148,38 @@ if [ "$GOOS_ACTUAL" = "$GOOS_EXPECT" ] && [ "$GOARCH_ACTUAL" = "$GOARCH_EXPECT" 
       ;;
   esac
 else
-  # 3. 平台不匹配 → 交叉下载预编译产物；GitHub 不可达时退回源码构建指引。
+  # 3. 平台不匹配 → 交叉下载预编译产物；GitHub 不可达或本平台没有
+  #    归档时退回源码构建指引。下载是公开资源：不带 token（见 download
+  #    的 send_auth 参数）、不做断点续传（避免跨版本拼接残留文件）。
   echo ">> 平台不匹配（本机 ${GOOS_ACTUAL}/${GOARCH_ACTUAL}，hub 提供 ${GOOS_EXPECT}/${GOARCH_EXPECT}）"
-  RELEASE_BASE="https://github.com/zzjcool/homer-cli/releases/latest/download"
-  RELEASE_ARCHIVE="homer_${GOOS_ACTUAL}_${GOARCH_ACTUAL}.tar.gz"
-  RELEASE_FALLBACK=0
-  if download "$RELEASE_BASE/$RELEASE_ARCHIVE" "$BIN_DIR/homer-rel.tar.gz"; then
-    if tar -xzf "$BIN_DIR/homer-rel.tar.gz" -C "$BIN_DIR" homer 2>/dev/null \
-      || tar -xzf "$BIN_DIR/homer-rel.tar.gz" -C "$BIN_DIR"; then
-      if [ -f "$BIN_DIR/homer" ] && [ ! -x "$BIN_DIR/homer" ]; then
-        chmod 755 "$BIN_DIR/homer"
-      fi
-      if [ -x "$BIN_DIR/homer" ]; then
-        rm -f "$BIN_DIR/homer-rel.tar.gz"
-        echo ">> 已从 GitHub Releases 安装 $RELEASE_ARCHIVE 到 $BIN_DIR/homer"
-      else
-        echo "!! Release 归档里没有可执行的 homer" >&2
-        RELEASE_FALLBACK=1
-      fi
-    else
-      echo "!! Release 归档解压失败" >&2
-      RELEASE_FALLBACK=1
-    fi
+  RELEASE_FALLBACK=1
+  RELEASE_SUPPORTED=0
+  case "${GOOS_ACTUAL}/${GOARCH_ACTUAL}" in
+    linux/amd64|linux/arm64|darwin/amd64|darwin/arm64) RELEASE_SUPPORTED=1 ;;
+  esac
+  if [ "$RELEASE_SUPPORTED" -eq 0 ]; then
+    echo "!! GitHub Releases 没有本平台（${GOOS_ACTUAL}/${GOARCH_ACTUAL}）的预编译归档" >&2
   else
-    RELEASE_FALLBACK=1
+    RELEASE_BASE="https://github.com/zzjcool/homer-cli/releases/latest/download"
+    RELEASE_ARCHIVE="homer_${GOOS_ACTUAL}_${GOARCH_ACTUAL}.tar.gz"
+    REL_TMP=$(mktemp -d "${TMPDIR:-/tmp}/homer-release.XXXXXX")
+    rm -f "$BIN_DIR/homer-rel.tar.gz"
+    if download "$RELEASE_BASE/$RELEASE_ARCHIVE" "$BIN_DIR/homer-rel.tar.gz" 0; then
+      # 解到独立目录再原子安装：只有「这次归档里确实解出了 homer」才算
+      # 成功，不会被以前装的旧二进制冒充；也避免全解污染 BIN_DIR。
+      if tar -xzf "$BIN_DIR/homer-rel.tar.gz" -C "$REL_TMP" 2>/dev/null \
+        && [ -f "$REL_TMP/homer" ]; then
+        chmod 755 "$REL_TMP/homer"
+        mv -f "$REL_TMP/homer" "$BIN_DIR/homer"
+        echo ">> 已从 GitHub Releases 安装 $RELEASE_ARCHIVE 到 $BIN_DIR/homer"
+        RELEASE_FALLBACK=0
+      else
+        echo "!! Release 归档解压失败或里面没有 homer" >&2
+      fi
+    fi
+    rm -rf "$REL_TMP" "$BIN_DIR/homer-rel.tar.gz"
   fi
   if [ "$RELEASE_FALLBACK" -eq 1 ]; then
-    rm -f "$BIN_DIR/homer-rel.tar.gz"
     echo "   请从源码构建:"
     echo "     git clone https://github.com/zzjcool/homer-cli && cd homer-cli"
     echo "     go install ./cmd/homer"
@@ -232,7 +253,8 @@ EOF
     else
       nohup "$AGENT_BIN" $AGENT_ARGS >>"$LOG" 2>&1 &
     fi
-    echo ">> agent 已在后台启动（日志: ${LOG}，PID: ${!}）"
+    agent_pid=$!
+    echo ">> agent 已在后台启动（日志: ${LOG}，PID: ${agent_pid}）"
     if [ -f /.dockerenv ]; then
       echo ">> 这个容器没有 systemd。请让容器自己保持运行，否则主进程退出时 agent 会一起停。"
     fi
