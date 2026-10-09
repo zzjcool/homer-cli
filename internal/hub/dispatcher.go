@@ -53,6 +53,7 @@ func (d *Dispatcher) ListAgents() []web.AgentInfo {
 			agent.Drift = &web.AgentDrift{
 				Push: info.Drift.Push, Pull: info.Drift.Pull,
 				Conflicts: info.Drift.Conflicts, Error: info.Drift.Error,
+				Resolutions: info.Drift.Resolutions,
 			}
 		}
 		agent.Host = webHost(info.Host)
@@ -115,7 +116,11 @@ func (d *Dispatcher) AgentPull(ctx context.Context, agentID string, confirm bool
 }
 
 func taskOptionsForScope(confirm bool, scope web.SyncScope) TaskOptions {
-	options := TaskOptions{Confirm: confirm, Overwrite: scope.Overwrite, AllowSecrets: scope.AllowSecrets}
+	options := TaskOptions{
+		Confirm: confirm, Overwrite: scope.Overwrite, AllowSecrets: scope.AllowSecrets,
+		ApplyResolutions: scope.ApplyResolutions, ClearResolutions: scope.ClearResolutions,
+		CenterGeneration: scope.CenterGeneration,
+	}
 	if scope.Explicit {
 		options.Adapters = append([]string(nil), scope.Adapters...)
 	}
@@ -178,6 +183,34 @@ func (d *Dispatcher) AgentResolve(ctx context.Context, agentID, choice string) (
 		kind = TaskKindPush
 	}
 	return d.writeAgent(ctx, agentID, kind, TaskOptions{Confirm: true, Resolve: choice})
+}
+
+// AgentResolveRecord persists, clears, or lists a machine's staged conflict
+// decisions. Older agents fail with an explicit version error rather than a
+// generic unsupported-method response.
+func (d *Dispatcher) AgentResolveRecord(ctx context.Context, agentID string, req web.ResolveRecordRequest) (json.RawMessage, error) {
+	info, _, err := d.requireOnline(agentID)
+	if err != nil {
+		return nil, err
+	}
+	if !hasCapability(info.caps, MethodResolveRecord) {
+		return nil, newAgentError("agent-outdated", http.StatusConflict,
+			fmt.Errorf("agent %q does not advertise method %q", agentID, MethodResolveRecord))
+	}
+	raw, err := d.callTask(ctx, agentID, TaskKindResolveRecord, TaskOptions{
+		ResolutionAction: req.Action, ResolutionChoice: req.Choice,
+		Adapters: append([]string(nil), req.Adapters...), CenterGeneration: req.CenterGeneration,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report struct {
+		Pending *int `json:"pending"`
+	}
+	if d.Registry != nil && json.Unmarshal(raw, &report) == nil && report.Pending != nil {
+		d.Registry.NoteResolutions(agentID, *report.Pending)
+	}
+	return raw, nil
 }
 
 func (d *Dispatcher) writeAgent(ctx context.Context, agentID string, kind TaskKind, options TaskOptions) (json.RawMessage, error) {
@@ -440,3 +473,4 @@ func (d *Dispatcher) RemoveAgent(agentID string) bool {
 
 var _ web.AgentsSource = (*Dispatcher)(nil)
 var _ web.InspectSource = (*Dispatcher)(nil)
+var _ web.ResolutionSource = (*Dispatcher)(nil)

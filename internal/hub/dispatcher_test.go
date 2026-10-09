@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -437,11 +438,28 @@ func TestDispatcherRemoveKicksAgent(t *testing.T) {
 
 func TestDispatcherListAgents(t *testing.T) {
 	registry := NewRegistry()
-	registry.Attach(AgentInfo{AgentID: "b", Hostname: "box-b", Version: "v1"}, nil)
+	registry.Attach(AgentInfo{AgentID: "b", Hostname: "box-b", Version: "v1", Drift: &AgentDrift{Conflicts: 1, Resolutions: 2}}, nil)
 	registry.Attach(AgentInfo{AgentID: "a", Hostname: "box-a"}, nil)
 	agents := NewDispatcher(registry, "").ListAgents()
 	if len(agents) != 2 || agents[0].AgentID != "a" || agents[0].Hostname != "box-a" || agents[1].AgentID != "b" {
 		t.Fatalf("agents = %+v", agents)
+	}
+	if agents[1].Drift == nil || agents[1].Drift.Resolutions != 2 {
+		t.Fatalf("ListAgents did not copy resolution count: %+v", agents[1].Drift)
+	}
+}
+
+func TestListAgentsCopiesResolutions(t *testing.T) {
+	registry := NewRegistry()
+	registry.Attach(AgentInfo{AgentID: "box", Drift: &AgentDrift{Conflicts: 1, Resolutions: 4}}, nil)
+	listed := NewDispatcher(registry, "").ListAgents()
+	if len(listed) != 1 || listed[0].Drift == nil || listed[0].Drift.Resolutions != 4 {
+		t.Fatalf("listed agents = %+v", listed)
+	}
+	listed[0].Drift.Resolutions = 9
+	info, _ := registry.Get("box")
+	if info.Drift == nil || info.Drift.Resolutions != 4 {
+		t.Fatalf("web drift aliased registry state: %+v", info.Drift)
 	}
 }
 
@@ -473,5 +491,74 @@ func TestDispatcherToolListClone(t *testing.T) {
 	info, _ := registry.Get("box")
 	if info.Tools[0].Version != "1.0" {
 		t.Fatalf("web list aliased registry tools: %+v", info.Tools)
+	}
+}
+
+func TestAgentResolveRecordSendsTaskAndNotesPending(t *testing.T) {
+	registry := NewRegistry()
+	registry.Attach(AgentInfo{AgentID: "box", Drift: &AgentDrift{Conflicts: 1, Resolutions: 2}}, nil)
+	agent := newDispatcherAgent(t, registry, "box", MethodResolveRecord)
+	agent.Handle(MethodResolveRecord, func(_ context.Context, _ *stream.Request) (any, error) {
+		return json.RawMessage(`{"ok":true,"action":"record","pending":3,"entries":[],"errors":[]}`), nil
+	})
+	agent.Run()
+
+	raw, err := NewDispatcher(registry, "").AgentResolveRecord(context.Background(), "box", web.ResolveRecordRequest{
+		Action: "record", Choice: "local", Adapters: []string{"pi"}, CenterGeneration: 7,
+	})
+	if err != nil || !strings.Contains(string(raw), `"pending":3`) {
+		t.Fatalf("AgentResolveRecord = %s, %v", raw, err)
+	}
+	calls := agent.Calls()
+	if len(calls) != 1 || calls[0].method != MethodResolveRecord {
+		t.Fatalf("calls = %+v", calls)
+	}
+	var options TaskOptions
+	if err := json.Unmarshal(calls[0].params, &options); err != nil {
+		t.Fatal(err)
+	}
+	if options.ResolutionAction != "record" || options.ResolutionChoice != "local" ||
+		!reflect.DeepEqual(options.Adapters, []string{"pi"}) || options.CenterGeneration != 7 {
+		t.Fatalf("task options = %+v", options)
+	}
+	info, _ := registry.Get("box")
+	if info.Drift == nil || info.Drift.Resolutions != 3 {
+		t.Fatalf("pending count was not noted: %+v", info.Drift)
+	}
+}
+
+func TestAgentResolveRecordOutdatedAgent(t *testing.T) {
+	registry := NewRegistry()
+	agent := newDispatcherAgent(t, registry, "old", string(TaskKindStatus))
+	dispatcher := NewDispatcher(registry, "")
+	_, err := dispatcher.AgentResolveRecord(context.Background(), "old", web.ResolveRecordRequest{Action: "record"})
+	if !hasAgentCode(err, "agent-outdated", http.StatusConflict) {
+		t.Fatalf("error = %v, want agent-outdated conflict", err)
+	}
+	if calls := agent.Calls(); len(calls) != 0 {
+		t.Fatalf("outdated agent received stream calls: %+v", calls)
+	}
+}
+
+func TestAgentResolveRecordOfflineAgentIs503First(t *testing.T) {
+	registry := NewRegistry()
+	registry.Attach(AgentInfo{AgentID: "offline"}, nil)
+	_, err := NewDispatcher(registry, "").AgentResolveRecord(context.Background(), "offline", web.ResolveRecordRequest{Action: "record"})
+	if !hasAgentCode(err, "agent-offline", http.StatusServiceUnavailable) {
+		t.Fatalf("error = %v, want agent-offline before capability check", err)
+	}
+}
+
+func TestTaskOptionsForScopeCopiesResolutionFlags(t *testing.T) {
+	adapters := []string{"pi", "herdr"}
+	options := taskOptionsForScope(true, web.SyncScope{
+		Explicit: true, Adapters: adapters, Overwrite: true, AllowSecrets: true,
+		ApplyResolutions: true, ClearResolutions: true, CenterGeneration: 12,
+	})
+	adapters[0] = "mutated"
+	if !options.Confirm || !options.Overwrite || !options.AllowSecrets ||
+		!options.ApplyResolutions || !options.ClearResolutions || options.CenterGeneration != 12 ||
+		!reflect.DeepEqual(options.Adapters, []string{"pi", "herdr"}) {
+		t.Fatalf("task options = %+v", options)
 	}
 }

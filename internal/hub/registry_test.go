@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"sort"
@@ -268,5 +269,50 @@ func TestRegistryHeartbeatModelsKeepJSONShape(t *testing.T) {
 	}
 	if !json.Valid(encoded) {
 		t.Fatalf("agent list is not JSON: %s", encoded)
+	}
+}
+
+func TestHeartbeatCarriesResolutions(t *testing.T) {
+	r := NewRegistry()
+	session, peer := registryTestSession()
+	defer session.Close(stream.CloseNormal, "test complete")
+	defer peer.CloseNow()
+	r.Attach(AgentInfo{AgentID: "box"}, session)
+	hub := NewAgentHub(r, &Authenticator{Token: hubTestToken}, nil, HubOptions{})
+	payload, err := json.Marshal(HeartbeatParams{Drift: &AgentDrift{Conflicts: 1, Resolutions: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.heartbeatHandler("box", session)(context.Background(), MethodHeartbeat, payload)
+	info, ok := r.Get("box")
+	if !ok || info.Drift == nil || info.Drift.Resolutions != 2 {
+		t.Fatalf("heartbeat drift = %+v, found=%v", info.Drift, ok)
+	}
+}
+
+func TestNoteResolutionsOnlyWhenDriftPresent(t *testing.T) {
+	r := NewRegistry()
+	r.Attach(AgentInfo{AgentID: "without"}, nil)
+	r.Attach(AgentInfo{AgentID: "with", Drift: &AgentDrift{Conflicts: 2}}, nil)
+
+	r.NoteResolutions("without", 4)
+	r.NoteResolutions("with", 3)
+	without, _ := r.Get("without")
+	with, _ := r.Get("with")
+	if without.Drift != nil {
+		t.Fatalf("NoteResolutions created a drift record: %+v", without.Drift)
+	}
+	if with.Drift == nil || with.Drift.Resolutions != 3 {
+		t.Fatalf("NoteResolutions did not update existing drift: %+v", with.Drift)
+	}
+}
+
+func TestNoteWriteOutcomeKeepsResolutionsOnConflicts(t *testing.T) {
+	r := NewRegistry()
+	r.Attach(AgentInfo{AgentID: "box", Drift: &AgentDrift{Conflicts: 1, Resolutions: 3}}, nil)
+	r.NoteWriteOutcome("box", "conflicts-remain", false, 2)
+	info, _ := r.Get("box")
+	if info.Drift == nil || info.Drift.Conflicts != 2 || info.Drift.Resolutions != 3 {
+		t.Fatalf("conflict write outcome lost resolution count: %+v", info.Drift)
 	}
 }

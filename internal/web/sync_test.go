@@ -908,3 +908,103 @@ func TestSyncToOthersRefusesWhenAdapterHasBoundKey(t *testing.T) {
 		t.Fatalf("refusal should name the adapter and the key: %s", response.Body)
 	}
 }
+
+func TestAgentPullExplicitConfirmSetsApplyFlags(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	publishResolutionCenter(t, fixture, "pi")
+	source := &sourceStub{pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`)}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true", `{"adapters":["pi"]}`)
+	if response.Code != http.StatusOK || len(source.pullScopes) != 1 {
+		t.Fatalf("pull = %d scopes=%+v body=%s", response.Code, source.pullScopes, response.Body)
+	}
+	scope := source.pullScopes[0]
+	if !scope.ApplyResolutions || scope.CenterGeneration != 1 || !scope.Explicit || len(scope.Adapters) != 1 || scope.Adapters[0] != "pi" {
+		t.Fatalf("confirmed explicit pull scope = %+v", scope)
+	}
+}
+
+func TestAgentPullNoAdaptersDoesNotApply(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	publishResolutionCenter(t, fixture, "pi")
+	source := &sourceStub{pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`)}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true", "")
+	if response.Code != http.StatusOK || len(source.pullScopes) != 1 {
+		t.Fatalf("unrestricted pull = %d scopes=%+v body=%s", response.Code, source.pullScopes, response.Body)
+	}
+	if source.pullScopes[0].ApplyResolutions || source.pullScopes[0].CenterGeneration != 0 {
+		t.Fatalf("unrestricted pull unexpectedly applies resolutions: %+v", source.pullScopes[0])
+	}
+}
+
+func TestAgentPullPreviewDoesNotApply(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	publishResolutionCenter(t, fixture, "pi")
+	source := &sourceStub{pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`)}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull", `{"adapters":["pi"]}`)
+	if response.Code != http.StatusOK || len(source.pullScopes) != 1 {
+		t.Fatalf("preview pull = %d scopes=%+v body=%s", response.Code, source.pullScopes, response.Body)
+	}
+	if source.pullScopes[0].ApplyResolutions || source.pullScopes[0].CenterGeneration != 0 {
+		t.Fatalf("preview unexpectedly applies resolutions: %+v", source.pullScopes[0])
+	}
+}
+
+func TestFanoutDispatchNeverApplies(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "center\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	source := &sourceStub{
+		list:    []AgentInfo{{AgentID: "box", Hostname: "box"}},
+		pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`),
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/sync?direction=dispatch&confirm=true", `{"adapters":["pi"]}`)
+	if response.Code != http.StatusOK || len(source.pullScopes) != 1 {
+		t.Fatalf("fanout dispatch = %d scopes=%+v body=%s", response.Code, source.pullScopes, response.Body)
+	}
+	if source.pullScopes[0].ApplyResolutions || source.pullScopes[0].ClearResolutions || source.pullScopes[0].CenterGeneration != 0 {
+		t.Fatalf("fanout unexpectedly applies resolution fields: %+v", source.pullScopes[0])
+	}
+}
+
+func TestCollectAndLegacyResolveNeverApply(t *testing.T) {
+	fixture := makeFixture(t, "base\n", "base\n")
+	if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+		"pi": {"settings/settings.json": "center\n"},
+	}, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	source := &sourceStub{
+		pushRaw: json.RawMessage(`{"ok":true,"status":"pushed"}`),
+		pullRaw: json.RawMessage(`{"ok":true,"status":"applied"}`),
+	}
+	source.onPush = func() {
+		if _, err := gens.New(fixture.home).Publish(map[string]map[string]string{
+			"pi": {"settings/settings.json": "collected\n"},
+		}, []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newWebServer(t, fixture, "test-token", source, nil)
+	collect := request(t, server.Handler(), http.MethodPost, "/api/sync?direction=collect&agent=box&confirm=true", `{"adapters":["pi"]}`)
+	if collect.Code != http.StatusOK || len(source.pushScopes) != 1 {
+		t.Fatalf("collect = %d scopes=%+v body=%s", collect.Code, source.pushScopes, collect.Body)
+	}
+	if source.pushScopes[0].ApplyResolutions || source.pushScopes[0].ClearResolutions || source.pushScopes[0].CenterGeneration != 0 {
+		t.Fatalf("collect unexpectedly applies resolution fields: %+v", source.pushScopes[0])
+	}
+
+	legacy := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=center&agent=box&confirm=true", `{"adapters":["pi"]}`)
+	if legacy.Code != http.StatusOK || len(source.pullScopes) != 1 {
+		t.Fatalf("legacy resolve = %d scopes=%+v body=%s", legacy.Code, source.pullScopes, legacy.Body)
+	}
+	if source.pullScopes[0].ApplyResolutions || source.pullScopes[0].ClearResolutions || source.pullScopes[0].CenterGeneration != 0 {
+		t.Fatalf("legacy resolve unexpectedly applies resolution fields: %+v", source.pullScopes[0])
+	}
+}

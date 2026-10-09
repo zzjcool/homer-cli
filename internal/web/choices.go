@@ -12,12 +12,40 @@ import (
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/resolutions"
 )
 
 const (
 	reasonConflict     = "有冲突，先选择保留哪一边"
 	reasonNotOnMachine = "这台机器还没有这个适配器"
+	reasonStale        = "已记录的决定已过期（中心有新内容），需要重新选择"
 )
+
+// ResolutionView is the choice state needed by the console. It deliberately
+// contains no file content, only the stored decision and its generation.
+type ResolutionView struct {
+	Choice             string `json:"choice"`
+	RecordedAt         string `json:"recordedAt"`
+	GenerationAtRecord int    `json:"generationAtRecord"`
+	Stale              bool   `json:"stale"`
+}
+
+// ResolutionViews returns the last valid decision for each adapter and marks
+// decisions stale against the center generation. Invalid entries are ignored.
+func ResolutionViews(entries []resolutions.Entry, centerGeneration int) map[string]ResolutionView {
+	views := make(map[string]ResolutionView)
+	for _, entry := range entries {
+		if !core.ValidAdapterID(entry.Adapter) || !resolutions.ValidChoice(entry.Choice) {
+			continue
+		}
+		views[entry.Adapter] = ResolutionView{
+			Choice: entry.Choice, RecordedAt: entry.RecordedAt,
+			GenerationAtRecord: entry.GenerationAtRecord,
+			Stale:              resolutions.Stale(entry, centerGeneration),
+		}
+	}
+	return views
+}
 
 // AdapterChoice is one row in the collect, dispatch, or resolve picker.
 type AdapterChoice struct {
@@ -39,6 +67,8 @@ type AdapterChoice struct {
 	Credentials []CredentialRule `json:"credentials,omitempty"`
 	// SecretHits are files the machine's scanner would refuse on collect.
 	SecretHits []SecretHit `json:"secretHits,omitempty"`
+	// Resolution is a recorded staged decision, when one applies to this row.
+	Resolution *ResolutionView `json:"resolution,omitempty"`
 }
 
 // BuildCollectChoices lists the adapters a machine can upload. Adapters
@@ -71,6 +101,12 @@ func BuildCollectChoices(adapters []commands.StatusAdapterReport) []AdapterChoic
 // Only center adapters appear. Ones the machine is waiting on start
 // checked, unless they conflict.
 func BuildDispatchChoices(centerIDs []string, machine []commands.StatusAdapterReport) []AdapterChoice {
+	return BuildDispatchChoicesWithResolutions(centerIDs, machine, nil)
+}
+
+// BuildDispatchChoicesWithResolutions builds the ordinary dispatch rows and
+// overlays recorded decisions on adapters that currently conflict.
+func BuildDispatchChoicesWithResolutions(centerIDs []string, machine []commands.StatusAdapterReport, views map[string]ResolutionView) []AdapterChoice {
 	onMachine := map[string]commands.StatusAdapterReport{}
 	for _, adapter := range machine {
 		if !core.ValidAdapterID(adapter.ID) {
@@ -111,6 +147,25 @@ func BuildDispatchChoices(centerIDs []string, machine []commands.StatusAdapterRe
 			choice.Enabled = false
 			choice.Checked = false
 			choice.Reason = reasonConflict
+			if view, ok := views[id]; ok && resolutions.ValidChoice(view.Choice) {
+				viewCopy := view
+				choice.Resolution = &viewCopy
+				if view.Stale {
+					choice.Reason = reasonStale
+				} else {
+					choice.Enabled = true
+					choice.Checked = true
+					choice.Reason = ""
+					decision := "以中心为准"
+					if view.Choice == resolutions.ChoiceLocal {
+						decision = "以这台机器为准"
+					}
+					if choice.Detail != "" {
+						choice.Detail += " · "
+					}
+					choice.Detail += "已记录：" + decision
+				}
+			}
 		} else if item.Pull > 0 {
 			choice.Checked = true
 		}
@@ -122,6 +177,13 @@ func BuildDispatchChoices(centerIDs []string, machine []commands.StatusAdapterRe
 // BuildResolveChoices lists adapters that currently conflict. They start
 // checked; the user can narrow the resolution to a subset.
 func BuildResolveChoices(adapters []commands.StatusAdapterReport) []AdapterChoice {
+	return BuildResolveChoicesWithResolutions(adapters, nil)
+}
+
+// BuildResolveChoicesWithResolutions lists currently conflicting rows and
+// attaches a prior decision as a UI hint without changing the old resolve
+// selection behavior.
+func BuildResolveChoicesWithResolutions(adapters []commands.StatusAdapterReport, views map[string]ResolutionView) []AdapterChoice {
 	out := make([]AdapterChoice, 0)
 	for _, choice := range BuildCollectChoices(adapters) {
 		if choice.Conflicts <= 0 {
@@ -130,6 +192,10 @@ func BuildResolveChoices(adapters []commands.StatusAdapterReport) []AdapterChoic
 		choice.Enabled = true
 		choice.Checked = true
 		choice.Reason = ""
+		if view, ok := views[choice.ID]; ok && resolutions.ValidChoice(view.Choice) {
+			viewCopy := view
+			choice.Resolution = &viewCopy
+		}
 		out = append(out, choice)
 	}
 	return out
@@ -442,6 +508,20 @@ type syncChoicesResponse struct {
 	Adapters  []AdapterChoice `json:"adapters"`
 }
 
+func statusResolutionViews(entries []commands.StatusResolution, centerGeneration int) map[string]ResolutionView {
+	if len(entries) == 0 {
+		return nil
+	}
+	converted := make([]resolutions.Entry, 0, len(entries))
+	for _, entry := range entries {
+		converted = append(converted, resolutions.Entry{
+			Adapter: entry.Adapter, Choice: entry.Choice, RecordedAt: entry.RecordedAt,
+			GenerationAtRecord: entry.GenerationAtRecord,
+		})
+	}
+	return ResolutionViews(converted, centerGeneration)
+}
+
 func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 	direction := r.URL.Query().Get("direction")
 	agentID := strings.TrimSpace(r.URL.Query().Get("agent"))
@@ -493,7 +573,8 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 		if !published {
 			hint = "中心还没有任何内容。先从一台机器收取。"
 		} else {
-			choices = BuildDispatchChoices(ids, report.Adapters)
+			views := statusResolutionViews(report.Resolutions, s.centerGeneration())
+			choices = BuildDispatchChoicesWithResolutions(ids, report.Adapters, views)
 			if _, adapters, outlineErr := s.readStorageOutline(); outlineErr == nil {
 				attachStorageOutline(choices, adapters)
 			}
@@ -508,7 +589,8 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 			}
 		}
 	default:
-		choices = BuildResolveChoices(report.Adapters)
+		views := statusResolutionViews(report.Resolutions, s.centerGeneration())
+		choices = BuildResolveChoicesWithResolutions(report.Adapters, views)
 		if len(choices) == 0 {
 			hint = "这台机器没有需要裁决的冲突。"
 		} else {
@@ -525,6 +607,7 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 				}
 			}
 		}
+		hint += "每个适配器各选一边：只记录决定，下发时再执行；或记录并立即执行。"
 	}
 	if choices == nil {
 		choices = []AdapterChoice{}
