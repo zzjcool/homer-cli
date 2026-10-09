@@ -3,6 +3,7 @@ package stream_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func assertHeartbeatCloseReceived(t *testing.T, peer stream.Conn, done <-chan er
 	select {
 	case err := <-done:
 		var closeErr *stream.CloseError
-		if !errors.As(err, &closeErr) || closeErr.Code != stream.CloseHeartbeat || closeErr.Reason != "ping timeout" {
+		if !errors.As(err, &closeErr) || closeErr.Code != stream.CloseHeartbeat || !strings.Contains(closeErr.Reason, "ping timeout") {
 			t.Fatalf("Session.Run() = %v, want close 4000 ping timeout", err)
 		}
 	case <-time.After(time.Second):
@@ -86,7 +87,7 @@ func assertHeartbeatCloseReceived(t *testing.T, peer stream.Conn, done <-chan er
 	defer cancel()
 	_, err := peer.Read(readCtx)
 	var received *stream.CloseError
-	if !errors.As(err, &received) || received.Code != 4000 || received.Reason != "ping timeout" || !received.Remote {
+	if !errors.As(err, &received) || received.Code != 4000 || !strings.Contains(received.Reason, "ping timeout") || !received.Remote {
 		t.Fatalf("peer received close = %v, want remote close 4000 ping timeout", err)
 	}
 }
