@@ -756,7 +756,7 @@ P5+P6a ─► P6b e2e/docker/UI ─► P7 hw 性能验收与部署演练(orchest
 | U32 | `/api/snapshot` ETag/If-None-Match/304/409 | 单测 | P4c | `go test -race ./internal/web -run TestSnapshotETag` |
 | U33 | NDJSON 流:事件顺序、客户端断开取消机器调用、错误行 | 单测 | P4c | `-run TestChoicesStream` |
 | U34 | 有界并发 fanout,结果顺序稳定 | 单测 | P4c | `-run TestFanoutBounded` |
-| U35 | CLI 参数:`--listen/--connect/--advertise` 报未知选项;`--hub/--data-url` 解析;`agent` 无参数=重启 | 单测 | P5 | `go test ./internal/cli -run 'TestAgentFlags|TestUsage'` |
+| U35 | CLI 参数:`--listen/--connect/--advertise` 报未知选项;`--hub/--data-url` 解析;`agent` 无参数=重启 | 单测 | P5 | `timeout 300 go test ./internal/cli -run 'TestAgentFlags|TestUsage'` |
 
 ### D2. 闸口矩阵(SOP 规则 3,每格一条表驱动用例)
 

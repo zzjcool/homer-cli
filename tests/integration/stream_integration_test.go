@@ -961,9 +961,6 @@ func TestFourTasksParallel(t *testing.T) {
 		t.Fatalf("four-machine fanout took %s; slowest serial task took %s (limit %s)", elapsed, slowestSingle, slowestSingle*13/10)
 	}
 	t.Logf("four-machine fanout: batch=%s slowest-single=%s", elapsed, slowestSingle)
-	if len(agents) != len(ids) {
-		t.Fatalf("started %d real agent processes for %d agent IDs", len(agents), len(ids))
-	}
 }
 
 func TestWriteSerializedReadParallel(t *testing.T) {

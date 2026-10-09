@@ -61,7 +61,7 @@ func TestServeRejectsForeignOptions(t *testing.T) {
 	}
 }
 
-func TestAgentCommandParsesHub(t *testing.T) {
+func TestAgentFlagsParsesHub(t *testing.T) {
 	options, err := parseOptions(CommandAgent, []string{
 		"--hub", "http://hub:7760",
 		"--data-url", "http://127.0.0.1:7760",
@@ -82,7 +82,7 @@ func TestAgentCommandParsesHub(t *testing.T) {
 
 // Removed agent transport flags receive migration guidance rather than a
 // generic unknown-option error, and still exit nonzero through the CLI.
-func TestAgentCommandRejectsRemovedModeFlags(t *testing.T) {
+func TestAgentFlagsRejectsRemovedModeFlags(t *testing.T) {
 	tests := []struct {
 		flag string
 		want string
@@ -115,7 +115,7 @@ func TestAgentCommandRejectsRemovedModeFlags(t *testing.T) {
 
 // Bare `homer agent` restarts from the persisted join state;
 // agentd.ResolveConfig errors when nothing was ever persisted.
-func TestAgentCommandBareRestartIsLegal(t *testing.T) {
+func TestAgentFlagsBareRestartIsLegal(t *testing.T) {
 	bare, err := parseOptions(CommandAgent, []string{"--token", "t"}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestAgentCommandBareRestartIsLegal(t *testing.T) {
 	}
 }
 
-func TestServeUsageText(t *testing.T) {
+func TestUsageServeAndAgent(t *testing.T) {
 	usage := commandUsage(CommandServe)
 	if !strings.Contains(usage, "--addr") || !strings.Contains(usage, "--token") {
 		t.Fatalf("serve usage = %q", usage)
