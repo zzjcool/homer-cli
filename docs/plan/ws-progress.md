@@ -78,3 +78,7 @@ P1 → P4a → P2 → P3 → P4c → P4b → P5 → P6;每合一个跑 gofmt/bui
   - 子 agent 扩展自身缺陷(wait/collect 无限挂起,agentGet/agentList 缺命令级超时)由用户在扩展仓库修
 - **批次 C 合并(2844faa,tag ws/fix-c-merged)**:Y1 本地 Close 先发 close 帧再取消 ctx(真 WS 对端收到 1008);Y2 每 Session 一个有界(64)有序事件分发(2000 条 hb 逆序 612→0,我用同款探针独立复验);Y3 reexec 等待上限 10s;Y4 写锁持有者可见(method+时长,排队超时报「前序仍在运行」);Y5 空 hub 409 时 inspect 走并行路径只扫一次(用 shell 脚本计数,非自引用);Y6 ETag 带内容 sha256 摘要(真实 store 125 文件/391KB 摘要耗时 1.7ms/次,可接受)。独立复验:internal 32 包 -race 全绿、SOP 三守门员、全量 e2e 100s、integration 61s 全绿,监控 pids 峰值 640。复验发现并修了一处批次 A 引入的测试漂移(TestOldAgentFlagsRejected 断言「未知选项」,A 已改为迁移提示)
 - 批次 B 由新 worker(worker-0,直接在原 worktree ws/fix-b-tests 上)接手,已完成第 1~4 项,余下进行中
+- **批次 B 合并(870870c,tag ws/fix-b-merged)**:worker-0 接手原 worktree 完成第 3~11 项。合并时 agentd.go 与批次 C 的构造器冲突(B 的 NewThrottledLoggerWithClock 钩子 vs C 的 writeTaskLogs),手工合并保留两者。补齐:写后失效(R5)、关闭码数值契约表、心跳线上码 4000、默认 25s/75s 且 <100s(守 P0 的 CF 124s)、welcome 下发心跳参数、Run 级退避指数/封顶/稳定重置/重试日志/节流窗口、CAS 竞态确定性测试、排队期间掉线、I14 重连 hello(日志 +1 且 PID 不变)、I16 Pull 长任务、修 I15 死断言、TestDispatcherCallConcurrencyLimit 去 sleep 同步(4 个 CPU 压力下 200 轮 0 失败)、U35 命令名。可测性钩子(已审):NewThrottledLoggerWithClock、Daemon.now(),默认行为不变。
+  - 独立复验(合并后,串行):internal 32 包 -race 全绿、SOP 三守门员、全量 e2e 95s、integration 61s 全绿
+  - 进程监控:integration 期间 .test 进程出现 54 个的平台(≈20s,随后回落到 6),查实是 TestFiftyConcurrentTasks 设计内启 50 个真 agent helper(P6a 合并时就有,受 TestMain helperModeEnv 保护,非递归),无泄漏
+- 进度:P0~P6、I1、三路 review 与三批修复(A/B/C)全部合并并复验。剩余:P7 hw 实测与部署(不动生产的前提下做基准,生产部署须经用户确认);final 回归 review
