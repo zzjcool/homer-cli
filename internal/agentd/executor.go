@@ -16,6 +16,7 @@ import (
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/resolutions"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -71,7 +72,41 @@ func (e *localExecutor) Status(ctx context.Context) (commands.StatusReport, erro
 	if err := contextError(ctx); err != nil {
 		return commands.StatusReport{}, err
 	}
+	e.attachResolutions(&report)
 	return report, nil
+}
+
+// attachResolutions enriches status with this machine's pending decisions.
+// Resolution storage is advisory to status, so read failures only warn and
+// never make an otherwise successful scan fail.
+func (e *localExecutor) attachResolutions(report *commands.StatusReport) {
+	if e == nil || report == nil {
+		return
+	}
+	for _, message := range report.Errors {
+		if strings.Contains(message, "未找到 homer 配置") {
+			// The fresh-machine fallback has no initialized workspace to which
+			// staged decisions can safely be attributed.
+			return
+		}
+	}
+	file, err := resolutions.Load(homerPathsForHome(e.homerHome))
+	if err != nil {
+		report.Warnings = append(report.Warnings, "读取已记录决定失败: "+err.Error())
+		return
+	}
+	if len(file.Entries) == 0 {
+		return
+	}
+	report.Resolutions = make([]commands.StatusResolution, 0, len(file.Entries))
+	for _, entry := range file.Entries {
+		report.Resolutions = append(report.Resolutions, commands.StatusResolution{
+			Adapter:            entry.Adapter,
+			Choice:             entry.Choice,
+			RecordedAt:         entry.RecordedAt,
+			GenerationAtRecord: entry.GenerationAtRecord,
+		})
+	}
 }
 
 // missingConfig reports whether the error is the fresh-machine "no
@@ -189,6 +224,13 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []strin
 }
 
 func (e *localExecutor) Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error) {
+	return e.pull(ctx, confirm, adapters, preferRemote, nil)
+}
+
+// pull is the private extension point for applying center choices to only the
+// selected adapters. Pull retains its frozen Executor signature and delegates
+// with nil, which preserves PreferRemote's existing whole-selection behavior.
+func (e *localExecutor) pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool, preferRemoteAdapters []string) (commands.PullReport, error) {
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err
 	}
@@ -204,10 +246,11 @@ func (e *localExecutor) Pull(ctx context.Context, confirm bool, adapters []strin
 		deps.HubSnapshot = snapshot
 	}
 	report := commands.RunPull(commands.PullOptions{
-		HomerHome:    e.homerHome,
-		Yes:          confirm,
-		Adapters:     adapters,
-		PreferRemote: preferRemote,
+		HomerHome:            e.homerHome,
+		Yes:                  confirm,
+		Adapters:             adapters,
+		PreferRemote:         preferRemote,
+		PreferRemoteAdapters: preferRemoteAdapters,
 	}, deps)
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err

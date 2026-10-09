@@ -207,7 +207,7 @@ func (d *Daemon) hello(ctx context.Context, session *stream.Session) error {
 		Caps: []string{
 			string(hub.TaskKindStatus), string(hub.TaskKindDiff), string(hub.TaskKindPush),
 			string(hub.TaskKindPull), string(hub.TaskKindSSHKey), string(hub.TaskKindSecret),
-			string(hub.TaskKindUpgrade), string(hub.TaskKindToolUpgrade), hub.MethodInspect,
+			string(hub.TaskKindUpgrade), string(hub.TaskKindToolUpgrade), string(hub.TaskKindResolveRecord), hub.MethodInspect,
 		},
 		Drift: d.cachedDrift(),
 		Host:  d.cachedHost(),

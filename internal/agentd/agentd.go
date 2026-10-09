@@ -258,8 +258,24 @@ func (d *Daemon) driftSummary(ctx context.Context) *hub.AgentDrift {
 	return driftFromStatus(report)
 }
 
+func countEffectiveResolutions(report commands.StatusReport) int {
+	conflicted := make(map[string]bool)
+	for _, adapter := range report.Adapters {
+		if adapter.Conflicts > 0 {
+			conflicted[adapter.ID] = true
+		}
+	}
+	count := 0
+	for _, entry := range report.Resolutions {
+		if conflicted[entry.Adapter] {
+			count++
+		}
+	}
+	return count
+}
+
 func driftFromStatus(report commands.StatusReport) *hub.AgentDrift {
-	drift := &hub.AgentDrift{}
+	drift := &hub.AgentDrift{Resolutions: countEffectiveResolutions(report)}
 	for _, adapter := range report.Adapters {
 		drift.Push += adapter.Push
 		drift.Pull += adapter.Pull
