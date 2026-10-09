@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -289,6 +290,9 @@ func TestDispatcherCallConcurrencyLimit(t *testing.T) {
 	var maximum atomic.Int32
 	started := make(chan struct{}, calls)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	stopHandlers := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(stopHandlers)
 	agent.Handle(string(TaskKindStatus), func(ctx context.Context, _ *stream.Request) (any, error) {
 		current := active.Add(1)
 		for {
@@ -321,20 +325,23 @@ func TestDispatcherCallConcurrencyLimit(t *testing.T) {
 	}
 	outcomes := make(chan callOutcome, calls)
 	var wg sync.WaitGroup
-	for i := range ctxs {
-		i := i
+	launch := func(i int) {
+		index := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := dispatcher.AgentStatus(ctxs[i], "agent-a")
-			outcomes <- callOutcome{index: i, err: err}
+			_, err := dispatcher.AgentStatus(ctxs[index], "agent-a")
+			outcomes <- callOutcome{index: index, err: err}
 		}()
+	}
+	for i := 0; i < agentCallConcurrency; i++ {
+		launch(i)
 	}
 	for i := 0; i < agentCallConcurrency; i++ {
 		select {
 		case <-started:
 		case <-time.After(time.Second):
-			close(release)
+			stopHandlers()
 			wg.Wait()
 			var summary []string
 			for len(outcomes) > 0 {
@@ -344,18 +351,14 @@ func TestDispatcherCallConcurrencyLimit(t *testing.T) {
 			t.Fatalf("only %d handlers started; outcomes=%v calls=%+v hubErr=%v hubStats=%+v agentErr=%v agentStats=%+v", i, summary, agent.Calls(), agent.hub.Err(), agent.hub.Stats(), agent.session.Err(), agent.session.Stats())
 		}
 	}
-	select {
-	case <-started:
-		close(release)
-		wg.Wait()
-		for len(outcomes) > 0 {
-			<-outcomes
-		}
-		t.Fatalf("more than %d concurrent handlers started", agentCallConcurrency)
-	case <-time.After(30 * time.Millisecond):
+	launch(calls - 1)
+	waitForDispatcherQueue(t, dispatcher, "agent-a", 1)
+	if got := activeAgentCalls(dispatcher, "agent-a"); got != agentCallConcurrency {
+		stopHandlers()
+		t.Fatalf("active call tokens = %d, want %d", got, agentCallConcurrency)
 	}
 	cancels[calls-1]()
-	close(release)
+	stopHandlers()
 	wg.Wait()
 	errs := make([]error, calls)
 	for len(outcomes) > 0 {
@@ -373,6 +376,44 @@ func TestDispatcherCallConcurrencyLimit(t *testing.T) {
 			t.Errorf("call %d: %v", i, errs[i])
 		}
 	}
+}
+
+func waitForDispatcherQueue(t *testing.T, dispatcher *Dispatcher, agentID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		dispatcher.limitsMu.Lock()
+		limit := dispatcher.limits[agentID]
+		queued := 0
+		if limit != nil {
+			queued = limit.refs - len(limit.active)
+		}
+		dispatcher.limitsMu.Unlock()
+		if queued == want {
+			return
+		}
+		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("agent %q queued calls = %d, want %d", agentID, dispatcherQueue(dispatcher, agentID), want)
+}
+
+func dispatcherQueue(dispatcher *Dispatcher, agentID string) int {
+	dispatcher.limitsMu.Lock()
+	defer dispatcher.limitsMu.Unlock()
+	if limit := dispatcher.limits[agentID]; limit != nil {
+		return limit.refs - len(limit.active)
+	}
+	return 0
+}
+
+func activeAgentCalls(dispatcher *Dispatcher, agentID string) int {
+	dispatcher.limitsMu.Lock()
+	defer dispatcher.limitsMu.Unlock()
+	if limit := dispatcher.limits[agentID]; limit != nil {
+		return len(limit.active)
+	}
+	return 0
 }
 
 func TestDispatcherRemoveKicksAgent(t *testing.T) {
