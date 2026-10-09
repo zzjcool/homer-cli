@@ -1065,6 +1065,12 @@ function selectedAdapters() {
   });
   return picked;
 }
+// 下发，以及裁决里「以中心为准」，都是把中心的内容写到这台机器上，
+// 绑定了密钥的适配器必须连同密钥一起写并解开。「以这台机器为准」是把
+// 机器的内容传上来，不写机器，不走这条规则。
+function writesFromCenter() {
+  return app.scopeDirection === "dispatch" || app.scopeDirection === "resolve";
+}
 function secretsBoundTo(adapterId) {
   const paths = [];
   (app.scopeKeys || []).forEach(key => {
@@ -1081,17 +1087,19 @@ function keyringCanTravel() {
   const keyring = keyringChoice();
   if (keyring && !keyring.enabled) return false;
   // 下发只能送中心里已经有的密文。没收取过的密钥不在选项里。
-  if (app.scopeDirection === "dispatch") return !!keyring;
+  if (writesFromCenter()) return !!keyring;
   return true;
 }
 function adaptersWithSecrets(adapters) {
   const out = (adapters || []).slice();
-  if (app.scopeDirection === "resolve" || out.indexOf("keyring") >= 0) return out;
+  if (out.indexOf("keyring") >= 0) return out;
   if (!keyringCanTravel()) return out;
   if (out.some(id => secretsBoundTo(id).length)) out.push("keyring");
   return out;
 }
 function alignKeyring(box) {
+  // 裁决里不自动勾「密钥」：「以这台机器为准」读的是同一份勾选，
+  // 自动勾上会把密钥一起传上去。「以中心为准」确认时由 adaptersWithSecrets 补上。
   if (!box || app.scopeDirection === "resolve") return;
   const keyring = box.querySelector('input[data-adapter="keyring"]');
   if (!keyring || keyring.disabled) return;
@@ -1106,7 +1114,7 @@ function alignKeyring(box) {
 // 只写普通文件、把登录凭证留在原地，机器看起来同步了却登录不上，
 // 而且没有任何一处会提示原因。
 function blockedByKeys() {
-  if (app.scopeDirection !== "dispatch") return [];
+  if (!writesFromCenter()) return [];
   if (keyringCanTravel()) return [];
   return selectedAdapters().filter(id => id !== "keyring" && secretsBoundTo(id).length);
 }
@@ -1114,7 +1122,7 @@ function selectionToken() {
   return selectedAdapters().slice().sort().join("\n");
 }
 function dispatchKeysForSelection() {
-  if (app.scopeDirection !== "dispatch" || !keyringCanTravel()) return [];
+  if (!writesFromCenter() || !keyringCanTravel()) return [];
   const keyring = keyringChoice();
   if (keyring && !keyring.enabled) return [];
   const selected = {};
@@ -1129,7 +1137,7 @@ function dispatchKeysForSelection() {
 function syncDispatchUnlocks() {
   const host = $("dispatch-unlocks");
   if (!host) return;
-  const token = app.scopeDirection === "dispatch" ? selectionToken() : "";
+  const token = writesFromCenter() ? selectionToken() : "";
   if (host.dataset.selection === token) return;
   const previous = {};
   host.querySelectorAll("input[data-key]").forEach(input => { previous[input.dataset.key] = input.value; });
@@ -1199,8 +1207,24 @@ function updateScopeConfirm() {
     return;
   }
   if (app.scopeStep === "unlock") {
-    ok.textContent = "确认下发";
+    ok.textContent = app.scopeDirection === "resolve" ? "确认以中心为准" : "确认下发";
     ok.disabled = readDispatchUnlocks().some(row => [...row.password].length < 8);
+    return;
+  }
+  if (app.scopeDirection === "resolve") {
+    // 「以中心为准」会把中心的内容写到这台机器上，绑定了密钥就要口令；
+    // 「以这台机器为准」只是把机器的内容传上来，不受密钥影响。
+    const base = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
+    const blocked = blockedByKeys();
+    $("btn-confirm-alt").disabled = base;
+    ok.textContent = keys.length ? "下一步" : "以中心为准";
+    ok.disabled = base || blocked.length > 0;
+    const err = $("confirm-err");
+    if (err) {
+      err.textContent = blocked.length
+        ? adapterTitle(blocked[0]) + " 绑定了密钥，但密钥这次带不上，所以不能以中心为准。可以改选「以这台机器为准」，或先在加密的那台机器上收取密钥。"
+        : "";
+    }
     return;
   }
   ok.disabled = app.scopeLoading || app.scopeStreamFailed || selectedAdapters().length === 0;
@@ -1273,7 +1297,8 @@ function renderScopeChoices(data) {
   const autoDiffBudget = { left: 3 };
   list.forEach(item => {
     // 密钥不是单独一项。勾了它绑定的适配器，确认时会带上。
-    if (item.id === "keyring" && app.scopeDirection !== "resolve") return;
+    // 裁决里的 keyring 只是告诉前端「中心有密钥可送」，不让用户单独勾选。
+    if (item.id === "keyring") return;
     const block = el("div", "choice-block");
     const label = el("label", "choice-item" + (item.enabled ? "" : " disabled"));
     const input = document.createElement("input");
@@ -1619,7 +1644,7 @@ function openScopeDialog(opts) {
     void loadCollectChoicesStream(opts);
     return;
   }
-  const keysRequest = opts.direction === "dispatch"
+  const keysRequest = (opts.direction === "dispatch" || opts.direction === "resolve")
     ? keyApi(null, { action: "list" })
     : keyApi(opts.agent, { action: "list" });
   Promise.all([
@@ -1745,8 +1770,17 @@ $("btn-confirm-ok").addEventListener("click", ev => {
   const unlocks = readDispatchUnlocks();
   if (!adapters.length) return;
   if (action.kind === "collect") action.knownHits = unresolvedSecretHits(adapters);
-  if (action.kind === "dispatch-one" && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
+  if ((action.kind === "dispatch-one" || (action.kind === "resolve-on" && action.choice === "center")) && dispatchKeysForSelection().length && app.scopeStep !== "unlock") {
     showScopeStep("unlock");
+    return;
+  }
+  if (action.kind === "resolve-on" && action.choice === "center" && app.scopeStep === "unlock") {
+    if (unlocks.some(row => [...row.password].length < 8)) return;
+    okBtn.disabled = true; okBtn.textContent = "处理中…";
+    $("dlg-confirm").returnValue = "confirm";
+    $("dlg-confirm").close("confirm");
+    app.pendingAction = null;
+    executeResolveOn("center", action.agentId, adapters, false, unlocks);
     return;
   }
   if (action.kind === "dispatch-one" && app.scopeStep === "unlock") {
@@ -2102,14 +2136,20 @@ async function executeSSHKey(agentId, name, githubUser) {
     showAlert("登录公钥没有写入", e.errors && e.errors.length ? e.errors : [e.message], null);
   } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
-async function executeResolveOn(choice, agentId, adapters, allowSecrets) {
+async function executeResolveOn(choice, agentId, adapters, allowSecrets, unlocks) {
   const okBtn = $("btn-confirm-ok");
   setBusy(choice === "local" ? "正在按这台机器的内容处理…" : "正在按中心内容更新…");
   const url = "/api/resolve?choice=" + choice + "&agent=" + encodeURIComponent(agentId) + "&confirm=true"
     + (allowSecrets ? "&allowSecrets=true" : "");
+  const body = { adapters: adapters };
+  if (unlocks && unlocks.length) body.unlocks = unlocks;
   try {
-    const d = await api(url, { method: "POST", body: { adapters: adapters } });
-    if (d.ok) {
+    const d = await api(url, { method: "POST", body: body });
+    if (d.ok && d.note) {
+      // 这台机器的裁决成功了，但没法自动发给其他机器（绑定了密钥）。
+      // 不当成错误，也不能只弹一个「成功」的提示让人以为别的机器也更新了。
+      showAlert("已保留该机器的内容并写入中心", [d.note], null);
+    } else if (d.ok) {
       clearAlert();
       toast(choice === "local" ? "已保留该机器的内容并写入中心" : "已按中心内容更新该机器");
     }

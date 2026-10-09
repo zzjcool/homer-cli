@@ -289,3 +289,111 @@ func TestFanoutDispatchStillWorksForAdapterWithoutBoundKey(t *testing.T) {
 		t.Fatalf("fanout herdr = %d pulls=%d body=%s", ok.Code, len(stub.pullValues), ok.Body)
 	}
 }
+
+// "Center wins" on a conflicted machine is a dispatch of the center's content,
+// so it follows the same rule as a plain dispatch: the bound key travels with
+// it and must open first. A refusal that offers no way forward would strand
+// the user on a conflict they cannot resolve, so the password step has to work
+// here too.
+func TestResolveCenterWithBoundKeyNeedsPasswordThenSucceeds(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	resolve := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=center&agent=box&confirm=true", body)
+	}
+
+	// Keyring carried but no password: refused, nothing written.
+	missing := resolve(`{"adapters":["pi","keyring"]}`)
+	if missing.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+		t.Fatalf("no password = %d pulls=%d body=%s", missing.Code, len(stub.pullValues), missing.Body)
+	}
+	if !strings.Contains(missing.Body.String(), "口令") || strings.Contains(missing.Body.String(), "long-password") {
+		t.Fatalf("missing-password body = %s", missing.Body)
+	}
+	// Wrong password: refused before anything is written, password not echoed.
+	wrong := resolve(`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"wrong-password"}]}`)
+	if wrong.Code != http.StatusUnprocessableEntity || len(stub.pullValues) != 0 {
+		t.Fatalf("wrong password = %d pulls=%d body=%s", wrong.Code, len(stub.pullValues), wrong.Body)
+	}
+	if strings.Contains(wrong.Body.String(), "wrong-password") {
+		t.Fatal("response echoed the password")
+	}
+	// Right password: written, then the key is opened on the machine.
+	ok := resolve(`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if ok.Code != http.StatusOK || len(stub.pullValues) != 1 {
+		t.Fatalf("right password = %d pulls=%d body=%s", ok.Code, len(stub.pullValues), ok.Body)
+	}
+	if stub.cmd.Action != "unlock" || stub.cmd.ID != "pi" || stub.cmd.Password != "long-password" {
+		t.Fatalf("key was not opened on the machine: %+v", stub.cmd)
+	}
+	if strings.Contains(ok.Body.String(), "long-password") {
+		t.Fatal("success response echoed the password")
+	}
+}
+
+// If the content lands but the key cannot be opened on the machine, say so
+// instead of reporting a clean resolution.
+func TestResolveCenterReportsUnlockFailureAfterWrite(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	stub.raw = []byte(`{"ok":false,"status":"error","errors":["解密失败"]}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=center&agent=box&confirm=true",
+		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if resp.Code != http.StatusUnprocessableEntity || !strings.Contains(resp.Body.String(), "unlock-failed") {
+		t.Fatalf("unlock failure after write = %d body=%s", resp.Code, resp.Body)
+	}
+}
+
+// Resolving in favour of the machine uploads its content; it does not write the
+// machine from the center, so a bound key is not a reason to refuse it.
+func TestResolveLocalIsNotBlockedByBoundKey(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=local&agent=box&confirm=true", `{"adapters":["pi"]}`)
+	if resp.Code == http.StatusUnprocessableEntity && strings.Contains(resp.Body.String(), "unlock-required") {
+		t.Fatalf("choice=local must not be gated by a bound key: %d %s", resp.Code, resp.Body)
+	}
+}
+
+// Resolving in favour of the machine publishes its content and then writes it
+// to every other online machine. That fan-out is a dispatch too: an adapter
+// with a bound key must not be written to the others without its key.
+func TestResolveLocalFanoutDoesNotStrandBoundKeyOnOtherMachines(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}, {AgentID: "other", Hostname: "other"}}
+	// The machine's own resolution must succeed, otherwise the fan-out is never
+	// reached and this test would pass for the wrong reason.
+	stub.pushRaw = []byte(`{"ok":true,"status":"pushed"}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=local&agent=box&confirm=true", `{"adapters":["pi"]}`)
+	if len(stub.pushValues) != 1 {
+		t.Fatalf("the machine's own resolution did not run (pushes=%d): %s", len(stub.pushValues), resp.Body)
+	}
+	for _, agent := range stub.pulledAgent {
+		if agent == "other" {
+			t.Fatalf("pi was written to another machine without its bound key (status %d): %s", resp.Code, resp.Body)
+		}
+	}
+	if resp.Code == http.StatusOK && strings.Contains(resp.Body.String(), `"other"`) {
+		t.Fatalf("the fan-out reported writing another machine: %s", resp.Body)
+	}
+	// The machine's own resolution worked, so this is not a failure, but the
+	// operator must be told why the other machines were left alone.
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"ok":true`) {
+		t.Fatalf("the machine's own resolution should still succeed: %d %s", resp.Code, resp.Body)
+	}
+	if !strings.Contains(resp.Body.String(), `"note"`) || !strings.Contains(resp.Body.String(), "密钥") {
+		t.Fatalf("response should explain that other machines were not written: %s", resp.Body)
+	}
+}
+
+// With nothing bound, the fan-out still delivers to the other machines.
+func TestResolveLocalFanoutStillWorksWithoutBoundKey(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}, {AgentID: "other", Hostname: "other"}}
+	stub.pushRaw = []byte(`{"ok":true,"status":"pushed"}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=local&agent=box&confirm=true", `{"adapters":["herdr"]}`)
+	if resp.Code != http.StatusOK || len(stub.pulledAgent) != 2 {
+		t.Fatalf("herdr has no bound key; fan-out should reach both machines: %d pulled=%v body=%s", resp.Code, stub.pulledAgent, resp.Body)
+	}
+}

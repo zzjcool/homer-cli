@@ -512,7 +512,18 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 		if len(choices) == 0 {
 			hint = "这台机器没有需要裁决的冲突。"
 		} else {
-			hint = "选择要裁决的适配器。没勾选的这次不动。"
+			hint = "选择要裁决的适配器。没勾选的这次不动。绑定了密钥的适配器，「以中心为准」要先填口令。"
+			// 「以中心为准」把中心的内容写到这台机器上，绑定了密钥的适配器要连同
+			// 密钥一起写。裁决的选项只列有冲突的适配器，列表里不会出现密钥，
+			// 前端没法据此判断中心有没有密钥可送，所以在这里补一项。
+			if ids, published, err := s.centerAdapterIDs(); err == nil && published {
+				for _, id := range ids {
+					if id == "keyring" {
+						choices = append(choices, AdapterChoice{ID: "keyring", InCenter: true, OnMachine: true, Enabled: true})
+						break
+					}
+				}
+			}
 		}
 	}
 	if choices == nil {

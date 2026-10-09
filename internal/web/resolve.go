@@ -27,6 +27,9 @@ type resolveReport struct {
 	Choice string             `json:"choice"`
 	Agents []agentApplyResult `json:"agents"`
 	Errors []string           `json:"errors"`
+	// Note explains a deliberate non-action (for example why other machines
+	// were not written). It is informational and does not make ok false.
+	Note string `json:"note,omitempty"`
 }
 
 // handleResolve backs POST /api/resolve?choice=local|center&confirm=true.
@@ -177,9 +180,23 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 		scope.Overwrite = false
 	}
 	// "Center wins" writes the center's content onto this machine, so it is a
-	// dispatch like any other and must not leave a bound key behind.
-	if choice == resolveCenter && s.refuseBoundKeyGap(w, scope) {
-		return
+	// dispatch like any other: a bound key must travel with it and be opened
+	// first, or nothing is written. The password step is the same one a plain
+	// dispatch uses.
+	if choice == resolveCenter {
+		if s.refuseBoundKeyGap(w, scope) {
+			return
+		}
+		if messages := s.dispatchUnlockErrors(scope); len(messages) > 0 {
+			code := "unlock-required"
+			status := http.StatusUnprocessableEntity
+			if len(messages) == 1 && messages[0] == "这台 hub 不能在机器上解开密钥" {
+				code = "agents-disabled"
+				status = http.StatusNotImplemented
+			}
+			writeError(w, status, code, "下发带了密钥，要先解开。", messages)
+			return
+		}
 	}
 	var raw json.RawMessage
 	var err error
@@ -191,6 +208,12 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	if err != nil {
 		writeErrorValue(w, err)
 		return
+	}
+	if choice == resolveCenter && remoteReportOK(raw) {
+		if messages := s.unlockDispatched(r.Context(), agentID, scope); len(messages) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", "内容已经写上，但密钥没有解开。", messages)
+			return
+		}
 	}
 	result := agentApplyResult{AgentID: agentID, Hostname: name, OK: true}
 	var payload struct {
@@ -223,12 +246,20 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 		result.Error = name + "没有应用这次裁决。"
 	}
 	agents := []agentApplyResult{result}
+	fanoutNote := ""
 	if result.OK && choice == resolveLocal {
-		// The machine published a new generation — deliver it to everyone
-		// else who is online.
-		for _, applied := range fanoutPullOnlineAgents(r.Context(), s.opts.Agents, scope) {
-			if applied.AgentID != agentID {
-				agents = append(agents, applied)
+		// The machine's content is already in the center. Delivering it to the
+		// other online machines is a dispatch, and an adapter with a key bound
+		// to it cannot be delivered whole by a fan-out (there is no password
+		// step per machine). Keep the upload, skip the fan-out for that scope,
+		// and say so, rather than writing the adapter without its key.
+		if gaps := boundKeyGaps(s.opts.HomerHome, scope); len(gaps) > 0 {
+			fanoutNote = strings.Join(gaps, "、") + " 绑定了密钥，没法连同密钥自动发给其他机器，所以只写到了中心，没有下发给其他机器。需要时到那台机器上单独「下发」并填口令。"
+		} else {
+			for _, applied := range fanoutPullOnlineAgents(r.Context(), s.opts.Agents, scope) {
+				if applied.AgentID != agentID {
+					agents = append(agents, applied)
+				}
 			}
 		}
 	}
@@ -238,11 +269,17 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 		status = "partial"
 		errorsOut = append(errorsOut, result.Error)
 	}
+	if fanoutNote != "" {
+		// The machine's resolution itself worked; the note only explains why
+		// the other machines were not written. It is not an error.
+		status = "resolved-not-fanned-out"
+	}
 	writeJSON(w, reportHTTPStatus(result.OK, status, errorsOut), resolveReport{
 		OK:     result.OK,
 		Status: status,
 		Choice: string(choice),
 		Agents: agents,
 		Errors: errorsOut,
+		Note:   fanoutNote,
 	})
 }
