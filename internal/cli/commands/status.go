@@ -64,6 +64,19 @@ type StatusReport struct {
 	Errors   []string              `json:"errors"`
 	Warnings []string              `json:"warnings,omitempty"`
 	Disabled []string              `json:"disabled,omitempty"`
+	// Resolutions carries this machine's recorded conflict decisions so the
+	// hub can render choice state without a second round trip
+	// (staged-resolution plan S2b; attached by agentd, not RunStatus).
+	Resolutions []StatusResolution `json:"resolutions,omitempty"`
+}
+
+// StatusResolution is one recorded decision in a status report. The shape is
+// deliberately structural (commands must not import internal/resolutions).
+type StatusResolution struct {
+	Adapter            string `json:"adapter"`
+	Choice             string `json:"choice"`
+	RecordedAt         string `json:"recordedAt"`
+	GenerationAtRecord int    `json:"generationAtRecord"`
 }
 
 // SnapshotSourceError keeps scan diagnostics structured until the report

@@ -26,6 +26,15 @@ type SyncScope struct {
 	// Unlocks are passwords for keys that ride with this dispatch.
 	// They stay on the hub request and are not copied into an agent task.
 	Unlocks []KeyUnlock
+	// ApplyResolutions lets an explicit-adapter pull consume the recorded
+	// decisions for those adapters (staged-resolution plan, D3). Hub-internal
+	// only; readSyncScope never parses these from a request body.
+	ApplyResolutions bool
+	// ClearResolutions asks a successful push/pull to clear the recorded
+	// decisions for its adapters (record-and-execute-now fallback).
+	ClearResolutions bool
+	// CenterGeneration is the hub generation the task was built with.
+	CenterGeneration int
 }
 
 // KeyUnlock is one key the operator can open. The password is an input

@@ -27,6 +27,10 @@ type PullOptions struct {
 	// PreferRemote rewrites conflicts into the center's content. Used
 	// when the user chose "以中心为准" for a specific adapter.
 	PreferRemote bool
+	// PreferRemoteAdapters restricts the rewrite to these adapters only
+	// (staged-resolution plan S2a). PreferRemote=true takes precedence and
+	// rewrites every adapter's conflicts; an empty list rewrites nothing.
+	PreferRemoteAdapters []string
 }
 
 // PullDeps contains pull-specific injection points. Shared git behavior stays
@@ -71,12 +75,27 @@ type PullReport struct {
 	Status    PullStatus                 `json:"status"`
 	Applied   syncx.ApplyResult          `json:"applied"`
 	Conflicts []syncx.PullConflictAction `json:"conflicts"`
-	Manifest  *ManifestApplyReport       `json:"manifest,omitempty"`
-	Commit    string                     `json:"commit,omitempty"`
-	Warnings  []string                   `json:"warnings"`
-	Errors    []string                   `json:"errors"`
+	// Resolutions reports how recorded decisions were consumed during this
+	// pull (staged-resolution plan). Omitted when empty.
+	Resolutions []ResolutionOutcome  `json:"resolutions,omitempty"`
+	Manifest    *ManifestApplyReport `json:"manifest,omitempty"`
+	Commit      string               `json:"commit,omitempty"`
+	Warnings    []string             `json:"warnings"`
+	Errors      []string             `json:"errors"`
 }
 
+// ResolutionOutcome is one consumed decision in a pull report. It mirrors
+// the wire shape an agent already returns for consumption; commands cannot
+// import internal/resolutions (it would drag core into web-free zones), so
+// the shape is repeated here.
+type ResolutionOutcome struct {
+	Adapter string `json:"adapter"`
+	Choice  string `json:"choice"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+// newPullCommandReport builds a report with non-nil slices for every status.
 func newPullCommandReport(status PullStatus) PullReport {
 	return PullReport{
 		OK:        status == PullStatusApplied || status == PullStatusNoDrift,
@@ -86,6 +105,12 @@ func newPullCommandReport(status PullStatus) PullReport {
 		Warnings:  []string{},
 		Errors:    []string{},
 	}
+}
+
+// NewPullReport is the exported spelling (agentd tests); resolutions start
+// empty by design.
+func NewPullReport(status PullStatus) PullReport {
+	return newPullCommandReport(status)
 }
 
 func emptyManifestApplyReport() *ManifestApplyReport {

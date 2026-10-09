@@ -91,7 +91,9 @@ func TestInspectEquivalence(t *testing.T) {
 			}}}},
 			files:      map[string]map[string]string{"pi": {"settings.json": "local\n"}},
 			wantIDs:    []string{"opencode", "pi"},
-			wantErrors: []string{"adapter root 不可读: opencode ("},
+			// Root-missing degraded to a waiting-for-dispatch warning (S/P0):
+			// a fresh machine is a legal state, not an error.
+			wantWarn: []string{"等待首次下发"},
 		},
 		{
 			name: "filtered-adapter-still-merges-full-status-before-selection",
@@ -142,7 +144,7 @@ func TestInspectEquivalence(t *testing.T) {
 				}
 			}
 			for _, text := range test.wantWarn {
-				if !containsString(result.Warnings, text) {
+				if !containsSubstring(result.Warnings, text) {
 					t.Errorf("status warnings %q do not contain %q", result.Warnings, text)
 				}
 			}

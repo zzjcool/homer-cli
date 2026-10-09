@@ -35,6 +35,9 @@ type AgentDrift struct {
 	Pull      int    `json:"pull"`
 	Conflicts int    `json:"conflicts"`
 	Error     string `json:"error,omitempty"`
+	// Resolutions counts adapters whose conflict currently has a recorded
+	// decision (staged-resolution plan, D8). 0 is omitted.
+	Resolutions int `json:"resolutions,omitempty"`
 }
 
 type Registry struct {

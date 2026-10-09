@@ -15,6 +15,11 @@ const (
 	TaskKindSSHKey  TaskKind = "ssh-key"
 	TaskKindSecret  TaskKind = "secret"
 	TaskKindUpgrade TaskKind = "upgrade"
+	// TaskKindResolveRecord stages or unstages a conflict decision on the
+	// machine (staged-resolution plan): record a choice, clear it, or list
+	// pending decisions. It never touches any file; a later dispatch
+	// consumes the recorded entries.
+	TaskKindResolveRecord TaskKind = "resolve-record"
 	// TaskKindToolUpgrade upgrades one program an adapter drives (pi, herdr,
 	// opencode...). Options.Tool names it; the agent maps the name to a
 	// command it already knows.
@@ -45,6 +50,21 @@ type TaskOptions struct {
 	// Tool is the adapter.Tool ID a tool-upgrade task acts on. It is a name,
 	// never a command: an unknown name is refused by the agent.
 	Tool string `json:"tool,omitempty"`
+	// Resolution fields (staged-resolution plan). ResolutionAction /
+	// ResolutionChoice drive TaskKindResolveRecord; the existing Resolve
+	// field is NOT reused because runTaskCommand dispatches Resolve=local|center
+	// regardless of method.
+	ResolutionAction string `json:"resolutionAction,omitempty"` // record|clear|list
+	ResolutionChoice string `json:"resolutionChoice,omitempty"` // center|local
+	// CenterGeneration is the hub's generation when the task was built;
+	// 0 means unknown (never written today).
+	CenterGeneration int `json:"centerGeneration,omitempty"`
+	// ApplyResolutions lets a pull consume the recorded decisions for its
+	// explicitly selected adapters (D3).
+	ApplyResolutions bool `json:"applyResolutions,omitempty"`
+	// ClearResolutions asks a successful push/pull to clear the recorded
+	// decisions for its adapters (the record-and-execute-now fallback).
+	ClearResolutions bool `json:"clearResolutions,omitempty"`
 }
 
 const (

@@ -9,17 +9,18 @@ import (
 // Stream methods shared by the hub and agents. Method names are the wire
 // representation of TaskKind where a task kind already exists.
 const (
-	MethodHello       = "hello"
-	MethodHeartbeat   = "hb"
-	MethodInspect     = "collect.inspect"
-	MethodStatus      = string(TaskKindStatus)
-	MethodDiff        = string(TaskKindDiff)
-	MethodPush        = string(TaskKindPush)
-	MethodPull        = string(TaskKindPull)
-	MethodSSHKey      = string(TaskKindSSHKey)
-	MethodSecret      = string(TaskKindSecret)
-	MethodUpgrade     = string(TaskKindUpgrade)
-	MethodToolUpgrade = string(TaskKindToolUpgrade)
+	MethodHello         = "hello"
+	MethodHeartbeat     = "hb"
+	MethodInspect       = "collect.inspect"
+	MethodStatus        = string(TaskKindStatus)
+	MethodDiff          = string(TaskKindDiff)
+	MethodPush          = string(TaskKindPush)
+	MethodPull          = string(TaskKindPull)
+	MethodSSHKey        = string(TaskKindSSHKey)
+	MethodSecret        = string(TaskKindSecret)
+	MethodUpgrade       = string(TaskKindUpgrade)
+	MethodToolUpgrade   = string(TaskKindToolUpgrade)
+	MethodResolveRecord = string(TaskKindResolveRecord)
 )
 
 // HelloParams is the agent's first stream request.

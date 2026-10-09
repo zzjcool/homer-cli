@@ -53,6 +53,9 @@ type AgentDrift struct {
 	Pull      int    `json:"pull"`
 	Conflicts int    `json:"conflicts"`
 	Error     string `json:"error,omitempty"`
+	// Resolutions counts adapters whose conflict currently has a recorded
+	// decision (staged-resolution plan, D8). 0 is omitted.
+	Resolutions int `json:"resolutions,omitempty"`
 }
 
 // HostSnapshot is the resource report an agent uploads. Field names match
@@ -143,6 +146,25 @@ type AgentsSource interface {
 	// RemoveAgent drops a machine from the list entirely (optional:
 	// embedded sources without removal keep 501 semantics).
 	RemoveAgent(agentID string) bool
+}
+
+// ResolutionSource is the optional staged-resolution capability a hub's
+// agent source can expose (staged-resolution plan S3a). AgentsSource is
+// deliberately unchanged: type assertions discover the capability, the
+// same way InspectSource does.
+type ResolutionSource interface {
+	AgentResolveRecord(ctx context.Context, agentID string, req ResolveRecordRequest) (json.RawMessage, error)
+}
+
+// ResolveRecordRequest is one record/clear/list call to a machine.
+type ResolveRecordRequest struct {
+	// Action: resolutions record|clear|list constants live in
+	// internal/resolutions; they are repeated as strings here so web does
+	// not depend on that package (S0 keeps web dependency-free).
+	Action           string   `json:"action"`
+	Choice           string   `json:"choice,omitempty"`           // record only
+	Adapters         []string `json:"adapters,omitempty"`         // record/clear only
+	CenterGeneration int      `json:"centerGeneration,omitempty"` // record only
 }
 
 type ServeOptions struct {

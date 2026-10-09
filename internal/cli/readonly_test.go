@@ -269,8 +269,9 @@ func TestStatusCollectorMAMessageAndDirtyStoreWarning(t *testing.T) {
 	}
 
 	// The configured adapter root is intentionally absent.  The collector must
-	// retain base for local comparison and surface the M-A error instead of
-	// reporting a bogus push-delete.
+	// retain base for local comparison and keep the M-A guard instead of
+	// reporting a bogus push-delete. Root-missing is a fresh machine waiting
+	// for dispatch, so it renders as a warning, never an error.
 	sources, err := commands.CollectSnapshotSources(paths, &config)
 	if err != nil {
 		t.Fatal(err)
@@ -278,12 +279,18 @@ func TestStatusCollectorMAMessageAndDirtyStoreWarning(t *testing.T) {
 	if len(sources.ScanErrors) != 1 || !sources.ScanErrors[0].RootUnreadable {
 		t.Fatalf("scan errors = %#v", sources.ScanErrors)
 	}
+	if !sources.ScanErrors[0].Errors[0].RootMissing {
+		t.Fatalf("scan error should be classified RootMissing: %#v", sources.ScanErrors[0])
+	}
 	report, err := commands.RunStatus(commands.StatusOptions{HomerHome: home}, sources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Errors) == 0 || report.Adapters[0].Push != 0 {
-		t.Fatalf("M-A report = %#v", report)
+	if report.Adapters[0].Push != 0 {
+		t.Fatalf("M-A report must not turn the missing root into push-delete: %#v", report)
+	}
+	if len(report.Errors) != 0 || len(report.Warnings) == 0 {
+		t.Fatalf("root-missing must be a warning, not an error: %#v", report)
 	}
 
 	storeFile := filepath.Join(home, "store", "pi", "settings", "settings.json")
