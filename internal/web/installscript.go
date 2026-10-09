@@ -49,6 +49,18 @@ chmod 700 "$HOMER_HOME/keys"
 # 1. 写入 token（agent 侧优先级: --token > HOMER_HUB_TOKEN > 此文件）
 printf '%s' "$TOKEN" > "$HOMER_HOME/keys/hub-token"
 chmod 600 "$HOMER_HOME/keys/hub-token"
+# 带一次性接入码(hr_)重跑脚本，意思就是「用这个码重新接入」。agent 重启时，
+# 只要 agent.json 里已有 secret，就会忽略 keys/hub-token 里的 hr_ 码（那个码
+# 通常已经兑换过）。换 hub 或重装时旧 secret 属于旧身份，不清掉的话新码永远
+# 用不上、agent 一直 401。所以这里把旧身份移到一边（保留备份，不直接删）。
+case "$TOKEN" in
+  hr_*)
+    if [ -f "$HOMER_HOME/agent.json" ]; then
+      mv "$HOMER_HOME/agent.json" "$HOMER_HOME/agent.json.before-reenroll" 2>/dev/null \
+        && echo ">> 检测到旧的 agent.json，已改名为 agent.json.before-reenroll，将用新接入码重新接入"
+    fi
+    ;;
+esac
 
 # 2. 安装二进制。hub 在慢速隧道后面时，一次连接往往传不完，
 #    所以优先下载 gzip（大约少一半），并用断点续传把多次连接拼起来。

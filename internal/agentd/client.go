@@ -276,7 +276,7 @@ func (d *Daemon) retryFor(err error, attempt int) retryPlan {
 	if errors.As(err, &dialErr) {
 		switch dialErr.Status {
 		case http.StatusUnauthorized:
-			return retryPlan{delay: 5 * time.Minute, key: "ws-unauthorized", line: "WebSocket 401：凭证无效/接入码已用:请到控制台重新生成接入码（5 分钟后重试）"}
+			return retryPlan{delay: 5 * time.Minute, key: "ws-unauthorized", line: "WebSocket 401：凭证无效/接入码已用:请到控制台重新生成接入码，并用 `homer agent --token <新码>` 重新接入（只改 keys/hub-token 不会生效，agent.json 里已有 secret 时它会被忽略）（5 分钟后重试）"}
 		case http.StatusGone:
 			return retryPlan{delay: 5 * time.Minute, key: "ws-protocol-removed", line: "WebSocket 410：" + removedProtocolMessage(dialErr.Body) + "（5 分钟后重试）"}
 		case http.StatusBadRequest:

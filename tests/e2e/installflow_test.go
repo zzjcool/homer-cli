@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,6 +81,12 @@ func TestInstallScriptEnrollFlow(t *testing.T) {
 		"GIT_CONFIG_GLOBAL=" + global,
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
+	// install.sh starts the agent with setsid/nohup before it returns, so a
+	// failure after that point (non-zero exit, unparsable PID line, timeout)
+	// would leave the agent running with no cleanup registered. Register a
+	// cleanup that finds it by the isolated HOMER_HOME on its command line
+	// instead of by the PID the script prints.
+	t.Cleanup(func() { killProcessesWithEnvHome(homerHome) })
 	started := time.Now()
 	out, err := install.CombinedOutput()
 	t.Logf("install.sh output (returned in %s):\n%s", time.Since(started).Round(time.Millisecond), out)
@@ -192,6 +199,33 @@ func waitAgentStale(t *testing.T, hubURL string, auth map[string]string, hubProc
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("agent %s never reached stale=%v", agentID, want)
+}
+
+// killProcessesWithEnvHome kills every process whose environment names this
+// exact HOMER_HOME. The home is a unique per-test temp directory, so this can
+// only match processes this test started. It reads /proc and sends SIGKILL to
+// PIDs only (no pattern-based kill), and does nothing where /proc is missing.
+func killProcessesWithEnvHome(homerHome string) {
+	if homerHome == "" {
+		return
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	want := []byte("HOMER_HOME=" + homerHome + "\x00")
+	self := os.Getpid()
+	for _, entry := range entries {
+		pid := 0
+		if _, scanErr := fmt.Sscanf(entry.Name(), "%d", &pid); scanErr != nil || pid <= 1 || pid == self {
+			continue
+		}
+		env, readErr := os.ReadFile("/proc/" + entry.Name() + "/environ")
+		if readErr != nil || !bytes.Contains(env, want) {
+			continue
+		}
+		stopBackgroundPID(pid)
+	}
 }
 
 var installPIDPattern = regexp.MustCompile(`(?m)PID:\s*([0-9]+)`)
