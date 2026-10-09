@@ -150,7 +150,7 @@ func (d *Daemon) runConnection(ctx context.Context) (time.Duration, error) {
 			return 0, session.Err()
 		}
 	}
-	connectedAt := time.Now()
+	connectedAt := d.now()
 	d.logf("已连接 hub %s", d.cfg.HubURL)
 	var disconnectErr error
 	select {
@@ -167,8 +167,18 @@ func (d *Daemon) runConnection(ctx context.Context) (time.Duration, error) {
 			disconnectErr = io.EOF
 		}
 	}
-	d.logf("与 hub %s 的连接已断开，持续 %s：%v", d.cfg.HubURL, time.Since(connectedAt).Round(time.Millisecond), disconnectErr)
-	return time.Since(connectedAt), disconnectErr
+	stableFor := d.now().Sub(connectedAt)
+	d.logf("与 hub %s 的连接已断开，持续 %s：%v", d.cfg.HubURL, stableFor.Round(time.Millisecond), disconnectErr)
+	return stableFor, disconnectErr
+}
+
+// now uses the configured stream clock when provided so reconnect stability
+// and backoff reset behavior can be exercised without wall-clock sleeps.
+func (d *Daemon) now() time.Time {
+	if d != nil && d.cfg.Stream.Clock != nil {
+		return d.cfg.Stream.Clock.Now()
+	}
+	return time.Now()
 }
 
 func streamURL(hubURL string) string {

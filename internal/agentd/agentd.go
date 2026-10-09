@@ -126,7 +126,7 @@ func New(cfg Config, exec Executor) *Daemon {
 		agentSecret:    strings.TrimSpace(cfg.AgentSecret),
 		enrollCode:     strings.TrimSpace(cfg.EnrollCode),
 		logger:         logger,
-		retries:        stream.NewThrottledLogger(logger, time.Minute),
+		retries:        stream.NewThrottledLoggerWithClock(logger, time.Minute, cfg.Stream.Clock),
 		readSem:        make(chan struct{}, 4),
 		writeGate:      newTaskGate(),
 		heartbeatWake:  make(chan struct{}, 1),
