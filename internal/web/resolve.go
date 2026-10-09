@@ -202,7 +202,12 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	// dispatch like any other: a bound key must travel with it and be opened
 	// first, or nothing is written. The password step is the same one a plain
 	// dispatch uses.
-	if choice == resolveCenter || recordImmediate {
+	// The key-gap gate guards writes FROM the center onto the machine
+	// ("center" writes the center's content, a dispatch in disguise).
+	// "local" publishes the machine's own content to the center and must
+	// never be blocked by (or drag along) the keyring — the UI deliberately
+	// excludes secrets from the local choice.
+	if choice == resolveCenter {
 		if s.refuseBoundKeyGap(w, scope) {
 			return
 		}

@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -287,6 +288,10 @@ func TestDispatchBlockedWhenBoundKeyCannotTravel(t *testing.T) {
 		chromedp.Click(`#btn-setup`, chromedp.ByQuery),
 		chromedp.WaitVisible(`//div[@id="agent-list"]//button[normalize-space()="下发"]`, chromedp.BySearch),
 		chromedp.Click(`//div[@id="agent-list"]//button[normalize-space()="下发"]`, chromedp.BySearch),
+		// Wait for the adapter choices to actually render (the dialog says
+		// 正在读取可选项… until the choices request resolves) so the very
+		// first setPicked below cannot race a missing checkbox.
+		chromedp.WaitVisible(`#confirm-choices input[data-adapter]`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#btn-confirm-ok`, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -341,9 +346,10 @@ func TestDispatchBlockedWhenBoundKeyCannotTravel(t *testing.T) {
 // bound to a key. It records what the resolve actually sent.
 type resolveUIStub struct {
 	dispatchUIStub
-	mu2      sync.Mutex
-	pullBody []web.SyncScope
-	pushBody []web.SyncScope
+	mu2         sync.Mutex
+	pullBody    []web.SyncScope
+	pushBody    []web.SyncScope
+	recordCalls []web.ResolveRecordRequest
 }
 
 // The console only shows 处理冲突 for a machine whose last heartbeat reported
@@ -373,6 +379,20 @@ func (s *resolveUIStub) AgentPush(_ context.Context, _ string, _ bool, scope web
 	s.pushBody = append(s.pushBody, scope)
 	s.mu2.Unlock()
 	return json.RawMessage(`{"ok":true,"status":"pushed"}`), nil
+}
+
+// AgentResolveRecord backs the staged-resolution record step. The stub
+// accepts every record and echoes the adapters back as recorded entries.
+func (s *resolveUIStub) AgentResolveRecord(_ context.Context, _ string, req web.ResolveRecordRequest) (json.RawMessage, error) {
+	s.mu2.Lock()
+	s.recordCalls = append(s.recordCalls, req)
+	s.mu2.Unlock()
+	recorded := make([]string, 0, len(req.Adapters))
+	for _, id := range req.Adapters {
+		recorded = append(recorded, fmt.Sprintf(`{"adapter":%q,"choice":%q,"recordedAt":"2026-10-09T00:00:00Z","generationAtRecord":%d}`, id, req.Choice, req.CenterGeneration))
+	}
+	body := `{"ok":true,"action":"record","entries":[],"recorded":[` + strings.Join(recorded, ",") + `],"pending":0,"errors":[]}`
+	return json.RawMessage(body), nil
 }
 
 // Resolving a conflict "in favour of the center" writes the center's content
@@ -451,8 +471,12 @@ func TestResolveCenterAsksForPasswordAndLocalDoesNot(t *testing.T) {
 		ctx, done := open(t, pageURL)
 		defer done()
 		err := chromedp.Run(ctx,
-			chromedp.WaitVisible(`//button[@id="btn-confirm-ok" and normalize-space()="下一步"]`, chromedp.BySearch),
-			chromedp.Click(`#btn-confirm-ok`, chromedp.ByQuery),
+			// New staged-resolution dialog: pick the per-adapter radio first…
+			chromedp.WaitVisible(`#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="center"]`, chromedp.ByQuery),
+			chromedp.Click(`#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="center"]`, chromedp.ByQuery),
+			// …then 记录并立即执行 enters the password step (center + bound key).
+			chromedp.WaitVisible(`//button[@id="btn-confirm-alt" and normalize-space()="记录并立即执行"]`, chromedp.BySearch),
+			chromedp.Click(`#btn-confirm-alt`, chromedp.ByQuery),
 			chromedp.WaitVisible(`#dispatch-unlocks input`, chromedp.ByQuery),
 		)
 		if err != nil {
@@ -497,7 +521,11 @@ func TestResolveCenterAsksForPasswordAndLocalDoesNot(t *testing.T) {
 		ctx, done := open(t, pageURL)
 		defer done()
 		err := chromedp.Run(ctx,
-			chromedp.WaitVisible(`#btn-confirm-alt`, chromedp.ByQuery),
+			// Pick the local radio, then 记录并立即执行: the local group has no
+			// password step — the machine's content publishes straight away.
+			chromedp.WaitVisible(`#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="local"]`, chromedp.ByQuery),
+			chromedp.Click(`#confirm-choices input[type=radio][data-resolution-adapter="pi"][value="local"]`, chromedp.ByQuery),
+			chromedp.WaitVisible(`//button[@id="btn-confirm-alt" and normalize-space()="记录并立即执行"]`, chromedp.BySearch),
 			chromedp.Click(`#btn-confirm-alt`, chromedp.ByQuery),
 		)
 		if err != nil {
