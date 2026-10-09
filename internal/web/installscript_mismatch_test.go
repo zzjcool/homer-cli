@@ -13,13 +13,13 @@ import (
 	"time"
 )
 
-// TestInstallScriptMismatchedPlatformDoesNotCrash reproduces the production
-// incident: a darwin machine piping install.sh into macOS /bin/sh (bash 3.2
-// without a UTF-8 locale) died with "GOARCH_ACTUAL...: unbound variable" on
-// the platform-mismatch echo, because the bare variable reference was
-// followed by a fullwidth comma. The mismatch branch must instead complete:
-// cross-download the GitHub Release archive for the actual platform (stubbed
-// here with a local server) and leave a working homer behind.
+// TestInstallScriptMismatchedPlatformDoesNotCrash runs the platform-mismatch
+// branch end-to-end (a darwin/arm64 machine simulated via a PATH-shadowed
+// uname) against a stubbed GitHub Releases server. It cannot reproduce the
+// bash 3.2 parsing bug itself — that is guarded statically by
+// TestRenderedInstallScriptNoBareVarBeforeMultibyte — but it verifies the
+// branch completes, cross-downloads the release archive without ever
+// sending the hub token, and leaves an executable homer behind.
 func TestInstallScriptMismatchedPlatformDoesNotCrash(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root: install.sh would write a real /etc/systemd/system unit")
