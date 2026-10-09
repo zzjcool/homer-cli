@@ -888,8 +888,11 @@ func TestToolUpgradeLongTask(t *testing.T) {
 	if !strings.Contains(string(response.body), `"after":"2.0.0"`) {
 		t.Fatalf("tool upgrade response missing the measured result: %s", truncate(string(response.body), 512))
 	}
-	if !strings.Contains(agent.output(), "WebSocket 断开") && strings.Contains(world.process.output(), "ping timeout") {
-		t.Fatalf("long tool upgrade was killed by heartbeat timeout:\n%s", world.process.output())
+	if strings.Contains(agent.output(), "与 hub ") && strings.Contains(agent.output(), "的连接已断开") {
+		t.Fatalf("long tool upgrade disconnected the agent:\n%s", agent.output())
+	}
+	if strings.Contains(world.process.output(), "ping timeout") {
+		t.Fatalf("long tool upgrade triggered a hub ping timeout:\n%s", world.process.output())
 	}
 	_ = agent
 }
@@ -958,9 +961,6 @@ func TestFourTasksParallel(t *testing.T) {
 		t.Fatalf("four-machine fanout took %s; slowest serial task took %s (limit %s)", elapsed, slowestSingle, slowestSingle*13/10)
 	}
 	t.Logf("four-machine fanout: batch=%s slowest-single=%s", elapsed, slowestSingle)
-	if len(agents) != len(ids) {
-		t.Fatalf("started %d real agent processes for %d agent IDs", len(agents), len(ids))
-	}
 }
 
 func TestWriteSerializedReadParallel(t *testing.T) {

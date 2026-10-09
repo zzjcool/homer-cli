@@ -15,10 +15,19 @@ type ThrottledLogger struct {
 }
 
 func NewThrottledLogger(logger Logger, window time.Duration) *ThrottledLogger {
+	return NewThrottledLoggerWithClock(logger, window, nil)
+}
+
+// NewThrottledLoggerWithClock is NewThrottledLogger with an injectable clock.
+// A nil clock uses wall time, as the original constructor does.
+func NewThrottledLoggerWithClock(logger Logger, window time.Duration, clock Clock) *ThrottledLogger {
 	if window <= 0 {
 		window = time.Minute
 	}
-	return &ThrottledLogger{logger: logger, window: window, last: make(map[string]time.Time), clock: realClock{}}
+	if clock == nil {
+		clock = realClock{}
+	}
+	return &ThrottledLogger{logger: logger, window: window, last: make(map[string]time.Time), clock: clock}
 }
 
 // Log prints line if key has not been emitted in the current window. If logger
