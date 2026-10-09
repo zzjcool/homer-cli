@@ -73,7 +73,7 @@ func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, 
 		}
 	} else {
 		var err error
-		release, _, err = d.writeGate.acquireWithGrant(ctx, func() {
+		release, _, err = d.writeGate.acquireWithMethod(ctx, req.Method, func() {
 			req.Progress(map[string]string{"stage": "queued"})
 		}, d.beginWriteGen)
 		if err != nil {
@@ -81,6 +81,7 @@ func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, 
 		}
 	}
 
+	var onTimeout func()
 	if class == taskClassWrite {
 		onComplete = func() {
 			// The command layer may keep running after a canceled request. Keep
@@ -91,8 +92,14 @@ func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, 
 			d.signalHeartbeat()
 			release()
 		}
+		onTimeout = func() {
+			method, heldFor, stillHeld := d.writeGate.runningDuration(time.Now())
+			if stillHeld && method == req.Method {
+				d.logWriteTaskStillRunning(method, heldFor)
+			}
+		}
 	}
-	return d.runTask(ctx, req, options, onComplete)
+	return d.runTask(ctx, req, options, onComplete, onTimeout)
 }
 
 func taskLimit(configured time.Duration, method string, requestBudget time.Duration) time.Duration {
@@ -130,7 +137,7 @@ type taskOutcome struct {
 	err    error
 }
 
-func (d *Daemon) runTask(ctx context.Context, req *stream.Request, options hub.TaskOptions, onComplete func()) (any, error) {
+func (d *Daemon) runTask(ctx context.Context, req *stream.Request, options hub.TaskOptions, onComplete, onTimeout func()) (any, error) {
 	completed := make(chan taskOutcome, 1)
 	go func() {
 		outcome := taskOutcome{}
@@ -161,6 +168,15 @@ func (d *Daemon) runTask(ctx context.Context, req *stream.Request, options hub.T
 		// Most command execution is not context-aware. Return promptly and let
 		// its goroutine finish naturally; cancellation does not roll back a
 		// write that the command layer already started.
+		select {
+		case <-completed:
+			// The command finished concurrently with the timeout; it no longer
+			// holds the write gate in the background.
+		default:
+			if onTimeout != nil {
+				onTimeout()
+			}
+		}
 		return nil, taskContextError(ctx.Err())
 	}
 }

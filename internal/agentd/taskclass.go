@@ -40,14 +40,17 @@ func classifyTask(method string, options hub.TaskOptions) taskClass {
 type taskWaiter struct {
 	ready     chan struct{}
 	granted   bool
+	method    string
 	onGranted func()
 }
 
 // taskGate is a context-cancellable FIFO mutex for machine-mutating tasks.
 type taskGate struct {
-	mu      sync.Mutex
-	held    bool
-	waiters []*taskWaiter
+	mu         sync.Mutex
+	held       bool
+	heldMethod string
+	heldSince  time.Time
+	waiters    []*taskWaiter
 }
 
 func newTaskGate() *taskGate { return &taskGate{} }
@@ -57,6 +60,10 @@ func (g *taskGate) acquire(ctx context.Context, queued func()) (func(), bool, er
 }
 
 func (g *taskGate) acquireWithGrant(ctx context.Context, queued, onGranted func()) (func(), bool, error) {
+	return g.acquireWithMethod(ctx, "", queued, onGranted)
+}
+
+func (g *taskGate) acquireWithMethod(ctx context.Context, method string, queued, onGranted func()) (func(), bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -66,13 +73,15 @@ func (g *taskGate) acquireWithGrant(ctx context.Context, queued, onGranted func(
 	g.mu.Lock()
 	if !g.held && len(g.waiters) == 0 {
 		g.held = true
+		g.heldMethod = method
+		g.heldSince = time.Now()
 		if onGranted != nil {
 			onGranted()
 		}
 		g.mu.Unlock()
 		return g.releaseFunc(), false, nil
 	}
-	waiter := &taskWaiter{ready: make(chan struct{}), onGranted: onGranted}
+	waiter := &taskWaiter{ready: make(chan struct{}), method: method, onGranted: onGranted}
 	g.waiters = append(g.waiters, waiter)
 	g.mu.Unlock()
 	if queued != nil {
@@ -93,6 +102,7 @@ func (g *taskGate) acquireWithGrant(ctx context.Context, queued, onGranted func(
 			g.release()
 			return nil, true, ctx.Err()
 		}
+		detail := g.runningDescriptionLocked(time.Now())
 		for i, pending := range g.waiters {
 			if pending == waiter {
 				copy(g.waiters[i:], g.waiters[i+1:])
@@ -102,6 +112,9 @@ func (g *taskGate) acquireWithGrant(ctx context.Context, queued, onGranted func(
 			}
 		}
 		g.mu.Unlock()
+		if detail != "" {
+			return nil, true, fmt.Errorf("%w; %s", ctx.Err(), detail)
+		}
 		return nil, true, ctx.Err()
 	}
 }
@@ -123,6 +136,9 @@ func (g *taskGate) release() {
 			continue
 		}
 		waiter.granted = true
+		g.held = true
+		g.heldMethod = waiter.method
+		g.heldSince = time.Now()
 		if waiter.onGranted != nil {
 			waiter.onGranted()
 		}
@@ -130,6 +146,41 @@ func (g *taskGate) release() {
 		return
 	}
 	g.held = false
+	g.heldMethod = ""
+	g.heldSince = time.Time{}
+}
+
+func (g *taskGate) runningDescription(now time.Time) string {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.runningDescriptionLocked(now)
+}
+
+func (g *taskGate) runningDuration(now time.Time) (string, time.Duration, bool) {
+	if g == nil {
+		return "", 0, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.held || g.heldSince.IsZero() {
+		return "", 0, false
+	}
+	return g.heldMethod, max(now.Sub(g.heldSince), time.Duration(0)), true
+}
+
+func (g *taskGate) runningDescriptionLocked(now time.Time) string {
+	if !g.held || g.heldSince.IsZero() {
+		return ""
+	}
+	method := g.heldMethod
+	if method == "" {
+		method = "unknown"
+	}
+	elapsed := max(now.Sub(g.heldSince), time.Duration(0)).Round(time.Millisecond)
+	return fmt.Sprintf("前一个写任务仍在运行(method=%s, 已运行 %s)", method, elapsed)
 }
 
 func (g *taskGate) waiting() int {
