@@ -30,7 +30,7 @@ func TestConsoleUserCopy(t *testing.T) {
 		"有尚未同步的改动",
 		"全部对齐",
 		"收取", "下发", "确认收取", "确认下发", "/api/sync?",
-		"/api/sync/choices", "勾选要动的适配器", "body: { adapters: adapters }",
+		"/api/sync/choices", "勾选要动的适配器", "const body = { adapters: adapters }",
 		"全选", "反选", "全不选",
 		"密钥跟着这次一起",
 		"口令只在这一步使用",
