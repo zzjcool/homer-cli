@@ -94,6 +94,10 @@ func TestStateUninstallPersistsAndRejectsDuplicates(t *testing.T) {
 
 func TestStateValidatesCustomAdapterManifest(t *testing.T) {
 	state := New(t.TempDir())
+	officialCollision := customPlugin("pi")
+	if err := state.Install(officialCollision); !errors.Is(err, ErrInvalidPlugin) {
+		t.Fatalf("official ID collision error = %v, want ErrInvalidPlugin", err)
+	}
 	invalidID := customPlugin("Invalid_Id")
 	if err := state.Install(invalidID); !errors.Is(err, ErrInvalidID) {
 		t.Fatalf("invalid ID error = %v, want ErrInvalidID", err)

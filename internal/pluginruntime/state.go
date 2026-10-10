@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -99,6 +100,9 @@ func (s *State) Install(plugin pluginregistry.Plugin) error {
 
 	custom := true
 	if builtin, ok := pluginregistry.Builtin(plugin.ID); ok {
+		if !reflect.DeepEqual(plugin, builtin) {
+			return fmt.Errorf("%w: official plugin %q cannot be overridden", ErrInvalidPlugin, plugin.ID)
+		}
 		plugin = builtin
 		custom = false
 	} else {
