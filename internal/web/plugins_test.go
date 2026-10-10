@@ -392,6 +392,41 @@ func TestPluginUninstallRequiresForceAndProtectsAdapterStore(t *testing.T) {
 	}
 }
 
+// TestPluginUninstallSucceedsWhenGuardsPass covers the F8 gap: an adapter
+// with no center store data uninstalls under force, and an unbound keyring
+// uninstalls under force. Both must publish the uninstall through the state
+// (the previously untested success paths).
+func TestPluginUninstallSucceedsWhenGuardsPass(t *testing.T) {
+	home := pluginTestHome(t)
+	state := pluginruntime.New(home)
+	if err := state.Install(pluginByID(t, "pi")); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Install(pluginByID(t, "keyring")); err != nil {
+		t.Fatal(err)
+	}
+	// No generation store data for pi; no keyring bindings at all.
+	server := newPluginTestServer(t, home, state, nil)
+
+	uninstall := func(id string) *httptest.ResponseRecorder {
+		response := request(t, server.Handler(), http.MethodPost, "/api/plugins/uninstall",
+			`{"id":"`+id+`","force":true}`)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) {
+			t.Fatalf("uninstall %s = %d %s, want 200 ok", id, response.Code, response.Body)
+		}
+		if state.IsInstalled(id) {
+			t.Fatalf("%s still installed after success", id)
+		}
+		return response
+	}
+
+	piResponse := uninstall("pi")
+	if !strings.Contains(piResponse.Body.String(), `"id":"pi"`) {
+		t.Fatalf("uninstall response missing plugin payload: %s", piResponse.Body)
+	}
+	uninstall("keyring")
+}
+
 func TestKeyringUninstallIsGuardedByBindingsToInstalledAdapters(t *testing.T) {
 	home := pluginTestHome(t)
 	state := pluginruntime.New(home)
