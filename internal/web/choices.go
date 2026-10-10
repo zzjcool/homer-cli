@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/gens"
 	"github.com/zzjcool/homer-cli/internal/keyring"
 	"github.com/zzjcool/homer-cli/internal/resolutions"
 )
@@ -47,6 +49,17 @@ func ResolutionViews(entries []resolutions.Entry, centerGeneration int) map[stri
 	return views
 }
 
+// ConfigDrift summarizes differences between an adapter's machine and center
+// configuration declarations that matter to dispatch.
+type ConfigDrift struct {
+	NewCategories     []string `json:"newCategories,omitempty"`
+	ExtraCategories   []string `json:"extraCategories,omitempty"`
+	CategoryAdditions []string `json:"categoryAdditions,omitempty"`
+	RootChanged       bool     `json:"rootChanged,omitempty"`
+	MachineRoot       string   `json:"machineRoot,omitempty"`
+	CenterRoot        string   `json:"centerRoot,omitempty"`
+}
+
 // AdapterChoice is one row in the collect, dispatch, or resolve picker.
 type AdapterChoice struct {
 	ID        string `json:"id"`
@@ -69,6 +82,8 @@ type AdapterChoice struct {
 	SecretHits []SecretHit `json:"secretHits,omitempty"`
 	// Resolution is a recorded staged decision, when one applies to this row.
 	Resolution *ResolutionView `json:"resolution,omitempty"`
+	// ConfigDrift is the declaration mismatch that a dispatch can resolve.
+	ConfigDrift *ConfigDrift `json:"configDrift,omitempty"`
 }
 
 // BuildCollectChoices lists the adapters a machine can upload. Adapters
@@ -605,14 +620,20 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 	hint := ""
 	switch direction {
 	case "dispatch":
-		ids, published, err := s.centerAdapterIDs()
-		if err != nil {
-			return syncChoicesResponse{}, err
-		}
-		if !published {
+		head, published := gens.New(s.opts.HomerHome).Read()
+		if !published || head.Generation < 1 {
 			hint = "中心还没有任何内容。先从一台机器收取。"
 		} else {
-			views := statusResolutionViews(report.Resolutions, s.centerGeneration())
+			centerStore, err := readGenerationStore(head.StoreDir)
+			if err != nil {
+				return syncChoicesResponse{}, err
+			}
+			ids := make([]string, 0, len(centerStore))
+			for id := range centerStore {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			views := statusResolutionViews(report.Resolutions, head.Generation)
 			choices = BuildDispatchChoicesWithKeys(ids, report.Adapters, views, s.keyBoundAdapters())
 			if _, adapters, outlineErr := s.readStorageOutline(); outlineErr == nil {
 				attachStorageOutline(choices, adapters)
@@ -621,6 +642,9 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 			// Stamp the machine's status onto it so "↓2 待下发" names the
 			// two files instead of sitting only on the adapter row.
 			stampChoiceDrift(choices, report.Adapters)
+			// /api/snapshot serves homerJson from this exact generation's
+			// Meta bytes, so use them as the center config baseline too.
+			attachConfigDrift(choices, report.ConfigOutline, head.Meta, head.Generation)
 			if len(choices) == 0 {
 				hint = "中心还没有可下发的适配器。"
 			} else {
@@ -652,6 +676,97 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 		choices = []AdapterChoice{}
 	}
 	return syncChoicesResponse{OK: true, Direction: direction, AgentID: agentID, Hint: hint, Adapters: choices}, nil
+}
+
+func attachConfigDrift(choices []AdapterChoice, outline *[]commands.ConfigOutlineAdapter, centerMeta []byte, centerGeneration int) {
+	if len(choices) == 0 || outline == nil || centerGeneration < 1 {
+		return
+	}
+	centerConfig, _ := core.ValidateConfig(centerMeta)
+	if centerConfig == nil {
+		return
+	}
+
+	machineAdapters := make(map[string]commands.ConfigOutlineAdapter, len(*outline))
+	for _, machineAdapter := range *outline {
+		if !core.ValidAdapterID(machineAdapter.ID) {
+			continue
+		}
+		if _, exists := machineAdapters[machineAdapter.ID]; !exists {
+			machineAdapters[machineAdapter.ID] = machineAdapter
+		}
+	}
+	for i := range choices {
+		centerAdapter, centerHasAdapter := centerConfig.Adapters[choices[i].ID]
+		machineAdapter, machineHasAdapter := machineAdapters[choices[i].ID]
+		if !centerHasAdapter || !machineHasAdapter {
+			// New adapters are bootstrapped as a whole; they have no
+			// existing per-adapter declaration to align through a policy.
+			continue
+		}
+		if drift := compareConfigDefinitions(centerAdapter, machineAdapter); drift != nil {
+			choices[i].ConfigDrift = drift
+		}
+	}
+}
+
+func compareConfigDefinitions(center core.AdapterConfig, machine commands.ConfigOutlineAdapter) *ConfigDrift {
+	drift := &ConfigDrift{}
+	machineCategories := make(map[string]commands.ConfigOutlineCategory, len(machine.Categories))
+	for _, category := range machine.Categories {
+		if _, exists := machineCategories[category.Name]; !exists {
+			machineCategories[category.Name] = category
+		}
+	}
+
+	for name := range center.Categories {
+		if _, exists := machineCategories[name]; !exists {
+			drift.NewCategories = append(drift.NewCategories, name)
+		}
+	}
+	for name := range machineCategories {
+		if _, exists := center.Categories[name]; !exists {
+			drift.ExtraCategories = append(drift.ExtraCategories, name)
+		}
+	}
+	sort.Strings(drift.NewCategories)
+	sort.Strings(drift.ExtraCategories)
+
+	for name, centerCategory := range center.Categories {
+		machineCategory, exists := machineCategories[name]
+		if !exists {
+			continue
+		}
+		machinePaths := normalizedConfigPathSet(machineCategory.Paths)
+		for _, path := range centerCategory.Paths {
+			if _, exists := machinePaths[filepath.ToSlash(path)]; !exists {
+				drift.CategoryAdditions = append(drift.CategoryAdditions, name)
+				break
+			}
+		}
+	}
+	sort.Strings(drift.CategoryAdditions)
+
+	if center.Root != machine.Root {
+		drift.RootChanged = true
+		drift.MachineRoot = machine.Root
+		drift.CenterRoot = center.Root
+	}
+	if len(drift.NewCategories) == 0 && len(drift.ExtraCategories) == 0 &&
+		len(drift.CategoryAdditions) == 0 && !drift.RootChanged {
+		return nil
+	}
+	return drift
+}
+
+func normalizedConfigPathSet(paths []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		// Match adapter.normalizeRel: relative path declarations are compared
+		// with platform separators converted to the wire's slash form.
+		set[filepath.ToSlash(path)] = struct{}{}
+	}
+	return set
 }
 
 func (s *Server) handleCollectChoices(w http.ResponseWriter, r *http.Request, agentID string, streaming bool) {

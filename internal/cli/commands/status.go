@@ -56,6 +56,19 @@ type StatusAdapterReport struct {
 	Categories []StatusCategoryReport `json:"categories"`
 }
 
+// ConfigOutlineCategory is a category declaration from the loaded homer.json.
+type ConfigOutlineCategory struct {
+	Name  string   `json:"name"`
+	Paths []string `json:"paths,omitempty"`
+}
+
+// ConfigOutlineAdapter is an adapter declaration from the loaded homer.json.
+type ConfigOutlineAdapter struct {
+	ID         string                  `json:"id"`
+	Root       string                  `json:"root,omitempty"`
+	Categories []ConfigOutlineCategory `json:"categories,omitempty"`
+}
+
 // StatusReport is the machine-readable result of homer status.  errors is
 // always present (and is an empty array when clean); warnings is additive and
 // omitted when there are no warnings, matching the TS report shape.
@@ -67,7 +80,8 @@ type StatusReport struct {
 	// Resolutions carries this machine's recorded conflict decisions so the
 	// hub can render choice state without a second round trip
 	// (staged-resolution plan S2b; attached by agentd, not RunStatus).
-	Resolutions []StatusResolution `json:"resolutions,omitempty"`
+	Resolutions   []StatusResolution      `json:"resolutions,omitempty"`
+	ConfigOutline *[]ConfigOutlineAdapter `json:"configOutline,omitempty"`
 }
 
 // StatusResolution is one recorded decision in a status report. The shape is
@@ -541,7 +555,52 @@ func RunStatus(opts StatusOptions, injected ...DriftSources) (StatusReport, erro
 		return StatusReport{}, err
 	}
 
-	return runStatusWithConfig(opts, paths, config, injected...)
+	report, err := runStatusWithConfig(opts, paths, config, injected...)
+	if err != nil {
+		return StatusReport{}, err
+	}
+	report.ConfigOutline = configOutlineFromConfig(config)
+	return report, nil
+}
+
+// configOutlineFromConfig converts the loaded declaration to the stable,
+// JSON-only status outline. Sorting map keys makes the wire representation
+// deterministic; Paths retain their declared order.
+func configOutlineFromConfig(config *core.HomerConfig) *[]ConfigOutlineAdapter {
+	if config == nil {
+		return nil
+	}
+
+	adapterIDs := make([]string, 0, len(config.Adapters))
+	for id := range config.Adapters {
+		adapterIDs = append(adapterIDs, id)
+	}
+	sort.Strings(adapterIDs)
+
+	outline := make([]ConfigOutlineAdapter, 0, len(adapterIDs))
+	for _, id := range adapterIDs {
+		adapterConfig := config.Adapters[id]
+		categoryNames := make([]string, 0, len(adapterConfig.Categories))
+		for name := range adapterConfig.Categories {
+			categoryNames = append(categoryNames, name)
+		}
+		sort.Strings(categoryNames)
+
+		categories := make([]ConfigOutlineCategory, 0, len(categoryNames))
+		for _, name := range categoryNames {
+			categoryConfig := adapterConfig.Categories[name]
+			categories = append(categories, ConfigOutlineCategory{
+				Name:  name,
+				Paths: append([]string(nil), categoryConfig.Paths...),
+			})
+		}
+		outline = append(outline, ConfigOutlineAdapter{
+			ID:         id,
+			Root:       adapterConfig.Root,
+			Categories: categories,
+		})
+	}
+	return &outline
 }
 
 // runStatusWithConfig is RunStatus's body with the config already
