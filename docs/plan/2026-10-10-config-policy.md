@@ -57,10 +57,14 @@ POST /api/agents/<id>/pull?confirm=true
 `commands.StatusReport`（internal/cli/commands/status.go:62-71）新增：
 
 ```go
+type ConfigOutlineCategory struct {
+    Name  string   `json:"name"`
+    Paths []string `json:"paths,omitempty"`
+}
 type ConfigOutlineAdapter struct {
-    ID         string   `json:"id"`
-    Root       string   `json:"root,omitempty"`
-    Categories []string `json:"categories,omitempty"` // 声明的分类名（config 而非扫描结果），排序
+    ID         string                   `json:"id"`
+    Root       string                   `json:"root,omitempty"`
+    Categories []ConfigOutlineCategory  `json:"categories,omitempty"` // 声明（config 而非扫描结果），按名称排序
 }
 // StatusReport 新字段：
 ConfigOutline *[]ConfigOutlineAdapter `json:"configOutline,omitempty"`
@@ -99,7 +103,9 @@ ConfigDrift *ConfigDrift `json:"configDrift,omitempty"`
 - 判定有漂移：NewCategories ∪ ExtraCategories ∪ CategoryAdditions 非空，或 RootChanged。
   （root 用原字符串比较，不做 ~ 展开归一——honest diff。）
 - CategoryAdditions 判定：共有分类，中心 Paths 减去本机 Paths（按 normalizeRel
-  归一后的集合差）非空。Mode/Exclude 等其他字段差异 **不判**、keep 也不修（v1 范围外）。
+  归一后的集合差）非空。**本机 Paths 来自 2.2 outline 的 Categories[].Paths**
+  （outline 因此携带 paths，不只是名字）。Mode/Exclude 等其他字段差异 **不判**、
+  keep 也不修（v1 范围外）。
 - keyring 行照算无害（前端隐藏该行，永不进 policy map）。
 
 ### 2.4 Agent 端应用（pull 前落配置）
