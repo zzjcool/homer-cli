@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -78,11 +79,12 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		Version: web.Version,
 	})
 	dispatcher.Hub = agentHub
+	agents := &reportedAdaptersAgents{Dispatcher: dispatcher}
 	server, err := web.NewServer(web.ServeOptions{
 		Addr:                    boundAddr,
 		HomerHome:               options.Home,
 		Token:                   token,
-		Agents:                  dispatcher,
+		Agents:                  agents,
 		AgentEndpoint:           agentHub,
 		Enrollment:              enrollment,
 		AgentEndpointAuthorized: authenticator.Authorized,
@@ -159,6 +161,48 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	}
 	return 0
 }
+
+// reportedAdaptersAgents records adapter IDs returned by status and pull
+// calls, and exposes the registry capability to web without changing the
+// dispatcher or AgentsSource contracts.
+type reportedAdaptersAgents struct {
+	*hub.Dispatcher
+}
+
+func (d *reportedAdaptersAgents) AgentStatus(ctx context.Context, agentID string) (json.RawMessage, error) {
+	raw, err := d.Dispatcher.AgentStatus(ctx, agentID)
+	if err == nil {
+		d.noteReportedAdapters(agentID, raw)
+	}
+	return raw, err
+}
+
+func (d *reportedAdaptersAgents) AgentPull(ctx context.Context, agentID string, confirm bool, scope web.SyncScope) (json.RawMessage, error) {
+	raw, err := d.Dispatcher.AgentPull(ctx, agentID, confirm, scope)
+	if err == nil {
+		d.noteReportedAdapters(agentID, raw)
+	}
+	return raw, err
+}
+
+func (d *reportedAdaptersAgents) noteReportedAdapters(agentID string, raw json.RawMessage) {
+	if d == nil || d.Dispatcher == nil || d.Registry == nil {
+		return
+	}
+	if ids := hub.MachineReportedAdapters(raw); ids != nil {
+		d.Registry.NoteReportedAdapters(agentID, ids)
+	}
+}
+
+func (d *reportedAdaptersAgents) AgentReportedAdapters(agentID string) []string {
+	if d == nil || d.Dispatcher == nil || d.Registry == nil {
+		return nil
+	}
+	return d.Registry.AgentReportedAdapters(agentID)
+}
+
+var _ web.AgentsSource = (*reportedAdaptersAgents)(nil)
+var _ hub.ReportedAdaptersSource = (*reportedAdaptersAgents)(nil)
 
 // runAgent runs the agent daemon. The agent dials the hub over a WebSocket
 // stream and listens on no port.
