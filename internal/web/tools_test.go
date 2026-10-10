@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zzjcool/homer-cli/internal/adapter"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	"github.com/zzjcool/homer-cli/internal/toolctl"
 )
 
@@ -259,7 +259,7 @@ func TestAgentToolUpgradeRouteAcceptsEveryRegisteredToolID(t *testing.T) {
 	stub := &toolUpgradeStub{raw: json.RawMessage(`{"ok":true}`)}
 	server := newWebServer(t, fixture, "test-token", stub, nil)
 	ids := []string{"tool-2", "a.b_c"}
-	for _, registered := range adapter.Tools() {
+	for _, registered := range pluginregistry.Tools() {
 		ids = append(ids, registered.ID)
 	}
 	for _, id := range ids {

@@ -66,8 +66,8 @@ func TestEnvelopeRoundTripAndSyncShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := loaded.Adapters["keyring"]; !ok {
-		t.Fatal("create did not register the keyring adapter")
+	if _, ok := loaded.Adapters["keyring"]; ok {
+		t.Fatal("keyring operations unexpectedly registered the keyring adapter")
 	}
 	envelope, err := os.ReadFile(filepath.Join(root, ".homer", "keyring", "items", "codebuddy", "envelope.age"))
 	if err != nil {
