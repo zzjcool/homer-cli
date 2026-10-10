@@ -119,10 +119,71 @@ VS Code，没装的不报）。控制台的机器卡片上有一行「应用」�
   管理器更新。
 - **旧版 agent**：版本太老的 homer 不会上报应用版本，也不认识升级指令，先在控制台
   点「更新程序」把它换成中心现在这份。
-- **给新的适配器加上这个能力**：在 `internal/adapter/tools.go` 的 `Tools()` 里加
-  一项（`ID`、`Adapter`、`Label`、`Binary`、`VersionArgs`、`Install`，能自升级的再填
+- **给新的内置工具加上这个能力**：在 `internal/pluginregistry/pluginregistry.go` 的
+  `Tools()` 里加一项（`ID`、`Adapter`、`Label`、`Binary`、`VersionArgs`、`Install`，能自升级的再填
   `UpgradeArgs`，需要硬性下限时填 `MinVersion`）。上报、落后标记、升级按钮、
   `homer ps` 都不用再改。
+
+## 插件体系
+
+Homer 将可管理能力分为三类：
+
+| 角色 | 作用 | 机器原语 |
+|---|---|---|
+| `adapter`（适配器） | 定义一款工具的配置根目录、分类与同步范围 | 现有 `ScanAdapter` 扫描与配置同步 |
+| `carrier`（载体） | 随同步流携带的横切能力，例如密钥环 | 现有 `secret` 方法与 age 加密 |
+| `action`（动作） | 对单台机器执行一次性操作 | 现有 `ssh-key` 方法 |
+
+内置插件包括 pi、herdr、opencode、VS Code 四个适配器，`keyring` 载体和
+`ssh-key` 动作。`ActionSpec` 只描述插件页要显示的表单，不会选择或执行任意机器方法。
+
+在 hub 控制台顶栏的「插件」页可以安装或卸载插件。安装 adapter/carrier 会发布新的
+中心配置世代，在线机器在下一次 pull 时收到配置；安装 action 只更新插件安装状态。卸载
+adapter/carrier 受数据守卫限制：中心仍有该 adapter 的数据，或密钥仍绑定在已安装的
+adapter 上时，hub 会拒绝卸载。v1 不提供清理中心数据的入口；卸载也不会删除机器上的
+残留文件。
+
+### 第三方 adapter manifest（schemaVersion 1）
+
+插件页可粘贴第三方 manifest 安装 adapter。下面是 Claude Code 的声明式示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "claude",
+  "role": "adapter",
+  "name": "Claude Code",
+  "description": "Claude Code 的配置同步",
+  "root": "~/.claude",
+  "categories": {
+    "settings": {
+      "kind": "file",
+      "paths": ["settings.json"],
+      "mode": "merge"
+    },
+    "instructions": {
+      "kind": "file",
+      "paths": ["CLAUDE.md"],
+      "mode": "mirror"
+    },
+    "commands": {
+      "kind": "dir",
+      "paths": ["commands/"],
+      "mode": "mirror"
+    }
+  },
+  "ignore": ["history.jsonl", "projects/"]
+}
+```
+
+v1 第三方只接受 `role: "adapter"` 的 JSON 数据；不能通过 manifest 注册新的 carrier/action，
+也不能加载 Go、JavaScript 或 WASM 插件代码。manifest 分类仍可声明 `listCmd` / `applyCmd`，
+这些命令会在机器上按 Homer 现有确认流程执行，因此安装前应审阅路径与命令，并只使用
+可信来源。hub 校验 schema 不代表替插件作者背书。
+
+`homer init --adapters` 仍只接受内置 adapter ID；未知 ID 时可编辑 `homer.json`，或从 hub
+插件页安装。请求与响应格式见 [API 参考](docs/api-reference.md)，分层与演进决策见
+[插件体系架构记录](docs/plan/2026-10-11-plugin-architecture.md)。
 
 ## 安装
 
@@ -186,7 +247,7 @@ npm install -g homer-cli
 ### 机器 A：建立配置中心
 
 ```sh
-homer init --json                         # 默认注册 pi / herdr / opencode
+homer init --json                         # 默认注册 pi / herdr / opencode / vscode
 homer secret keygen                       # 私钥写入 ~/.homer/keys/age.txt（0600）
 # 在 homer.json 写 secrets.recipients 与 secrets.files，并把明文落到目标路径
 homer remote <配置仓库 URL>                # 可选：确保 ~/.homer 是仓库并配置 origin
@@ -459,8 +520,9 @@ sh -n install.sh
   可解性检查。
 - `pull` / `merge` 检测到两台机器都推送造成的分叉时，会给出两条路径：放弃另一机改动就
   在本机 `homer push`，保留两边则 `git -C <home> pull --rebase` 后 `homer merge`。
-- 不包含 M4/M5 的 `sync`、插件机制与并发锁；pair 只做一次一台的密钥快车道，
-  不同步 store。真实双机、真实 DERP 路径和真实 HOME 仍需按发布清单人工验收。
+- 插件机制已落地，但第三方扩展仅限 adapter 型 manifest，不提供动态代码钩子；通用
+  tailcat 快车道与并发锁仍不在 MVP 范围。pair 只做一次一台的密钥快车道，不同步
+  store。真实双机、真实 DERP 路径和真实 HOME 仍需按发布清单人工验收。
 
 ## License
 

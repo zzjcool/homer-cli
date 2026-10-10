@@ -109,7 +109,8 @@ chezmoi 双方案参考：① 密钥不进仓库——模板函数运行时从�
 - **merge 模式**：JSON 字段级三路合并（VS Code settingsMerge 模式），语义详见 §2.7
 - **mirror 模式**：目录整树同步（文件级三路判定，冲突交人工，LWW 仅作批量降级选项，详见 §2.7）
 - **excludeKeys**：字段级排除（密钥占位符替换，参考 legout/pi-config 的 `__REQUIRED__` 方案）
-- 首发三个 adapter：**pi**（最深）、**herdr**（独家）、**opencode**；预留 adapter 插件机制供社区贡献 claude/codex/shell 等
+- 首发三个 adapter：**pi**（最深）、**herdr**（独家）、**opencode**；adapter 插件机制已于 2026-10-11 落地（见
+  [docs/plan/2026-10-11-plugin-architecture.md](docs/plan/2026-10-11-plugin-architecture.md)），v1 第三方以声明式 manifest 提供 claude/codex/shell 等 adapter
 
 ### 2.3 命令集
 
@@ -296,7 +297,8 @@ MVP 不做（v2+）：tailcat 集成、adapter 插件市场、claude/codex adapt
 2. **M2（同步内核）**：push/pull/merge/备份/密钥扫描 —— 跑通"安全往返"
 3. **M3（密钥层 + home）**：age 集成、curl 安装脚本、herdr/opencode adapter —— 验收场景达成
 4. **M4（pi 扩展形态）**：footer 状态、/homer 命令、自动 pull
-5. **M5（v2）**：tailcat 快车道、adapter 插件机制、更多 adapter
+5. **M5（v2）**：tailcat 快车道、adapter 插件机制（已于 2026-10-11 落地，详见
+   [docs/plan/2026-10-11-plugin-architecture.md](docs/plan/2026-10-11-plugin-architecture.md)）、更多 adapter
 6. **M6（hub 形态，2026-09-27 立项；传输层于 2026-10-08 更新）**：
    `homer serve` 提供本地 HTTP API + 内嵌 Web UI；每台 `homer agent` 只有一种模式，
    使用 `--hub <url>` 主动通过 WebSocket Stream 连接 hub，本机不监听 agent 端口。
