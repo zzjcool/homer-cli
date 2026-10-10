@@ -399,7 +399,11 @@ func (s *Server) handleAgents(w http.ResponseWriter, _ *http.Request) {
 		agents = append(agents, s.opts.Agents.ListAgents()...)
 	}
 	for i := range agents {
-		agents[i].Outdated = upgrade.IsNewer(Version, agents[i].Version)
+		// An unparseable hub version ("dev" from a source build) must not
+		// silently disable the upgrade hint: treat it as newer than any
+		// parseable agent version so machines always get the「更新程序」
+		// button. A source-built hub is at least as new as any release.
+		agents[i].Outdated = hubVersionIsNewer(Version, agents[i].Version)
 	}
 	annotateTools(agents)
 	writeJSON(w, http.StatusOK, struct {
@@ -907,4 +911,20 @@ func (s *Server) handleAgentRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// hubVersionIsNewer answers "is the hub newer than this agent?" for the
+// console's upgrade hint. It wraps upgrade.IsNewer with the unparseable-hub
+// case: a "dev" hub (built from source without ldflags) outranks every
+// release-versioned agent, because the agent update path downloads the hub's
+// own binary anyway. The reverse (agent "dev", hub parseable) is NOT newer:
+// a source-built agent is not behind a release hub by that fact alone.
+func hubVersionIsNewer(hubVersion, agentVersion string) bool {
+	if upgrade.IsNewer(hubVersion, agentVersion) {
+		return true
+	}
+	if upgrade.IsParseableVersion(hubVersion) {
+		return false
+	}
+	return upgrade.IsParseableVersion(agentVersion)
 }

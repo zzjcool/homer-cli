@@ -180,3 +180,25 @@ func parseVersion(raw string) []segment {
 	}
 	return segments
 }
+
+// IsParseableVersion reports whether raw is a numeric dotted version
+// (v1, 1.3.4). Non-numeric builds like "dev" (and mixed forms) are not:
+// parseVersion tolerates non-numeric segments with string fallback, so the
+// release-shape check has to verify every segment itself.
+func IsParseableVersion(raw string) bool {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(raw, "v"))
+	if trimmed == "" {
+		return false
+	}
+	for _, part := range strings.Split(trimmed, ".") {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}

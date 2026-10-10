@@ -181,9 +181,47 @@ func TestStagedResolutionUI(t *testing.T) {
 	}
 
 	// The dispatch dialog now summarizes the pending decision — tick pi so
-	// the decision rides with this dispatch.
+	// the decision rides with this dispatch. The dispatch button waits in a
+	// bounded loop so a failure reports the page state instead of a bare
+	// timeout (chromedp's WaitVisible cannot dump the DOM once the context
+	// it runs in has expired).
+	dispatchReady := false
+	deadlineDispatch := time.Now().Add(60 * time.Second)
+	var lastPage string
+	for !dispatchReady && time.Now().Before(deadlineDispatch) {
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(`(() => { const b = [...document.querySelectorAll('#agent-list button')].find(x => x.textContent.trim() === '下发'); return b ? 'ready' : 'waiting'; })()`, &lastPage),
+		); err != nil {
+			t.Fatalf("dispatch-button probe: %v\npage: %s", err, lastPage)
+		}
+		dispatchReady = lastPage == "ready"
+		if !dispatchReady {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	if !dispatchReady {
+		var pageText string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`document.body ? document.body.innerText.slice(0, 1200) : "no body"`, &pageText))
+		t.Fatalf("dispatch button never appeared\nlast probe: %s\npage: %s", lastPage, pageText)
+	}
+	// The click can only land when the full-screen busy veil is gone; if it
+	// is still up, clicking the dispatch button hits the veil and the dialog
+	// never opens (this was the flaky failure).
+	waitBusyGone := false
+	for !waitBusyGone && time.Now().Before(deadlineDispatch) {
+		var busy string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`document.getElementById('busy').classList.contains('hidden') ? 'gone' : 'visible'`, &busy)); err != nil {
+			t.Fatalf("busy probe: %v", err)
+		}
+		waitBusyGone = busy == "gone"
+		if !waitBusyGone {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	if !waitBusyGone {
+		t.Fatal("busy veil never lifted after recording the decision")
+	}
 	err = chromedp.Run(ctx,
-		chromedp.WaitVisible(`//div[@id="agent-list"]//button[normalize-space()="下发"]`, chromedp.BySearch),
 		chromedp.Click(`//div[@id="agent-list"]//button[normalize-space()="下发"]`, chromedp.BySearch),
 		chromedp.WaitVisible(`#confirm-choices input[data-adapter="pi"]`, chromedp.ByQuery),
 		chromedp.Evaluate(`(() => { const i = document.querySelector('#confirm-choices input[data-adapter="pi"]'); i.checked = true; i.dispatchEvent(new Event('change', {bubbles:true})); return 'ok'; })()`, nil),

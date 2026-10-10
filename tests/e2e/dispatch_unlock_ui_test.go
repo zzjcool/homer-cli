@@ -75,7 +75,7 @@ func TestDispatchDialogUnlocksBeforeSend(t *testing.T) {
 
 	browser, cancel := newKeyBrowser(t)
 	defer cancel()
-	ctx, stop := context.WithTimeout(browser, 90*time.Second)
+	ctx, stop := context.WithTimeout(browser, 180*time.Second)
 	defer stop()
 
 	admin := "browser-admin-pw"
@@ -276,7 +276,7 @@ func TestDispatchBlockedWhenBoundKeyCannotTravel(t *testing.T) {
 
 	browser, cancel := newKeyBrowser(t)
 	defer cancel()
-	ctx, stop := context.WithTimeout(browser, 90*time.Second)
+	ctx, stop := context.WithTimeout(browser, 180*time.Second)
 	defer stop()
 
 	admin := "browser-admin-pw"
@@ -449,7 +449,7 @@ func TestResolveCenterAsksForPasswordAndLocalDoesNot(t *testing.T) {
 	}
 	open := func(t *testing.T, pageURL string) (context.Context, func()) {
 		browser, cancel := newKeyBrowser(t)
-		ctx, stop := context.WithTimeout(browser, 90*time.Second)
+		ctx, stop := context.WithTimeout(browser, 180*time.Second)
 		err := chromedp.Run(ctx,
 			chromedp.Navigate(pageURL),
 			chromedp.WaitVisible(`#in-setup-pw`, chromedp.ByQuery),

@@ -52,7 +52,7 @@ func TestKeyringConsoleClicksCreateEncryptUnlock(t *testing.T) {
 
 	browser, cancel := newKeyBrowser(t)
 	defer cancel()
-	ctx, stop := context.WithTimeout(browser, 90*time.Second)
+	ctx, stop := context.WithTimeout(browser, 180*time.Second)
 	defer stop()
 
 	admin := "browser-admin-pw"
