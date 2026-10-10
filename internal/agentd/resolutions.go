@@ -147,6 +147,7 @@ type ResolvedPullRequest struct {
 	Adapters         []string
 	CenterGeneration int
 	AllowSecrets     bool
+	ConfigPolicy     map[string]string
 }
 
 // PullApplyingResolutions applies only decisions belonging to the explicit
@@ -157,7 +158,7 @@ func (e *localExecutor) PullApplyingResolutions(ctx context.Context, req Resolve
 		return commands.PullReport{}, errors.New("nil executor")
 	}
 	legacyPull := func() (commands.PullReport, error) {
-		return e.Pull(ctx, req.Confirm, req.Adapters, false)
+		return e.pull(ctx, req.Confirm, req.Adapters, false, nil, req.ConfigPolicy)
 	}
 	if !req.Confirm || strings.TrimSpace(e.hubURL) == "" || len(req.Adapters) == 0 {
 		return legacyPull()
@@ -275,7 +276,7 @@ func (e *localExecutor) PullApplyingResolutions(ctx context.Context, req Resolve
 	report := commands.NewPullReport(commands.PullStatusNoDrift)
 	var pullErr error
 	if len(rest) > 0 {
-		report, pullErr = e.pull(ctx, true, rest, false, centerIDs)
+		report, pullErr = e.pull(ctx, true, rest, false, centerIDs, req.ConfigPolicy)
 		if pullErr != nil {
 			failed := commands.NewPullReport(commands.PullStatusError)
 			failed.Errors = append(failed.Errors, "下发中心快照失败: "+pullErr.Error())

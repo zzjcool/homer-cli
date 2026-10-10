@@ -549,16 +549,20 @@ func TestAgentResolveRecordOfflineAgentIs503First(t *testing.T) {
 	}
 }
 
-func TestTaskOptionsForScopeCopiesResolutionFlags(t *testing.T) {
+func TestTaskOptionsForScopeCopiesResolutionAndConfigPolicyFields(t *testing.T) {
 	adapters := []string{"pi", "herdr"}
+	policy := map[string]string{"pi": "center", "herdr": "keep"}
 	options := taskOptionsForScope(true, web.SyncScope{
 		Explicit: true, Adapters: adapters, Overwrite: true, AllowSecrets: true,
 		ApplyResolutions: true, ClearResolutions: true, CenterGeneration: 12,
+		ConfigPolicy: policy,
 	})
 	adapters[0] = "mutated"
+	policy["pi"] = "keep"
 	if !options.Confirm || !options.Overwrite || !options.AllowSecrets ||
 		!options.ApplyResolutions || !options.ClearResolutions || options.CenterGeneration != 12 ||
-		!reflect.DeepEqual(options.Adapters, []string{"pi", "herdr"}) {
+		!reflect.DeepEqual(options.Adapters, []string{"pi", "herdr"}) ||
+		!reflect.DeepEqual(options.ConfigPolicy, map[string]string{"pi": "center", "herdr": "keep"}) {
 		t.Fatalf("task options = %+v", options)
 	}
 }

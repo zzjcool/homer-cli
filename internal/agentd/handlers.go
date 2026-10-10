@@ -226,10 +226,17 @@ func (d *Daemon) runTaskCommand(ctx context.Context, req *stream.Request, option
 				Adapters:         options.Adapters,
 				CenterGeneration: options.CenterGeneration,
 				AllowSecrets:     options.AllowSecrets,
+				ConfigPolicy:     options.ConfigPolicy,
 			})
 		}
 		guard := d.beginClear(options)
-		report, err := d.executorPull(ctx, options.Confirm, options.Adapters, options.Overwrite)
+		var report commands.PullReport
+		var err error
+		if len(options.ConfigPolicy) > 0 {
+			report, err = d.executorPullWithConfigPolicy(ctx, options.Confirm, options.Adapters, options.Overwrite, options.ConfigPolicy)
+		} else {
+			report, err = d.executorPull(ctx, options.Confirm, options.Adapters, options.Overwrite)
+		}
 		if err == nil {
 			report.Warnings = append(report.Warnings, guard.finish(report.OK)...)
 		}

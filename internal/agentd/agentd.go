@@ -429,6 +429,16 @@ func (d *Daemon) executorPull(ctx context.Context, confirm bool, adapters []stri
 	return d.exec.Pull(ctx, confirm, adapters, preferRemote)
 }
 
+func (d *Daemon) executorPullWithConfigPolicy(ctx context.Context, confirm bool, adapters []string, preferRemote bool, policy map[string]string) (commands.PullReport, error) {
+	d.execMu.RLock()
+	defer d.execMu.RUnlock()
+	local, ok := d.exec.(*localExecutor)
+	if !ok {
+		return commands.PullReport{}, fmt.Errorf("该 executor 不能应用配置定义对齐")
+	}
+	return local.pull(ctx, confirm, adapters, preferRemote, nil, policy)
+}
+
 func (d *Daemon) executorResolve(ctx context.Context, choice string) (commands.MergeReport, error) {
 	d.execMu.RLock()
 	defer d.execMu.RUnlock()

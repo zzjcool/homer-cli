@@ -119,12 +119,23 @@ func taskOptionsForScope(confirm bool, scope web.SyncScope) TaskOptions {
 	options := TaskOptions{
 		Confirm: confirm, Overwrite: scope.Overwrite, AllowSecrets: scope.AllowSecrets,
 		ApplyResolutions: scope.ApplyResolutions, ClearResolutions: scope.ClearResolutions,
-		CenterGeneration: scope.CenterGeneration,
+		ConfigPolicy: cloneStringMap(scope.ConfigPolicy), CenterGeneration: scope.CenterGeneration,
 	}
 	if scope.Explicit {
 		options.Adapters = append([]string(nil), scope.Adapters...)
 	}
 	return options
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
 }
 
 func (d *Dispatcher) AgentInstallSSHKeys(ctx context.Context, agentID, githubUser string, keys []string) (json.RawMessage, error) {
