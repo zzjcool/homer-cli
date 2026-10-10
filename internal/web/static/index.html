@@ -231,6 +231,7 @@ dialog { border: 1px solid var(--line); border-radius: 4px; padding: 20px; max-w
 .resolution-choice-row { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 0 10px 8px 40px; font-size: var(--fs-small); }
 .resolution-choice-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .resolution-choice-row input { width: auto; min-height: 0; margin: 0; }
+ .config-policy-details { display: grid; gap: 2px; padding: 0 10px 8px 40px; }
 .resolution-badge { display: inline-block; color: var(--accent); }
 #confirm-resolutions { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; }
 #confirm-resolutions:empty { display: none; }
@@ -426,6 +427,7 @@ const app = {
   resolutionPreset: "",
   resolutionScopeAltLabel: "",
   recordChoiceSelections: {},
+  configPolicySelections: {},
   scopeStep: "choose",
   scopeHint: "",
   scopeLoading: false,
@@ -1234,6 +1236,15 @@ function clearDispatchUnlocks() {
   host.dataset.selection = "";
   clear(host);
 }
+function configPolicyForSelection() {
+  const checked = checkedScopeChoices();
+  const policy = {};
+  (app.scopeChoices || []).forEach(item => {
+    if (!checked[item.id] || !item.configDrift) return;
+    policy[item.id] = app.configPolicySelections[item.id] || "center";
+  });
+  return Object.keys(policy).length ? policy : null;
+}
 function boundPathsForSelection() {
   const resolutionSelected = {};
   resolutionKeySelection().forEach(id => { resolutionSelected[id] = true; });
@@ -1474,6 +1485,42 @@ function renderScopeChoices(data) {
     if (app.scopeDirection === "collect") { appendCredentialNotes(copy, item); appendSecretHits(copy, item); }
     label.append(input, copy);
     if (!cats.length) block.append(label);
+    if (app.scopeDirection === "dispatch" && item.configDrift) {
+      const configPolicyRow = el("div", "resolution-choice-row");
+      const configPolicyInitialChoice = app.configPolicySelections[item.id] || "center";
+      [["center", "以中心为准"], ["keep", "保留本机定义，补上缺失分类"]].forEach(policyPair => {
+        const policyLabel = el("label");
+        const policyInput = document.createElement("input");
+        policyInput.type = "radio";
+        policyInput.name = "config-policy-" + item.id;
+        policyInput.value = policyPair[0];
+        policyInput.dataset.configPolicyAdapter = item.id;
+        policyInput.checked = configPolicyInitialChoice === policyPair[0];
+        policyInput.disabled = !item.enabled;
+        policyInput.addEventListener("change", () => {
+          if (policyInput.checked) app.configPolicySelections[item.id] = policyInput.value;
+          updateScopeConfirm();
+        });
+        policyLabel.append(policyInput, document.createTextNode(policyPair[1]));
+        configPolicyRow.append(policyLabel);
+      });
+      block.append(configPolicyRow);
+      const drift = item.configDrift;
+      const configPolicyDetails = el("div", "config-policy-details");
+      if (Array.isArray(drift.newCategories) && drift.newCategories.length) {
+        configPolicyDetails.append(el("div", "muted small", "中心新增分类：" + drift.newCategories.join("、")));
+      }
+      if (Array.isArray(drift.extraCategories) && drift.extraCategories.length) {
+        configPolicyDetails.append(el("div", "muted small", "仅本机有的分类：" + drift.extraCategories.join("、") + "（以中心为准后不再同步它们）"));
+      }
+      if (Array.isArray(drift.categoryAdditions) && drift.categoryAdditions.length) {
+        configPolicyDetails.append(el("div", "muted small", "将补全的分类：" + drift.categoryAdditions.join("、")));
+      }
+      if (drift.rootChanged) {
+        configPolicyDetails.append(el("div", "muted small", "root：" + (drift.machineRoot || "") + " → " + (drift.centerRoot || "")));
+      }
+      if (configPolicyDetails.childNodes.length) block.append(configPolicyDetails);
+    }
     if (item.conflicts > 0 && app.scopeDirection === "resolve") {
       const resolutionRow = el("div", "resolution-choice-row");
       const resolutionInitialChoice = app.recordChoiceSelections[item.id] || app.resolutionPreset || (resolutionView && resolutionView.choice) || "";
@@ -1824,6 +1871,7 @@ function openScopeDialog(opts) {
   // confirmResolveOn 前预设的 recordChoiceSelections（冲突行「以中心为准」且
   // 绑了密钥时写入）不能被抹掉：抹掉后 radio 回到未选。仅在没有预设时清空。
   if (!opts.keepRecordSelections) app.recordChoiceSelections = {};
+  app.configPolicySelections = {};
   app.resolutionScopeAltLabel = opts.altLabel || "";
   app.scopeLoading = opts.direction === "collect";
   app.scopeStreamFailed = false;
@@ -2321,6 +2369,8 @@ function failDispatchInDialog(text) {
 async function executeDispatchOne(agentId, name, adapters, unlocks, stay) {
   const okBtn = $("btn-confirm-ok");
   const body = { adapters: adapters };
+  const configPolicy = configPolicyForSelection();
+  if (configPolicy) body.configPolicy = configPolicy;
   if (unlocks && unlocks.length) body.unlocks = unlocks;
   const paths = boundPathsForSelection();
   if (stay) {
