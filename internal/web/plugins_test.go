@@ -211,7 +211,7 @@ func TestThirdPartyManifestInstallPersistsAcrossRuntimeRestart(t *testing.T) {
 	home := pluginTestHome(t)
 	state := pluginruntime.New(home)
 	server := newPluginTestServer(t, home, state, nil)
-	response := request(t, server.Handler(), http.MethodPost, "/api/plugins/install", `{"manifest":{"schemaVersion":1,"id":"custom-editor","role":"adapter","name":"Custom editor","description":"Editor settings","root":"~/.custom-editor","categories":{"files":{"paths":["settings.json"],"mode":"mirror","kind":"file"}}}}`)
+	response := request(t, server.Handler(), http.MethodPost, "/api/plugins/install", `{"manifest":{"schemaVersion":1,"id":"custom-editor","role":"adapter","name":"Custom editor","description":"Editor settings","root":"~/.custom-editor","categories":{"packages":{"mode":"mirror","kind":"manifest","listCmd":"plugins list","applyCmd":"plugins add","idPattern":"^[a-z][a-z0-9-]*$"}}}}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("install custom plugin = %d %s", response.Code, response.Body)
 	}
@@ -222,13 +222,21 @@ func TestThirdPartyManifestInstallPersistsAcrossRuntimeRestart(t *testing.T) {
 	if duplicate.Code != http.StatusConflict || errorCode(t, duplicate) != "plugin-installed" {
 		t.Fatalf("duplicate custom install = %d %s, want 409 plugin-installed", duplicate.Code, duplicate.Body)
 	}
-	if head, ok := gens.New(home).Read(); !ok || head.Generation != 1 {
+	head, ok := gens.New(home).Read()
+	if !ok || head.Generation != 1 {
 		t.Fatalf("custom adapter did not publish generation: %+v, ok=%v", head, ok)
+	}
+	published, problems := core.ValidateConfig(head.Meta)
+	if published == nil || published.Adapters["custom-editor"].Categories["packages"].IDPattern != "^[a-z][a-z0-9-]*$" {
+		t.Fatalf("custom manifest selector was not published: config=%+v problems=%v", published, problems)
 	}
 
 	restarted := pluginruntime.New(home)
 	if !restarted.IsInstalled("custom-editor") {
 		t.Fatal("custom plugin did not survive runtime restart")
+	}
+	if got := restarted.List()[0].Adapter.Categories["packages"].IDPattern; got != "^[a-z][a-z0-9-]*$" {
+		t.Fatalf("custom manifest selector after restart = %q", got)
 	}
 	restartedServer := newPluginTestServer(t, home, restarted, nil)
 	listed := request(t, restartedServer.Handler(), http.MethodGet, "/api/plugins")

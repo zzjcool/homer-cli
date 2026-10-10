@@ -408,23 +408,9 @@ func (s *Server) publishPluginGeneration(id string, adapter *core.AdapterConfig)
 		delete(adapters.M, id)
 		adapters.Keys = removeJSONKey(adapters.Keys, id)
 	} else {
-		configValue := core.ConfigValue(core.HomerConfig{
-			Version: 1,
-			Adapters: map[string]core.AdapterConfig{
-				id: *adapter,
-			},
-		})
-		configObject, ok := configValue.(*orderedjson.Object)
-		if !ok || configObject == nil {
-			return fmt.Errorf("编码 adapter %q 失败", id)
-		}
-		adapterObjects, ok := configObject.M["adapters"].(*orderedjson.Object)
-		if !ok || adapterObjects == nil {
-			return fmt.Errorf("编码 adapter %q 失败", id)
-		}
-		adapterValue, exists := adapterObjects.M[id]
-		if !exists {
-			return fmt.Errorf("编码 adapter %q 失败", id)
+		adapterValue, err := pluginAdapterJSONValue(id, *adapter)
+		if err != nil {
+			return err
 		}
 		if _, exists := adapters.M[id]; !exists {
 			adapters.Keys = append(adapters.Keys, id)
@@ -439,6 +425,56 @@ func (s *Server) publishPluginGeneration(id string, adapter *core.AdapterConfig)
 		return fmt.Errorf("发布 generation: %w", err)
 	}
 	return nil
+}
+
+func pluginAdapterJSONValue(id string, adapter core.AdapterConfig) (orderedjson.Value, error) {
+	configValue := core.ConfigValue(core.HomerConfig{
+		Version: 1,
+		Adapters: map[string]core.AdapterConfig{
+			id: adapter,
+		},
+	})
+	configObject, ok := configValue.(*orderedjson.Object)
+	if !ok || configObject == nil {
+		return nil, fmt.Errorf("编码 adapter %q 失败", id)
+	}
+	adapterObjects, ok := configObject.M["adapters"].(*orderedjson.Object)
+	if !ok || adapterObjects == nil {
+		return nil, fmt.Errorf("编码 adapter %q 失败", id)
+	}
+	adapterValue, exists := adapterObjects.M[id]
+	if !exists {
+		return nil, fmt.Errorf("编码 adapter %q 失败", id)
+	}
+	adapterObject, ok := adapterValue.(*orderedjson.Object)
+	if !ok || adapterObject == nil {
+		return nil, fmt.Errorf("编码 adapter %q 失败", id)
+	}
+	categories, ok := adapterObject.M["categories"].(*orderedjson.Object)
+	if !ok || categories == nil {
+		return nil, fmt.Errorf("编码 adapter %q 的分类失败", id)
+	}
+	// Use core's canonical adapter encoding, then carry the manifest selector
+	// along because core's decoder accepts this field but its encoder does not
+	// currently emit it.
+	for name, category := range adapter.Categories {
+		if category.IDPattern == "" {
+			continue
+		}
+		value, exists := categories.M[name]
+		if !exists {
+			return nil, fmt.Errorf("编码 adapter %q 的分类 %q 失败", id, name)
+		}
+		categoryObject, ok := value.(*orderedjson.Object)
+		if !ok || categoryObject == nil {
+			return nil, fmt.Errorf("编码 adapter %q 的分类 %q 失败", id, name)
+		}
+		if _, exists := categoryObject.M["idPattern"]; !exists {
+			categoryObject.Keys = append(categoryObject.Keys, "idPattern")
+		}
+		categoryObject.M["idPattern"] = category.IDPattern
+	}
+	return adapterValue, nil
 }
 
 func removeJSONKey(keys []string, want string) []string {
