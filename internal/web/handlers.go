@@ -599,9 +599,8 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 	}
 	if confirmValue(r) && pullWarrantsUnlock(raw) {
 		if messages := s.unlockDispatched(r.Context(), agentID, scope); len(messages) > 0 {
-			message := "内容已经下发，但没有解开。"
-			details := pullUnlockFailureDetails(raw, message, messages)
-			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", message, details)
+			details := pullUnlockFailureDetails(raw, messages)
+			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", "内容已经下发，但没有解开。", details)
 			return
 		}
 	}
@@ -725,8 +724,7 @@ func hasConfigError(messages []string) bool {
 
 func pullWarrantsUnlock(raw json.RawMessage) bool {
 	var report struct {
-		OK      bool   `json:"ok"`
-		Status  string `json:"status"`
+		OK      bool `json:"ok"`
 		Applied struct {
 			Written []json.RawMessage `json:"written"`
 		} `json:"applied"`
@@ -744,8 +742,9 @@ func pullWarrantsUnlock(raw json.RawMessage) bool {
 // pullUnlockFailureDetails preserves the pull's partial-failure context in
 // the unlock-failed error envelope. The console can still recognize a
 // conflicts-remain report and show its conflict actions, while the unlock
-// failure remains visible in the same details list.
-func pullUnlockFailureDetails(raw json.RawMessage, message string, unlockMessages []string) []string {
+// failure remains visible in the same details list. The envelope message
+// itself is not repeated here.
+func pullUnlockFailureDetails(raw json.RawMessage, unlockMessages []string) []string {
 	details := make([]string, 0, len(unlockMessages)+2)
 	var report struct {
 		OK        bool              `json:"ok"`
@@ -767,13 +766,14 @@ func pullUnlockFailureDetails(raw json.RawMessage, message string, unlockMessage
 				if len(report.Conflicts) > 0 {
 					details = append(details, "检测到 "+strconv.Itoa(len(report.Conflicts))+" 个冲突（已保留本地）。")
 				} else {
-					details = append(details, msgBothChanged)
+					// An agent that reports conflicts-remain always carries at
+					// least one conflict; an empty list here would mean a future
+					// report shape changed. Say something neutral that cannot
+					// contradict the applied writes in the same envelope.
+					details = append(details, "有冲突保留在本地，请到这台机器上处理。")
 				}
 			}
 		}
-	}
-	if message != "" {
-		details = append(details, message)
 	}
 	details = append(details, unlockMessages...)
 	return details

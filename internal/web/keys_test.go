@@ -347,6 +347,23 @@ func TestResolveCenterReportsUnlockFailureAfterWrite(t *testing.T) {
 	}
 }
 
+// The non-record resolve path shares the dispatch gate: a conflicts-remain
+// report with delivered keyring ciphertext must still open the key.
+func TestResolveCenterWithoutRecordStillUnlocksAfterConflictsRemain(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	stub.pullRaw = []byte(`{"ok":false,"status":"conflicts-remain","applied":{"written":[{"adapterId":"keyring","relPath":"pi/files/models.age"}]},"conflicts":[{"adapterId":"pi","relPath":"settings.json"}],"errors":["检测到 1 个冲突（已保留本地）"]}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=center&agent=box&confirm=true",
+		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if stub.keyCalls != 1 || stub.cmd.Action != "unlock" || stub.cmd.ID != "pi" {
+		t.Fatalf("conflicts-remain resolve without record should unlock once, calls=%d command=%+v body=%s", stub.keyCalls, stub.cmd, resp.Body)
+	}
+	body := resp.Body.String()
+	if resp.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "conflicts-remain") {
+		t.Fatalf("partial resolve = %d body=%s", resp.Code, body)
+	}
+}
+
 func TestDispatchStillUnlocksAfterConflictsRemain(t *testing.T) {
 	server, stub := dispatchFixtureWithBoundKey(t)
 	stub.pullRaw = []byte(`{"ok":false,"status":"conflicts-remain","applied":{"written":[{"adapterId":"keyring","relPath":"pi/files/models.age"}]},"conflicts":[{"adapterId":"pi","relPath":"settings.json"}],"errors":["检测到 1 个冲突（已保留本地）"]}`)
