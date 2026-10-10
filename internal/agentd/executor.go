@@ -39,6 +39,10 @@ type localExecutor struct {
 	credential    string
 	hubHTTP       *http.Client
 	snapshotCache snapshotCache
+	// lastDownloadGeneration is the numeric generation of the most recent
+	// successful snapshot download, even when the cache could not store it
+	// (no ETag from an intermediary). It is the CAS fallback base.
+	lastDownloadGeneration int
 }
 
 // NewLocalExecutor returns the production task executor. The commands package
@@ -192,9 +196,16 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []strin
 			return commands.PushReport{}, err
 		}
 	}
-	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
-	if e.hubURL != "" {
-		if adapters != nil {
+	if e.hubURL != "" && adapters != nil {
+		// Scoped hub push with a CAS-guarded publish (R2): the decision runs
+		// against a downloaded snapshot, and the upload must land on the same
+		// generation. A conflict means another machine moved the center while
+		// this decision was being prepared — re-download and re-judge once,
+		// then surface the conflict so the caller keeps its record.
+		var report commands.PushReport
+		var pushErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
 			snapshot, _, err := e.downloadHubSnapshot(ctx)
 			switch {
 			case errors.Is(err, errNoHubSnapshot):
@@ -204,10 +215,49 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []strin
 			default:
 				deps.HubSnapshot = snapshot
 			}
+			captured := adapters
+			decisionBase := e.snapshotCache.cachedGeneration()
+			if decisionBase == 0 {
+				decisionBase = e.lastDownloadGeneration
+			}
+			var casConflict error
+			deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
+				generation, uploadErr := e.uploadHubSnapshotAt(ctx, snapshot, captured, decisionBase)
+				if errors.Is(uploadErr, errGenerationConflict) {
+					casConflict = uploadErr
+				}
+				return generation, uploadErr
+			}
+			report = commands.RunPush(commands.PushOptions{
+				HomerHome:    e.homerHome,
+				Yes:          confirm,
+				Adapters:     adapters,
+				Overwrite:    overwrite,
+				AllowSecrets: allowSecrets,
+			}, deps)
+			if err := contextError(ctx); err != nil {
+				return commands.PushReport{}, err
+			}
+			// A CAS conflict means RunPush tried to publish against a moved
+			// center; its report carries the sink error already. Retry once
+			// with a fresh download; a second conflict returns the report so
+			// the caller keeps its recorded decision.
+			if casConflict == nil || attempt > 0 {
+				return report, nil
+			}
+			// Conflict on the first attempt: invalidate the cache so the
+			// next loop iteration re-downloads the moved center.
+			e.snapshotCache.invalidate()
 		}
-		captured := adapters
+		return report, pushErr
+	}
+	// Unscoped push (adapters == nil) with a hub: the upload REPLACES the
+	// generation wholesale, so there is no scoped-merge judgment to lose —
+	// no CAS base is attached. This preserves the legacy bootstrap path.
+	deps := &commands.PushDeps{UI: commands.HeadlessUI{}}
+	if e.hubURL != "" {
 		deps.HubSink = func(snapshot []core.AdapterSnapshot) (int, error) {
-			return e.uploadHubSnapshot(ctx, snapshot, captured)
+			return e.uploadHubSnapshotAt(ctx, snapshot, nil, 0)
 		}
 	}
 	report := commands.RunPush(commands.PushOptions{
@@ -442,10 +492,11 @@ func (e *localExecutor) downloadHubSnapshotUnshared(ctx context.Context) ([]core
 		if decodeErr != nil {
 			return nil, nil, decodeErr
 		}
+		e.lastDownloadGeneration = payload.Generation
 		snapshots := snapshotsFromWire(payload.Store)
 		meta := []byte(payload.HomerJSON)
 		responseETag := response.Header.Get("ETag")
-		storedEpoch := e.snapshotCache.store(cacheEpoch, responseETag, snapshots, meta)
+		storedEpoch := e.snapshotCache.store(cacheEpoch, responseETag, payload.Generation, snapshots, meta)
 		if responseETag == "" {
 			// ETag support is part of the hub contract, but an intermediary or
 			// older hub may omit it. The body is still usable; simply do not cache.
@@ -528,7 +579,18 @@ func addMissingAdapters(paths core.HomerPaths, meta []byte) error {
 }
 
 // uploadHubSnapshot pushes prepared snapshots to the hub.
+// errGenerationConflict marks a CAS rejection from the hub: the center moved
+// between the download this decision was based on and the upload attempt.
+var errGenerationConflict = errors.New("hub upload: 中心世代已变化")
+
 func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.AdapterSnapshot, adapters []string) (int, error) {
+	return e.uploadHubSnapshotAt(ctx, snapshot, adapters, 0)
+}
+
+// uploadHubSnapshotAt uploads with a CAS precondition: baseGeneration > 0
+// requires the hub to still be at that generation (R2). A conflict is
+// returned as errGenerationConflict so callers can re-decide.
+func (e *localExecutor) uploadHubSnapshotAt(ctx context.Context, snapshot []core.AdapterSnapshot, adapters []string, baseGeneration int) (int, error) {
 	store := map[string]map[string]string{}
 	for _, adapter := range snapshot {
 		for _, category := range adapter.Categories {
@@ -552,7 +614,7 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 	if data, err := os.ReadFile(paths.ConfigFile); err == nil {
 		meta = data
 	}
-	body, err := json.Marshal(hubSnapshotPayload{Store: store, HomerJSON: string(meta), Adapters: adapters})
+	body, err := json.Marshal(hubSnapshotPayload{Store: store, HomerJSON: string(meta), Adapters: adapters, Generation: baseGeneration})
 	if err != nil {
 		return 0, err
 	}
@@ -574,6 +636,10 @@ func (e *localExecutor) uploadHubSnapshot(ctx context.Context, snapshot []core.A
 		return 0, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict && baseGeneration > 0 {
+		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return 0, fmt.Errorf("%w: %s", errGenerationConflict, strings.TrimSpace(string(responseBody)))
+	}
 	if response.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return 0, fmt.Errorf("hub upload: %s %s", response.Status, strings.TrimSpace(string(responseBody)))

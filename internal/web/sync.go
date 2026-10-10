@@ -475,9 +475,13 @@ func agentResultError(name, status string, messages []string) string {
 // snapshotPayload is the wire format of the no-git data plane: an agent
 // uploads its prepared snapshot; pullers download the hub's current one.
 type snapshotPayload struct {
-	HomerJSON  string                       `json:"homerJson"`
-	Store      map[string]map[string]string `json:"store"`
-	Generation int                          `json:"generation"`
+	HomerJSON string                       `json:"homerJson"`
+	Store     map[string]map[string]string `json:"store"`
+	// Generation is dual-purpose: in a GET response it names the generation
+	// the body carries; in a POST body it is the CAS precondition
+	// (baseGeneration) — the generation the uploader's decision was based
+	// on. 0 disables the check (legacy agents and full-replace uploads).
+	Generation int `json:"generation"`
 	// Adapters, when set, merges just those adapters into the previous
 	// generation. Omitted, the upload replaces the generation entirely.
 	Adapters []string `json:"adapters,omitempty"`
@@ -507,6 +511,21 @@ func (s *Server) handleSnapshotUpload(w http.ResponseWriter, r *http.Request) {
 	generationMutex.Lock()
 	defer generationMutex.Unlock()
 	layout := gens.New(s.opts.HomerHome)
+	// CAS precondition (R2): a scoped merge whose decision was based on an
+	// older generation must not silently overwrite what other machines
+	// published in between. The check runs under the same mutex as the
+	// publish below, closing the read→write window.
+	if payload.Generation > 0 {
+		if head, ok := layout.Read(); !ok || head.Generation != payload.Generation {
+			current := 0
+			if head, ok := layout.Read(); ok {
+				current = head.Generation
+			}
+			writeError(w, http.StatusConflict, "generation-conflict",
+				fmt.Sprintf("中心已被其他机器更新（当前第 %d 代，本决定基于第 %d 代）", current, payload.Generation), nil)
+			return
+		}
+	}
 	store := payload.Store
 	if store == nil {
 		store = map[string]map[string]string{}

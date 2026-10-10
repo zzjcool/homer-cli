@@ -10,13 +10,14 @@ import (
 // against an in-flight GET repopulating the cache after an upload invalidates
 // it (or overwriting a newer response from another concurrent GET).
 type snapshotCache struct {
-	mu        sync.RWMutex
-	etag      string
-	snapshots []core.AdapterSnapshot
-	meta      []byte
-	epoch     uint64
-	valid     bool
-	flight    *snapshotDownloadFlight
+	mu         sync.RWMutex
+	etag       string
+	generation int // numeric generation of the cached snapshot (CAS base)
+	snapshots  []core.AdapterSnapshot
+	meta       []byte
+	epoch      uint64
+	valid      bool
+	flight     *snapshotDownloadFlight
 }
 
 type snapshotDownloadFlight struct {
@@ -81,7 +82,7 @@ func (c *snapshotCache) get(etag string, epoch uint64) ([]core.AdapterSnapshot, 
 	return cloneAdapterSnapshots(c.snapshots), append([]byte(nil), c.meta...), true
 }
 
-func (c *snapshotCache) store(epoch uint64, etag string, snapshots []core.AdapterSnapshot, meta []byte) uint64 {
+func (c *snapshotCache) store(epoch uint64, etag string, generation int, snapshots []core.AdapterSnapshot, meta []byte) uint64 {
 	if c == nil {
 		return epoch
 	}
@@ -99,10 +100,26 @@ func (c *snapshotCache) store(epoch uint64, etag string, snapshots []core.Adapte
 	// ETags are opaque validators: a hub reset may reuse a generation number
 	// while changing the snapshot contents, so ordering based on g<N> is unsafe.
 	c.etag = etag
+	c.generation = generation
 	c.snapshots = cloneAdapterSnapshots(snapshots)
 	c.meta = append([]byte(nil), meta...)
 	c.valid = true
 	return c.epoch
+}
+
+// cachedGeneration returns the numeric generation of the currently cached
+// snapshot, or 0 when nothing is cached. It is the CAS base for a scoped
+// upload whose decision was made against that snapshot.
+func (c *snapshotCache) cachedGeneration() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.valid {
+		return 0
+	}
+	return c.generation
 }
 
 func (c *snapshotCache) invalidate() {
@@ -127,6 +144,7 @@ func (c *snapshotCache) invalidateIf(etag string, epoch uint64) {
 
 func (c *snapshotCache) clearLocked() {
 	c.etag = ""
+	c.generation = 0
 	c.snapshots = nil
 	c.meta = nil
 	c.valid = false

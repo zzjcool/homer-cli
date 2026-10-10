@@ -167,7 +167,7 @@ func TestSnapshotCache(t *testing.T) {
 
 func TestSnapshotCacheInvalidationRaceRetriesUnconditional(t *testing.T) {
 	executor := &localExecutor{hubURL: "", credential: "token"}
-	executor.snapshotCache.store(0, `"g1"`, []core.AdapterSnapshot{{AdapterID: "old"}}, []byte("old"))
+	executor.snapshotCache.store(0, `"g1"`, 1, []core.AdapterSnapshot{{AdapterID: "old"}}, []byte("old"))
 	conditionalStarted := make(chan struct{})
 	releaseConditional := make(chan struct{})
 	var first sync.Once
@@ -230,8 +230,8 @@ func TestSnapshotCacheTreatsETagsAsOpaqueAcrossGenerationReset(t *testing.T) {
 	var cache snapshotCache
 	oldETag := `"g3-deadbeefdeadbeef"`
 	newETag := `"g1-cafebabecafebabe"`
-	cache.store(0, oldETag, []core.AdapterSnapshot{{AdapterID: "old"}}, []byte("old"))
-	cache.store(0, newETag, []core.AdapterSnapshot{{AdapterID: "new"}}, []byte("new"))
+	cache.store(0, oldETag, 1, []core.AdapterSnapshot{{AdapterID: "old"}}, []byte("old"))
+	cache.store(0, newETag, 2, []core.AdapterSnapshot{{AdapterID: "new"}}, []byte("new"))
 	snapshots, meta, ok := cache.get(newETag, 0)
 	if !ok || len(snapshots) != 1 || snapshots[0].AdapterID != "new" || string(meta) != "new" {
 		t.Fatalf("cache state after hub generation reset = %#v %q ok=%v", snapshots, meta, ok)
@@ -243,7 +243,7 @@ func TestSnapshotCacheTreatsETagsAsOpaqueAcrossGenerationReset(t *testing.T) {
 
 func TestSnapshotCacheRetries304AfterInvalidation(t *testing.T) {
 	var cache snapshotCache
-	cache.store(0, `"g1"`, []core.AdapterSnapshot{{AdapterID: "pi"}}, []byte("cached"))
+	cache.store(0, `"g1"`, 1, []core.AdapterSnapshot{{AdapterID: "pi"}}, []byte("cached"))
 	etag, epoch, valid := cache.requestState()
 	if !valid || etag != `"g1"` {
 		t.Fatalf("initial cache state = etag %q valid %v", etag, valid)
