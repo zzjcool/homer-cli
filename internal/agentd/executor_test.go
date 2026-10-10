@@ -17,7 +17,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/core"
 )
 
-func TestAddMissingAdaptersLogsHubConfigValidationProblems(t *testing.T) {
+func TestApplyConfigPolicyLogsHubConfigValidationProblems(t *testing.T) {
 	var output bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&output)
@@ -29,8 +29,8 @@ func TestAddMissingAdaptersLogsHubConfigValidationProblems(t *testing.T) {
 		return os.Getenv(key)
 	})
 
-	if err := addMissingAdapters(paths, []byte(`{"version":1,"adapters":{"pi":{"root":"x","categories":{}}}}`)); err != nil {
-		t.Fatalf("addMissingAdapters() error = %v", err)
+	if err := applyConfigPolicy(paths, []byte(`{"version":1,"adapters":{"pi":{"root":"x","categories":{}}}}`), nil); err != nil {
+		t.Fatalf("applyConfigPolicy() error = %v", err)
 	}
 	if got := output.String(); !strings.Contains(got, "invalid hub homer.json config") || !strings.Contains(got, "categories") {
 		t.Fatalf("hub config validation problems were not logged: %q", got)

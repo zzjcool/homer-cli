@@ -185,11 +185,11 @@ func resolveAction(config core.HomerConfig, action PullAction) (resolvedAction, 
 
 	adapterConfig, ok := config.Adapters[action.AdapterID]
 	if !ok {
-		return resolvedAction{}, fmt.Errorf("applyPullActions: %s/%s 不在 homer.json 中（plan 与 config 失配）", action.AdapterID, action.Category)
+		return resolvedAction{}, fmt.Errorf("applyPullActions: %s/%s 不在本机的 homer.json 中（中心与本机的配置定义不一致）。到控制台对该机器重新下发，确认框会提供定义对齐方式：以中心为准，或保留本机定义并补上缺失分类", action.AdapterID, action.Category)
 	}
 	categoryConfig, ok := adapterConfig.Categories[action.Category]
 	if !ok {
-		return resolvedAction{}, fmt.Errorf("applyPullActions: %s/%s 不在 homer.json 中（plan 与 config 失配）", action.AdapterID, action.Category)
+		return resolvedAction{}, fmt.Errorf("applyPullActions: %s/%s 不在本机的 homer.json 中（中心与本机的配置定义不一致）。到控制台对该机器重新下发，确认框会提供定义对齐方式：以中心为准，或保留本机定义并补上缺失分类", action.AdapterID, action.Category)
 	}
 
 	root := core.ExpandHome(adapterConfig.Root)

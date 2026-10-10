@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// TestStatusReportOmitsResolutionsWhenEmpty freezes the agent→hub wire
-// contract (staged-resolution plan S2a): a status report without decisions
-// must not grow a "resolutions" key, and one with decisions must round-trip
-// all four fields.
+// TestStatusReportOmitsResolutionsWhenEmpty freezes additive agent→hub
+// status fields: an empty report must not grow resolutions or configOutline,
+// and a populated resolution must round-trip all four fields.
 func TestStatusReportOmitsResolutionsWhenEmpty(t *testing.T) {
 	data, err := json.Marshal(StatusReport{Adapters: []StatusAdapterReport{}, Errors: []string{}})
 	if err != nil {
@@ -23,6 +22,9 @@ func TestStatusReportOmitsResolutionsWhenEmpty(t *testing.T) {
 	}
 	if _, present := probe["resolutions"]; present {
 		t.Fatalf("empty status must omit resolutions: %s", data)
+	}
+	if _, present := probe["configOutline"]; present {
+		t.Fatalf("empty status must omit configOutline: %s", data)
 	}
 	withOne, err := json.Marshal(StatusReport{Resolutions: []StatusResolution{{
 		Adapter: "pi", Choice: "center", RecordedAt: "2026-10-09T00:00:00Z", GenerationAtRecord: 7,

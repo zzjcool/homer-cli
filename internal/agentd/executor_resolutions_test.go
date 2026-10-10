@@ -271,6 +271,133 @@ func (f *resolutionExecutorFixture) loadEntries(t *testing.T) []resolutions.Entr
 	return file.Entries
 }
 
+func TestPullApplyingResolutions_ConfigPolicyFixesCategoryDefinitionDrift(t *testing.T) {
+	fixture := newResolutionExecutorFixture(t, map[string]resolutionAdapterFixture{
+		"pi": {Base: "base\n", Local: "local\n", Center: "center\n"},
+	})
+	centerConfig, err := core.LoadConfig(fixture.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pi := centerConfig.Adapters["pi"]
+	pi.Categories = map[string]core.CategoryConfig{
+		"settings": pi.Categories["settings"],
+		"files":    {Paths: []string{"files/"}, Mode: core.SyncModeMirror},
+	}
+	centerConfig.Adapters["pi"] = pi
+	meta := centerMeta(t, fixture.home, *centerConfig)
+	fixture.hub.mu.Lock()
+	fixture.hub.homerJSON = string(meta)
+	fixture.hub.store["pi"]["files/new.txt"] = "center file\n"
+	fixture.hub.mu.Unlock()
+	fixture.record(t, resolutions.ChoiceCenter, "pi")
+	daemon := New(Config{HomerHome: fixture.home}, fixture.executor)
+
+	result, err := daemon.runTaskCommand(context.Background(), &stream.Request{Method: string(hub.TaskKindPull)}, hub.TaskOptions{
+		Confirm: true, Adapters: []string{"pi"}, CenterGeneration: fixture.centerGen,
+		ApplyResolutions: true, ConfigPolicy: map[string]string{"pi": "center"},
+	})
+	if err != nil {
+		t.Fatalf("resolved pull: %v", err)
+	}
+	report, ok := result.(commands.PullReport)
+	if !ok {
+		t.Fatalf("resolved pull result = %T, want PullReport", result)
+	}
+	if !report.OK || report.Status != commands.PullStatusApplied {
+		t.Fatalf("category definition drift blocked the resolved pull: %+v", report)
+	}
+	if data, err := os.ReadFile(filepath.Join(fixture.roots["pi"], "files", "new.txt")); err != nil || string(data) != "center file\n" {
+		t.Fatalf("center files category was not applied: %q, %v", data, err)
+	}
+	if entries := fixture.loadEntries(t); len(entries) != 0 {
+		t.Fatalf("staged decision was not consumed: %+v", entries)
+	}
+}
+
+func TestTaskPullConfigPolicyUsesLocalExecutor(t *testing.T) {
+	daemon := New(Config{HomerHome: t.TempDir()}, &resolutionTaskExecutor{})
+	_, err := daemon.runTaskCommand(context.Background(), &stream.Request{Method: string(hub.TaskKindPull)}, hub.TaskOptions{
+		Confirm: true, ConfigPolicy: map[string]string{"pi": "center"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "executor") {
+		t.Fatalf("pull with config policy error = %v, want local-executor assertion error", err)
+	}
+}
+
+func TestTaskPullConfigPolicyIsAppliedWithoutResolutions(t *testing.T) {
+	fixture := newResolutionExecutorFixture(t, map[string]resolutionAdapterFixture{
+		"pi": {Base: "center\n", Local: "center\n", Center: "center\n"},
+	})
+	centerConfig, err := core.LoadConfig(fixture.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pi := centerConfig.Adapters["pi"]
+	pi.Categories["files"] = core.CategoryConfig{Paths: []string{"files/"}, Mode: core.SyncModeMirror}
+	centerConfig.Adapters["pi"] = pi
+	fixture.hub.mu.Lock()
+	fixture.hub.homerJSON = string(centerMeta(t, fixture.home, *centerConfig))
+	fixture.hub.store["pi"]["files/new.txt"] = "center file\n"
+	fixture.hub.mu.Unlock()
+	daemon := New(Config{HomerHome: fixture.home}, fixture.executor)
+
+	result, err := daemon.runTaskCommand(context.Background(), &stream.Request{Method: string(hub.TaskKindPull)}, hub.TaskOptions{
+		Confirm: true, Adapters: []string{"pi"}, ConfigPolicy: map[string]string{"pi": "center"},
+	})
+	if err != nil {
+		t.Fatalf("ordinary pull with config policy: %v", err)
+	}
+	report, ok := result.(commands.PullReport)
+	if !ok || !report.OK {
+		t.Fatalf("ordinary pull with config policy result = %#v", result)
+	}
+	if data, err := os.ReadFile(filepath.Join(fixture.roots["pi"], "files", "new.txt")); err != nil || string(data) != "center file\n" {
+		t.Fatalf("center files category was not applied: %q, %v", data, err)
+	}
+}
+
+func TestPullApplyingResolutions_ConfigPolicySurvivesLegacyNoEntryPath(t *testing.T) {
+	fixture := newResolutionExecutorFixture(t, map[string]resolutionAdapterFixture{
+		"pi": {Base: "base\n", Local: "local\n", Center: "center\n"},
+	})
+	centerConfig, err := core.LoadConfig(fixture.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pi := centerConfig.Adapters["pi"]
+	pi.Categories["files"] = core.CategoryConfig{Paths: []string{"files/"}, Mode: core.SyncModeMirror}
+	centerConfig.Adapters["pi"] = pi
+	fixture.hub.mu.Lock()
+	fixture.hub.homerJSON = string(centerMeta(t, fixture.home, *centerConfig))
+	fixture.hub.store["pi"]["files/new.txt"] = "center file\n"
+	fixture.hub.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(fixture.roots["pi"], "settings.json"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := fixture.executor.PullApplyingResolutions(context.Background(), ResolvedPullRequest{
+		Confirm: true, Adapters: []string{"pi"}, CenterGeneration: fixture.centerGen,
+		ConfigPolicy: map[string]string{"pi": "center"},
+	})
+	if err != nil {
+		t.Fatalf("legacy fallback pull: %v", err)
+	}
+	if !report.OK {
+		t.Fatalf("legacy fallback pull failed: %+v", report)
+	}
+	got, err := core.LoadConfig(fixture.paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Adapters["pi"].Categories["files"]; !ok {
+		t.Fatalf("config policy was lost on no-entry fallback: %+v", got.Adapters["pi"])
+	}
+	if entries := fixture.loadEntries(t); len(entries) != 0 {
+		t.Fatalf("unexpected resolutions = %+v", entries)
+	}
+}
+
 func TestPullApplyingResolutions_CenterRewritesAndClears(t *testing.T) {
 	fixture := newResolutionExecutorFixture(t, map[string]resolutionAdapterFixture{
 		"pi": {Base: "base\n", Local: "local\n", Center: "center\n"},

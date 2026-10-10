@@ -62,6 +62,9 @@ type TaskOptions struct {
 	// ApplyResolutions lets a pull consume the recorded decisions for its
 	// explicitly selected adapters (D3).
 	ApplyResolutions bool `json:"applyResolutions,omitempty"`
+	// ConfigPolicy selects how an existing adapter definition is aligned with
+	// the center before a pull.
+	ConfigPolicy map[string]string `json:"configPolicy,omitempty"`
 	// ClearResolutions asks a successful push/pull to clear the recorded
 	// decisions for its adapters (the record-and-execute-now fallback).
 	ClearResolutions bool `json:"clearResolutions,omitempty"`

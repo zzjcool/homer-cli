@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gens"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
@@ -27,13 +28,16 @@ type SyncScope struct {
 	// They stay on the hub request and are not copied into an agent task.
 	Unlocks []KeyUnlock
 	// ApplyResolutions lets an explicit-adapter pull consume the recorded
-	// decisions for those adapters (staged-resolution plan, D3). Hub-internal
-	// only; readSyncScope never parses these from a request body.
+	// decisions for those adapters (staged-resolution plan, D3). Hub-internal;
+	// readSyncScope never parses this from a request body.
 	ApplyResolutions bool
 	// ClearResolutions asks a successful push/pull to clear the recorded
-	// decisions for its adapters (record-and-execute-now fallback).
+	// decisions for its adapters (record-and-execute-now fallback). Hub-internal.
 	ClearResolutions bool
-	// CenterGeneration is the hub generation the task was built with.
+	// ConfigPolicy selects how to align a machine's adapter definition with
+	// the center before dispatch. Unlike resolution fields, this is user input.
+	ConfigPolicy map[string]string
+	// CenterGeneration is the hub generation the task was built with. Hub-internal.
 	CenterGeneration int
 }
 
@@ -54,25 +58,26 @@ func readSyncScope(r *http.Request) (SyncScope, error) {
 		return SyncScope{}, nil
 	}
 	scope := SyncScope{}
-	if _, ok := r.URL.Query()["adapters"]; ok {
+	_, adaptersInQuery := r.URL.Query()["adapters"]
+	if adaptersInQuery {
 		ids, err := syncx.ParseAdapterIDs(r.URL.Query()["adapters"])
 		if err != nil {
 			return SyncScope{}, err
 		}
 		scope = SyncScope{Explicit: true, Adapters: ids}
-	} else {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if err != nil {
-			return SyncScope{}, err
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return SyncScope{}, err
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 {
+		var generic map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &generic); err != nil {
+			return SyncScope{}, fmt.Errorf("请求体不是有效的 JSON")
 		}
-		trimmed := bytes.TrimSpace(body)
-		if len(trimmed) > 0 {
-			var generic map[string]json.RawMessage
-			if err := json.Unmarshal(trimmed, &generic); err != nil {
-				return SyncScope{}, fmt.Errorf("请求体不是有效的 JSON")
-			}
-			raw, ok := generic["adapters"]
-			if ok {
+		if !adaptersInQuery {
+			if raw, ok := generic["adapters"]; ok {
 				if string(raw) == "null" {
 					return SyncScope{}, fmt.Errorf("请选择至少一个适配器")
 				}
@@ -101,6 +106,13 @@ func readSyncScope(r *http.Request) (SyncScope, error) {
 				scope.Unlocks = unlocks
 			}
 		}
+		if raw, ok := generic["configPolicy"]; ok {
+			policy, err := parseConfigPolicy(raw)
+			if err != nil {
+				return SyncScope{}, err
+			}
+			scope.ConfigPolicy = policy
+		}
 	}
 	if r.URL.Query().Get("overwrite") == "true" {
 		scope.Overwrite = true
@@ -109,6 +121,25 @@ func readSyncScope(r *http.Request) (SyncScope, error) {
 		scope.AllowSecrets = true
 	}
 	return scope, nil
+}
+
+func parseConfigPolicy(raw json.RawMessage) (map[string]string, error) {
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return nil, fmt.Errorf("configPolicy 必须是对象")
+	}
+	var policy map[string]string
+	if err := json.Unmarshal(raw, &policy); err != nil || policy == nil {
+		return nil, fmt.Errorf("configPolicy 必须是适配器 ID 到 center 或 keep 的对象")
+	}
+	for adapterID, choice := range policy {
+		if !core.ValidAdapterID(adapterID) {
+			return nil, fmt.Errorf("configPolicy 包含无效的适配器 ID %q", adapterID)
+		}
+		if choice != "center" && choice != "keep" {
+			return nil, fmt.Errorf("configPolicy[%s] 必须是 center 或 keep", adapterID)
+		}
+	}
+	return policy, nil
 }
 
 func parseUnlocks(raw json.RawMessage) ([]KeyUnlock, error) {
