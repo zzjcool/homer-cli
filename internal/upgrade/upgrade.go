@@ -154,6 +154,31 @@ func parseVersion(raw string) []segment {
 	if raw == "" {
 		return nil
 	}
+	// Git-describe shapes ("1.3.4-17-g57f9982", "1.3.4-dirty"): split the
+	// "-N-g<hash>" / "-dirty" tail off the numeric base and reattach the
+	// commit distance as its own numeric segment, so a stamped source build
+	// compares as "1.3.4.17" against its tag ("1.3.4") and against longer
+	// distances ("-18"). "dirty" without a distance gets a 0 distance: equal
+	// to its tag, never newer by that fact alone.
+	if idx := strings.IndexByte(raw, '-'); idx > 0 {
+		base, tail := raw[:idx], raw[idx+1:]
+		distance := -1
+		if fields := strings.SplitN(tail, "-", 2); len(fields) == 2 && fields[1] != "" && !isAllDigits(fields[1]) {
+			if isAllDigits(fields[0]) {
+				distance = 0
+				for _, r := range fields[0] {
+					distance = distance*10 + int(r-'0')
+				}
+			}
+		} else if tail == "dirty" || strings.HasPrefix(tail, "dirty") {
+			// "1.3.4-dirty" has no distance: equal to its tag, never newer.
+			return nil
+		}
+		if distance >= 0 {
+			extended := base + "." + itoa(distance)
+			return parseVersion(extended)
+		}
+	}
 	parts := strings.Split(raw, ".")
 	segments := make([]segment, 0, len(parts))
 	for _, part := range parts {
@@ -181,14 +206,54 @@ func parseVersion(raw string) []segment {
 	return segments
 }
 
+func isAllDigits(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, r := range text {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
+}
+
 // IsParseableVersion reports whether raw is a numeric dotted version
 // (v1, 1.3.4). Non-numeric builds like "dev" (and mixed forms) are not:
 // parseVersion tolerates non-numeric segments with string fallback, so the
 // release-shape check has to verify every segment itself.
+//
+// Git-describe shapes (v1.3.4-17-g57f9982, v1.3.4-dirty) count as parseable:
+// a source build stamped with its commit distance is a REAL, identifiable
+// version — it is newer than the tag it derives from and newer than any
+// shorter distance from the same tag. IsNewer compares them naturally via
+// the numeric 1.3.4 prefix plus the "-17" segment fallback.
 func IsParseableVersion(raw string) bool {
 	trimmed := strings.TrimSpace(strings.TrimPrefix(raw, "v"))
 	if trimmed == "" {
 		return false
+	}
+	// A git-describe stamp parses (its distance folds into the numeric
+	// segments); "dirty" without a distance does not.
+	if idx := strings.IndexByte(trimmed, '-'); idx > 0 {
+		tail := trimmed[idx+1:]
+		if fields := strings.SplitN(tail, "-", 2); len(fields) == 2 && fields[1] != "" && !isAllDigits(fields[1]) && isAllDigits(fields[0]) {
+			trimmed = trimmed[:idx]
+		} else if tail == "dirty" || strings.HasPrefix(tail, "dirty") {
+			return false
+		}
 	}
 	for _, part := range strings.Split(trimmed, ".") {
 		if part == "" {

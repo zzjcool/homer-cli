@@ -920,11 +920,14 @@ func (s *Server) handleAgentRemove(w http.ResponseWriter, r *http.Request) {
 // own binary anyway. The reverse (agent "dev", hub parseable) is NOT newer:
 // a source-built agent is not behind a release hub by that fact alone.
 func hubVersionIsNewer(hubVersion, agentVersion string) bool {
+	// An unparseable agent version ("dev", a source build) is never marked
+	// outdated by comparison: its true position is unknowable.
+	if !upgrade.IsParseableVersion(agentVersion) {
+		return false
+	}
 	if upgrade.IsNewer(hubVersion, agentVersion) {
 		return true
 	}
-	if upgrade.IsParseableVersion(hubVersion) {
-		return false
-	}
-	return upgrade.IsParseableVersion(agentVersion)
+	// An unparseable hub version ("dev") outranks every release agent.
+	return !upgrade.IsParseableVersion(hubVersion)
 }

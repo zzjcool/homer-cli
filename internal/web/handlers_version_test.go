@@ -26,3 +26,22 @@ func TestHubVersionIsNewer(t *testing.T) {
 		}
 	}
 }
+
+func TestHubVersionIsNewerGitDescribe(t *testing.T) {
+	cases := []struct {
+		hub, agent string
+		want       bool
+	}{
+		// A source-built hub stamped with git describe is a real version:
+		// it outranks its own tag and older agents, but not a newer release.
+		{"v1.3.4-17-g57f9982", "1.3.4", true},
+		{"v1.3.4-17-g57f9982", "1.3.3", true},
+		{"v1.3.4-17-g57f9982", "1.3.5", false},
+		{"v1.3.4-17-g57f9982", "dev", false},
+	}
+	for _, tc := range cases {
+		if got := hubVersionIsNewer(tc.hub, tc.agent); got != tc.want {
+			t.Errorf("hubVersionIsNewer(%q, %q) = %v, want %v", tc.hub, tc.agent, got, tc.want)
+		}
+	}
+}
