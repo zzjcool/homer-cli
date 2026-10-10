@@ -146,6 +146,32 @@ func TestGateMatrix(t *testing.T) {
 			},
 		},
 		{
+			// POST /api/plugins/install 与 uninstall：未接插件状态的 fixture
+			// 对合法凭证返回 503 plugins-disabled，闸门之外一律 401。
+			name:   "POST /api/plugins/install",
+			method: http.MethodPost,
+			path:   "/api/plugins/install",
+			body:   `{"id":"pi"}`,
+			want: func(credential gateCredential) int {
+				if gateAllowsHumanAPI(credential) {
+					return http.StatusServiceUnavailable
+				}
+				return http.StatusUnauthorized
+			},
+		},
+		{
+			name:   "POST /api/plugins/uninstall",
+			method: http.MethodPost,
+			path:   "/api/plugins/uninstall",
+			body:   `{"id":"pi","force":true}`,
+			want: func(credential gateCredential) int {
+				if gateAllowsHumanAPI(credential) {
+					return http.StatusServiceUnavailable
+				}
+				return http.StatusUnauthorized
+			},
+		},
+		{
 			name: "GET /api/snapshot",
 			path: "/api/snapshot",
 			want: func(credential gateCredential) int {

@@ -15,9 +15,10 @@ type ReportedAdaptersSource interface {
 }
 
 // MachineReportedAdapters extracts adapter IDs from either the enveloped
-// status response (report.adapters) or the legacy top-level adapters shape.
-// Top-level adapters take precedence when both are present, matching the
-// status-report consumer in internal/web/choices.go.
+// status response (report.adapters), the legacy top-level adapters shape, or
+// a pull report (applied.written/deleted[].adapterId — the adapters the
+// dispatch actually touched). Top-level adapters take precedence when both
+// are present, matching the status-report consumer in internal/web/choices.go.
 func MachineReportedAdapters(status json.RawMessage) []string {
 	if !json.Valid(status) {
 		return nil
@@ -38,14 +39,56 @@ func MachineReportedAdapters(status json.RawMessage) []string {
 			adaptersRaw = report["adapters"]
 		}
 	}
-	if missingOrNullJSON(adaptersRaw) {
-		return nil
+	if !missingOrNullJSON(adaptersRaw) {
+		if ids := adapterIDsFromList(adaptersRaw); ids != nil {
+			return ids
+		}
 	}
+	// Pull 报告形状：applied.written / applied.deleted 携带实际触及的
+	// adapter（FileRef.adapterId）。dispatch 后插件页的机器覆盖数因此能
+	// 刷新，而不必等下一次 status。
+	if appliedRaw := envelope["applied"]; !missingOrNullJSON(appliedRaw) {
+		var applied struct {
+			Written []struct {
+				AdapterID string `json:"adapterId"`
+			} `json:"written"`
+			Deleted []struct {
+				AdapterID string `json:"adapterId"`
+			} `json:"deleted"`
+		}
+		if err := json.Unmarshal(appliedRaw, &applied); err == nil {
+			seen := make(map[string]struct{})
+			ids := make([]string, 0)
+			for _, ref := range applied.Written {
+				if ref.AdapterID != "" {
+					if _, ok := seen[ref.AdapterID]; !ok {
+						seen[ref.AdapterID] = struct{}{}
+						ids = append(ids, ref.AdapterID)
+					}
+				}
+			}
+			for _, ref := range applied.Deleted {
+				if ref.AdapterID != "" {
+					if _, ok := seen[ref.AdapterID]; !ok {
+						seen[ref.AdapterID] = struct{}{}
+						ids = append(ids, ref.AdapterID)
+					}
+				}
+			}
+			if len(ids) > 0 {
+				sort.Strings(ids)
+				return ids
+			}
+		}
+	}
+	return nil
+}
 
+func adapterIDsFromList(raw json.RawMessage) []string {
 	var adapters []struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(adaptersRaw, &adapters); err != nil {
+	if err := json.Unmarshal(raw, &adapters); err != nil {
 		return nil
 	}
 

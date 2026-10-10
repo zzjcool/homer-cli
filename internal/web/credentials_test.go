@@ -13,7 +13,10 @@ func TestApplyCredentialProbeAddsPerMachinePresence(t *testing.T) {
 		rules[1].Destination: false,
 	}
 	choices := []AdapterChoice{{ID: "pi"}, {ID: "opencode"}, {ID: "herdr"}}
-	applyCredentialProbe(choices, found)
+	// 凭证探针现在跟随插件状态：用零值 Server（Plugins 为 nil = legacy
+	// 全量视图）验证原有语义不变。
+	server := &Server{}
+	server.applyCredentialProbe(choices, found)
 
 	if len(choices[0].Credentials) != len(credentialRulesFor("pi")) || choices[0].Credentials[0].Exists != credPresent || choices[0].Credentials[1].Exists != credAbsent {
 		t.Fatalf("pi credentials = %#v", choices[0].Credentials)

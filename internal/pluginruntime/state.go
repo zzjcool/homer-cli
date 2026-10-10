@@ -56,6 +56,35 @@ func New(home string) *State {
 	return state
 }
 
+// NewWithLegacyDefault loads the plugin state like New, and when the state
+// file has never existed it seeds every official plugin as installed. This is
+// the migration path for hubs that predate the plugin system: everything
+// built-in before the upgrade stays available after it. A brand-new hub gets
+// the same full set and the console can uninstall what it does not want. The
+// seed is persisted immediately so the first later uninstall does not
+// resurrect anything.
+func NewWithLegacyDefault(home string) *State {
+	state := New(home)
+	if state == nil {
+		return state
+	}
+	// 只在「从未初始化过」（空态且磁盘上没有状态文件）时播种。
+	state.mu.RLock()
+	fresh := len(state.installed) == 0 && len(state.custom) == 0
+	state.mu.RUnlock()
+	if !fresh {
+		return state
+	}
+	if _, err := os.Stat(state.path); err == nil {
+		// 状态文件存在但解析出空态：尊重磁盘状态，不播种。
+		return state
+	}
+	for _, plugin := range pluginregistry.Builtins() {
+		_ = state.Install(plugin)
+	}
+	return state
+}
+
 // List returns installed plugins in installation order. Returned plugins are
 // detached from the state and can be modified by the caller.
 func (s *State) List() []pluginregistry.Plugin {

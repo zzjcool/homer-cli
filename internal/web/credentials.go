@@ -66,12 +66,18 @@ func sameDestination(a, b string) bool {
 	return filepath.Clean(core.ExpandHome(a)) == filepath.Clean(core.ExpandHome(b))
 }
 
-// applyCredentialProbe adds each adapter's credential files to a collect
-// choice list. found is the machine's answer (nil when it could not be
-// asked, which leaves every file "unknown" rather than guessing).
-func applyCredentialProbe(choices []AdapterChoice, found map[string]bool) {
+// applyCredentialProbe adds each installed adapter plugin's credential files
+// to a collect choice list. found is the machine's answer (nil when it could
+// not be asked, which leaves every file "unknown" rather than guessing).
+// The rules follow the installed-plugin set: an uninstalled adapter's
+// credentials no longer surface in the collect dialog (F3).
+func (s *Server) applyCredentialProbe(choices []AdapterChoice, found map[string]bool) {
+	byAdapter := map[string][]CredentialRule{}
+	for _, rule := range s.installedCredentialRules() {
+		byAdapter[rule.Adapter] = append(byAdapter[rule.Adapter], rule)
+	}
 	for i := range choices {
-		choices[i].Credentials = credentialRulesFor(choices[i].ID)
+		choices[i].Credentials = append([]CredentialRule(nil), byAdapter[choices[i].ID]...)
 		for j := range choices[i].Credentials {
 			rule := &choices[i].Credentials[j]
 			rule.Exists = credUnknown
@@ -118,10 +124,11 @@ func secretDestination(config *core.HomerConfig, storePath string) (string, stri
 }
 
 // credentialRulesView is the storage drawer's "默认加密" list: every known
-// credential file, and whether a keyring entry already covers it.
-func credentialRulesView(homerHome string) []map[string]any {
-	listed := keyring.Apply(homerHome, keyring.Command{Action: "list"})
-	rules := credentialRules()
+// credential file of the installed adapter plugins, and whether a keyring
+// entry already covers it.
+func (s *Server) credentialRulesView() []map[string]any {
+	listed := keyring.Apply(s.opts.HomerHome, keyring.Command{Action: "list"})
+	rules := s.installedCredentialRules()
 	out := make([]map[string]any, 0, len(rules))
 	for _, rule := range rules {
 		encrypted := false

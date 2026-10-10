@@ -17,6 +17,7 @@ import (
 	"github.com/zzjcool/homer-cli/internal/agentd"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/hub"
+	"github.com/zzjcool/homer-cli/internal/pluginruntime"
 	"github.com/zzjcool/homer-cli/internal/web"
 )
 
@@ -80,6 +81,11 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	})
 	dispatcher.Hub = agentHub
 	agents := &reportedAdaptersAgents{Dispatcher: dispatcher}
+	// 插件状态是 serve 的一部分（B1 契约）。首次在新 home 上运行（还没有
+	// plugins.json）时，把全部官方插件默认安装上：老部署升级到插件体系的
+	// 行为连续性——升级前内置的一切（pi/herdr/opencode/vscode/keyring）
+	// 升级后依然在。全新部署同样默认全装，用户可以在插件页卸载不需要的。
+	plugins := pluginruntime.NewWithLegacyDefault(options.Home)
 	server, err := web.NewServer(web.ServeOptions{
 		Addr:                    boundAddr,
 		HomerHome:               options.Home,
@@ -89,6 +95,7 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		Enrollment:              enrollment,
 		AgentEndpointAuthorized: authenticator.Authorized,
 		AgentIDOfRequest:        authenticator.AgentID,
+		Plugins:                 plugins,
 	})
 	if err != nil {
 		_ = listener.Close()

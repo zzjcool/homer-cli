@@ -780,7 +780,7 @@ func (s *Server) handleCollectChoices(w http.ResponseWriter, r *http.Request, ag
 	var present map[string]bool
 	var secrets []InspectSecret
 	if supportsInspect {
-		result, err := inspector.AgentInspect(r.Context(), agentID, collectInspectParams(), nil)
+		result, err := inspector.AgentInspect(r.Context(), agentID, collectInspectParams(s.installedCredentialRules()), nil)
 		if err != nil {
 			writeErrorValue(w, err)
 			return
@@ -803,9 +803,9 @@ func (s *Server) handleCollectChoices(w http.ResponseWriter, r *http.Request, ag
 	writeJSON(w, http.StatusOK, response)
 }
 
-func collectInspectParams() InspectParams {
+func collectInspectParams(rules []CredentialRule) InspectParams {
 	paths := make([]string, 0)
-	for _, rule := range credentialRules() {
+	for _, rule := range rules {
 		paths = append(paths, rule.Destination)
 	}
 	return InspectParams{Credentials: paths, WantKeys: true}
@@ -827,7 +827,7 @@ func (s *Server) buildCollectChoicesResponse(agentID string, report commands.Sta
 }
 
 func (s *Server) enrichCollectChoices(choices []AdapterChoice, present map[string]bool, secrets []InspectSecret) {
-	applyCredentialProbe(choices, present)
+	s.applyCredentialProbe(choices, present)
 	config, _ := core.LoadConfig(s.paths())
 	hits := inspectSecretHits(config, secrets)
 	for i := range choices {
@@ -947,7 +947,7 @@ func (s *Server) handleCollectChoicesStream(w http.ResponseWriter, r *http.Reque
 		return writeLine(map[string]any{"type": "keys", "keys": keys})
 	}
 
-	result, err := inspector.AgentInspect(ctx, agentID, collectInspectParams(), func(event InspectEvent) {
+	result, err := inspector.AgentInspect(ctx, agentID, collectInspectParams(s.installedCredentialRules()), func(event InspectEvent) {
 		mu.Lock()
 		defer mu.Unlock()
 		if ctx.Err() != nil || writeErr != nil {

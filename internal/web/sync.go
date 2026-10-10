@@ -781,7 +781,7 @@ func (s *Server) handleStorageListing(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"generation": generation,
 		"adapters":   adapters,
-		"secrets":    credentialRulesView(s.opts.HomerHome),
+		"secrets":    s.credentialRulesView(),
 	})
 }
 
