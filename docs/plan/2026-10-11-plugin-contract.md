@@ -87,6 +87,13 @@ handler：/api/agents/<id>/ssh-key）。B3 允许为渲染方便加非契约字�
 **handlers.go 只有 A 和 B1 可碰，且各自只碰自己的行**。
 **keyring 包只有 A 可碰。core 包无人可碰。**
 
+**测试文件例外条款**：任何包的 `_test.go` 文件若引用了被 A 删除的符号
+（`adapter.Tools()`/`adapter.ToolByID`/`adapter.OfficialInstall`），
+A 有权修复这些测试引用（改成 `pluginregistry.*` 对应符号）。
+已知命中点：`internal/web/tools_test.go:262`、`internal/adapter/pi/install_test.go`、
+`tests/e2e/tool_upgrade_test.go`（仅改符号引用，不改测试逻辑）。
+`tests/e2e/**` 与 `internal/web/**` 的其它文件仍禁止碰。
+
 ## 接口冻结点（A 实现，B1/B3 依赖）
 
 1. `pluginregistry.Builtins() []Plugin`
