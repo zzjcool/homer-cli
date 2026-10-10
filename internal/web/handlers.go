@@ -164,6 +164,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleResolve(w, r)
+	case path == "/api/plugins" || strings.HasPrefix(path, "/api/plugins/"):
+		s.handlePluginsAPI(w, r, path)
 	case path == "/api/keys" || strings.HasPrefix(path, "/api/keys/"):
 		s.handleKeys(w, r)
 	case path == "/api/config":

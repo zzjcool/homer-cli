@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/core"
+	"github.com/zzjcool/homer-cli/internal/pluginruntime"
 )
 
 // Version is injected by the command package when it knows the build version.
@@ -189,6 +190,9 @@ type ServeOptions struct {
 	// it. Declared as an interface to keep the web package free of the
 	// hub dependency (hub imports web for AgentsSource).
 	Enrollment EnrollmentService
+	// Plugins is the hub's persistent plugin installation state. Nil keeps
+	// legacy embedded servers compatible and exposes an empty plugin table.
+	Plugins *pluginruntime.State
 }
 
 // PlatformSource is the optional capability AgentsSource implementations

@@ -9,7 +9,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 )
 
 const keyBodyLimit = 64 << 10
@@ -72,6 +74,9 @@ func (s *Server) writeKeyCommand(w http.ResponseWriter, r *http.Request, action 
 func (s *Server) writeKey(w http.ResponseWriter, cmd keyring.Command) {
 	writeMutex.Lock()
 	defer writeMutex.Unlock()
+	if isKeyringWriteAction(cmd.Action) && !s.prepareKeyringWrite(w) {
+		return
+	}
 	result := keyring.Apply(s.opts.HomerHome, cmd)
 	status := http.StatusOK
 	if !result.OK {
@@ -97,6 +102,10 @@ func (s *Server) handleAgentKeys(w http.ResponseWriter, r *http.Request, agentID
 	cmd, err := readKeyCommand(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", err.Error(), nil)
+		return
+	}
+	if isKeyringWriteAction(cmd.Action) && s.opts.Plugins != nil && !s.opts.Plugins.IsInstalled("keyring") {
+		writeKeyringPluginRequired(w)
 		return
 	}
 	raw, err := actor.AgentKey(r.Context(), agentID, cmd)
@@ -304,6 +313,53 @@ func (s *Server) unlockDispatched(ctx context.Context, agentID string, scope Syn
 		}
 	}
 	return messages
+}
+
+func (s *Server) prepareKeyringWrite(w http.ResponseWriter) bool {
+	if s.opts.Plugins != nil && !s.opts.Plugins.IsInstalled("keyring") {
+		writeKeyringPluginRequired(w)
+		return false
+	}
+	// With a state supplied, installation was checked above. A nil state is a
+	// legacy embedded-server mode and keeps the old keyring write behavior.
+	if err := s.ensureKeyringAdapter(); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "keyring-config", err.Error(), nil)
+		return false
+	}
+	return true
+}
+
+func writeKeyringPluginRequired(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, "plugin-required", "密钥环插件未安装，请先在插件页安装", nil)
+}
+
+func isKeyringWriteAction(action string) bool {
+	switch action {
+	case "create", "encrypt", "unlock", "passwd":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) ensureKeyringAdapter() error {
+	paths := s.paths()
+	config, err := core.LoadConfig(paths)
+	if err != nil {
+		return errors.New("请先运行 homer init")
+	}
+	if _, exists := config.Adapters["keyring"]; exists {
+		return nil
+	}
+	plugin, ok := pluginregistry.Builtin("keyring")
+	if !ok || plugin.Adapter == nil {
+		return errors.New("官方密钥环插件配置不可用")
+	}
+	if config.Adapters == nil {
+		config.Adapters = map[string]core.AdapterConfig{}
+	}
+	config.Adapters[plugin.ID] = *plugin.Adapter
+	return core.SaveConfig(paths, *config)
 }
 
 func readKeyCommand(r *http.Request) (keyring.Command, error) {

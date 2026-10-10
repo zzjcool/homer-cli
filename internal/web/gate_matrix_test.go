@@ -136,6 +136,16 @@ func TestGateMatrix(t *testing.T) {
 			},
 		},
 		{
+			name: "GET /api/plugins",
+			path: "/api/plugins",
+			want: func(credential gateCredential) int {
+				if gateAllowsHumanAPI(credential) {
+					return http.StatusOK
+				}
+				return http.StatusUnauthorized
+			},
+		},
+		{
 			name: "GET /api/snapshot",
 			path: "/api/snapshot",
 			want: func(credential gateCredential) int {

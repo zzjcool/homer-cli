@@ -4,10 +4,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zzjcool/homer-cli/internal/adapter/opencode"
-	"github.com/zzjcool/homer-cli/internal/adapter/pi"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 )
 
 // Credential presence on a machine, as the collect dialog needs it.
@@ -30,25 +29,25 @@ type CredentialRule struct {
 	Exists string `json:"exists,omitempty"`
 }
 
-// credentialRules lists only files a tool is known to keep credentials in.
-// herdr and vscode have none: VS Code keeps secrets in the OS keychain and
-// herdr stores none, so nothing is invented for them.
+// credentialRules lists credential files declared by the official adapter
+// plugins. Plugins without known credential files do not invent any.
 func credentialRules() []CredentialRule {
-	rules := make([]CredentialRule, 0, len(pi.SecretFiles)+1)
-	notes := map[string]string{
-		"auth.json":     "登录凭证和 API key",
-		"mcp-auth.json": "MCP 服务的登录凭证",
+	return credentialRulesFromPlugins(pluginregistry.Builtins())
+}
+
+func credentialRulesFromPlugins(plugins []pluginregistry.Plugin) []CredentialRule {
+	rules := make([]CredentialRule, 0)
+	for _, plugin := range plugins {
+		if plugin.Role != pluginregistry.RoleAdapter {
+			continue
+		}
+		for _, file := range pluginregistry.PluginCredentialFiles(plugin) {
+			rules = append(rules, CredentialRule{
+				Adapter: plugin.ID, Name: file.Name,
+				Destination: file.Destination, Note: file.Note,
+			})
+		}
 	}
-	for _, name := range pi.SecretFiles {
-		rules = append(rules, CredentialRule{
-			Adapter: pi.PIAdapterID, Name: name,
-			Destination: pi.SecretDestination(name), Note: notes[name],
-		})
-	}
-	rules = append(rules, CredentialRule{
-		Adapter: opencode.OpencodeAdapterID, Name: "auth.json",
-		Destination: "~/.local/share/opencode/auth.json", Note: "provider 登录凭证",
-	})
 	return rules
 }
 
