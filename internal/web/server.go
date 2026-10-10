@@ -176,11 +176,27 @@ type ServeOptions struct {
 	// AgentEndpointAuthorized mirrors the machine-credential authority for
 	// /api/* and /dl/*, which also accept enrolled agents' per-agent secrets.
 	AgentEndpointAuthorized func(r *http.Request) bool
+	// AgentIDOfRequest resolves the machine behind a per-agent-secret
+	// request (optional). /dl/homer uses it to route a platform-less request
+	// from an OLD client to that machine's heartbeat-reported platform
+	// instead of blindly streaming the hub's own binary (the 2026-10-10
+	// Mac brick shape). Absent, or a request without a machine identity
+	// (hub token, enrollment code, browser cookie), keeps the hub's own
+	// platform — the bootstrap and same-platform channels.
+	AgentIDOfRequest func(r *http.Request) (string, bool)
 	// Enrollment is the shared Tailscale-style enrollment manager: the
 	// console mints one-time codes and revokes per-agent secrets through
 	// it. Declared as an interface to keep the web package free of the
 	// hub dependency (hub imports web for AgentsSource).
 	Enrollment EnrollmentService
+}
+
+// PlatformSource is the optional capability AgentsSource implementations
+// expose to answer "what platform does machine X run on" from the agent's
+// last heartbeat (host.os / host.arch). Type assertions discover it, the
+// same way ResolutionSource does; web never imports hub.
+type PlatformSource interface {
+	AgentPlatform(agentID string) (goos, goarch string, ok bool)
 }
 
 // EnrollmentService is the subset of the enrollment manager the console

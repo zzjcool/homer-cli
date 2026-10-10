@@ -54,6 +54,19 @@ func (a *Authenticator) Authorized(r *http.Request) bool {
 	return ok && (principal.Kind == PrincipalSecret || principal.Kind == PrincipalHubToken)
 }
 
+// AgentID resolves the machine behind a per-agent-secret request. It backs
+// the hub's platform-aware /dl/homer routing: a platform-less request from
+// an old client is answered for THAT machine (its heartbeat platform), not
+// with the hub's own binary. Shared credentials (hub token, enrollment
+// codes) have no machine identity and report false.
+func (a *Authenticator) AgentID(r *http.Request) (string, bool) {
+	principal, ok := a.Authenticate(authBearerToken(r))
+	if !ok || principal.Kind != PrincipalSecret {
+		return "", false
+	}
+	return principal.AgentID, true
+}
+
 func authBearerToken(r *http.Request) string {
 	if r == nil {
 		return ""

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -70,16 +71,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.requireAuth(w, r) {
 			return
 		}
-		// Platform-aware download (2026-10-10 Mac incident): a request that
-		// names a platform other than the hub's own must NOT receive the
-		// hub's binary — it would brick the machine with an exec format
-		// error. Serve the matching GitHub Release archive instead.
-		goos, goarch := r.URL.Query().Get("goos"), r.URL.Query().Get("goarch")
-		if goos != "" && goarch != "" && (goos != runtime.GOOS || goarch != runtime.GOARCH) {
-			s.serveReleaseBinary(w, r, goos, goarch, path == "/dl/homer.gz")
-			return
-		}
-		s.serveSelfBinary(w, r, path == "/dl/homer.gz")
+		s.serveDownload(w, r, path)
 		return
 	}
 	if strings.HasPrefix(path, "/api/") || path == "/api" {
@@ -879,6 +871,56 @@ func (s *Server) serveInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.WriteString(w, script)
+}
+
+// serveDownload routes /dl/homer[.gz] with platform awareness.
+//
+// A request that NAMES a platform different from the hub's own must not
+// receive the hub's binary — it would brick the machine with an exec format
+// error (2026-10-10 Mac incident), so it is proxied from GitHub Releases.
+//
+// A platform-LESS request comes from an old client (≤ v1.3.4). When the
+// credential belongs to an enrolled machine whose heartbeat reported a
+// platform, that platform decides the routing: cross-platform requests are
+// proxied like an explicit one; same-platform keeps the hub's own stream.
+// A machine identity without a known platform refuses loudly instead of
+// gambling on the hub's binary. Requests without a machine identity (hub
+// token, enrollment code, browser cookie — bootstrap and console channels)
+// keep the hub's own binary: the install script gates platform checks
+// client-side before ever reaching here.
+func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request, path string) {
+	compressed := path == "/dl/homer.gz"
+	goos, goarch := r.URL.Query().Get("goos"), r.URL.Query().Get("goarch")
+	if goos != "" && goarch != "" {
+		if goos != runtime.GOOS || goarch != runtime.GOARCH {
+			s.serveReleaseBinary(w, r, goos, goarch, compressed)
+			return
+		}
+		s.serveSelfBinary(w, r, compressed)
+		return
+	}
+	// Platform-less request from an old client: resolve the machine.
+	if s.opts.AgentIDOfRequest != nil {
+		if agentID, ok := s.opts.AgentIDOfRequest(r); ok {
+			source, capable := s.opts.Agents.(PlatformSource)
+			if capable {
+				if mGoos, mGoarch, known := source.AgentPlatform(agentID); known {
+					if mGoos != runtime.GOOS || mGoarch != runtime.GOARCH {
+						s.serveReleaseBinary(w, r, mGoos, mGoarch, compressed)
+					} else {
+						s.serveSelfBinary(w, r, compressed)
+					}
+					return
+				}
+			}
+			// A per-agent secret without a platform on file would brick
+			// the machine on a wrong guess; refuse loudly instead.
+			writeError(w, http.StatusConflict, "platform-unknown",
+				fmt.Sprintf("不知道机器 %s 的平台（等它心跳上报一次，或升级本机 homer 后重试）", agentID), nil)
+			return
+		}
+	}
+	s.serveSelfBinary(w, r, compressed)
 }
 
 // serveSelfBinary streams the hub's own executable for same-platform

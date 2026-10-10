@@ -86,6 +86,7 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 		AgentEndpoint:           agentHub,
 		Enrollment:              enrollment,
 		AgentEndpointAuthorized: authenticator.Authorized,
+		AgentIDOfRequest:        authenticator.AgentID,
 	})
 	if err != nil {
 		_ = listener.Close()

@@ -2,6 +2,8 @@ package agentd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"sync"
@@ -1278,5 +1281,107 @@ func TestDaemonUpgradeRefusesPlatformMismatch(t *testing.T) {
 	}
 	if _, err := os.Stat(self + ".upgrade"); !os.IsNotExist(err) {
 		t.Fatalf("no staging file may survive a refusal: %v", err)
+	}
+}
+
+// TestDaemonUpgradeRefusesForeignMagicWithoutMarker walks the incident's
+// exact shape through the daemon channel: a hub that ignores the platform
+// query, sends no X-Homer-Platform marker, and streams its own binary for
+// another platform. The shared DownloadAndReplace core (marker, magic, and
+// architecture checks) must refuse it and leave the binary untouched.
+func TestDaemonUpgradeRefusesForeignMagicWithoutMarker(t *testing.T) {
+	self := filepath.Join(t.TempDir(), "homer")
+	if err := os.WriteFile(self, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A payload whose format the running test host cannot execute.
+	foreign := make([]byte, 1<<20)
+	if runtime.GOOS == "darwin" {
+		copy(foreign, []byte{0x7f, 'E', 'L', 'F'}) // linux ELF on darwin
+	} else {
+		copy(foreign, []byte{0xcf, 0xfa, 0xed, 0xfe}) // Mach-O on linux
+	}
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("goos") == "" || r.URL.Query().Get("goarch") == "" {
+			t.Errorf("daemon upgrade request must name the platform: %q", r.URL.RawQuery)
+		}
+		_, _ = w.Write(foreign)
+	}))
+	defer dataPlane.Close()
+	previous := currentExecutable
+	currentExecutable = func() (string, error) { return self, nil }
+	t.Cleanup(func() { currentExecutable = previous })
+	d := New(Config{
+		HubURL:      "http://control.example",
+		DataURL:     dataPlane.URL,
+		AgentSecret: "upgrade-secret",
+	}, &testExecutor{})
+	report := d.runUpgrade(context.Background())
+	if report.OK || report.Status != "platform-mismatch" {
+		t.Fatalf("upgrade report = %+v, want platform-mismatch for a marker-less foreign binary", report)
+	}
+	data, err := os.ReadFile(self)
+	if err != nil || string(data) != "#!/bin/sh\nexit 0\n" {
+		t.Fatalf("the binary must be untouched: %q err=%v", data, err)
+	}
+	if _, err := os.Stat(self + ".upgrade"); !os.IsNotExist(err) {
+		t.Fatalf("no staging file may survive a refusal: %v", err)
+	}
+}
+
+// TestDaemonUpgradeHappyPathReplacesSelf proves the daemon channel still
+// replaces the binary when the hub serves a valid payload for this
+// platform: the request carries goos/goarch, the per-agent secret, and the
+// report hashes the exact bytes written.
+func TestDaemonUpgradeHappyPathReplacesSelf(t *testing.T) {
+	self := filepath.Join(t.TempDir(), "homer")
+	if err := os.WriteFile(self, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A payload with this host's executable header, padded past the size
+	// floor. Building real bytes per host keeps the test portable.
+	payload := make([]byte, 1<<20)
+	switch {
+	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
+		copy(payload, []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01})
+	case runtime.GOOS == "darwin":
+		copy(payload, []byte{0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01})
+	case runtime.GOARCH == "amd64":
+		copy(payload, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0x3e, 0x00})
+	default:
+		copy(payload, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0xb7, 0x00})
+	}
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("goos"); got != runtime.GOOS {
+			t.Errorf("goos = %q, want %q", got, runtime.GOOS)
+		}
+		if got := r.URL.Query().Get("goarch"); got != runtime.GOARCH {
+			t.Errorf("goarch = %q, want %q", got, runtime.GOARCH)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upgrade-secret" {
+			t.Errorf("Authorization = %q", got)
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer dataPlane.Close()
+	previous := currentExecutable
+	currentExecutable = func() (string, error) { return self, nil }
+	t.Cleanup(func() { currentExecutable = previous })
+	d := New(Config{
+		HubURL:      "http://control.example",
+		DataURL:     dataPlane.URL,
+		AgentSecret: "upgrade-secret",
+	}, &testExecutor{})
+	report := d.runUpgrade(context.Background())
+	if !report.OK || report.Status != "upgraded" {
+		t.Fatalf("upgrade report = %+v", report)
+	}
+	got, err := os.ReadFile(self)
+	if err != nil || len(got) != len(payload) {
+		t.Fatalf("replaced binary = %d bytes, want %d (err=%v)", len(got), len(payload), err)
+	}
+	sum := sha256.Sum256(got)
+	if report.Hash != hex.EncodeToString(sum[:]) {
+		t.Fatalf("report.Hash = %s, want sha256 of the written file", report.Hash)
 	}
 }

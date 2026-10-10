@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -341,6 +342,10 @@ func e2eHelloWithCookie(t *testing.T, base, agentID, bearer, cookie string, keep
 	params, err := json.Marshal(hub.HelloParams{
 		Proto: stream.ProtocolVersion, AgentID: agentID, Hostname: "gate-e2e", Version: "e2e",
 		Caps: []string{"status", "diff", "push", "pull", "collect.inspect"},
+		// The platform-less /dl/homer router reads host.os/arch from the
+		// registry; the gate matrix's per-agent-secret download expects a
+		// same-platform 206, so the hello must report a platform.
+		Host: &hub.HostSnapshot{OS: runtime.GOOS, Arch: runtime.GOARCH},
 	})
 	if err != nil {
 		_ = conn.CloseNow()

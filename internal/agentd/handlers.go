@@ -2,16 +2,12 @@ package agentd
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -270,7 +266,9 @@ func (d *Daemon) runTaskCommand(ctx context.Context, req *stream.Request, option
 // runUpgrade downloads the hub binary from the configured data plane using the
 // agent secret, then atomically replaces the running executable. Keeping this
 // inside agentd lets DataURL be honored without changing the frozen command or
-// Executor APIs.
+// Executor APIs. The platform safety checks (query params, X-Homer-Platform,
+// payload magic) live in commands.DownloadAndReplace so the interactive and
+// daemon channels cannot drift apart again.
 // currentExecutable is the injectable seam over os.Executable for tests;
 // nil (the zero value) means the real call.
 var currentExecutable = os.Executable
@@ -292,55 +290,10 @@ func (d *Daemon) runUpgrade(ctx context.Context) commands.UpgradeReport {
 		return commands.UpgradeReport{OK: false, Status: "error", Note: "定位当前二进制失败: " + err.Error()}
 	}
 	self, _ = filepath.EvalSymlinks(self)
-	// Ask for THIS machine's platform. A hub serving its own binary only
-	// has the hub's platform; cross-platform requests are satisfied from
-	// GitHub Releases by the hub (see serveSelfBinary).
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		dataURL+"/dl/homer?goos="+runtime.GOOS+"&goarch="+runtime.GOARCH, nil)
-	if err != nil {
-		return commands.UpgradeReport{OK: false, Status: "error", Note: err.Error()}
-	}
-	request.Header.Set("Authorization", "Bearer "+credential)
-	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
-	if err != nil {
-		return commands.UpgradeReport{OK: false, Status: "error", Note: "下载失败: " + err.Error()}
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return commands.UpgradeReport{OK: false, Status: "error", Note: fmt.Sprintf("下载失败: HTTP %d %s", response.StatusCode, strings.TrimSpace(string(body)))}
-	}
-	// Trust but verify: a wrong-architecture replacement bricks the machine
-	// (exec format error on next start, exactly the 2026-10-10 Mac incident
-	// where a linux/amd64 hub binary reached a darwin/arm64 agent). Refuse
-	// instead of replacing.
-	if status := response.Header.Get("X-Homer-Platform"); status != "" && status != runtime.GOOS+"/"+runtime.GOARCH {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return commands.UpgradeReport{OK: false, Status: "platform-mismatch",
-			Note: "hub 提供的是 " + status + " 的 homer，这台机器是 " + runtime.GOOS + "/" + runtime.GOARCH + "，已拒绝替换（请从 GitHub Releases 安装对应平台版本）: " + strings.TrimSpace(string(body))}
-	}
-	tmp := self + ".upgrade"
-	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return commands.UpgradeReport{OK: false, Status: "error", Note: "写临时文件失败: " + err.Error()}
-	}
-	hasher := sha256.New()
-	size, copyErr := io.Copy(io.MultiWriter(file, hasher), response.Body)
-	closeErr := file.Close()
-	if copyErr != nil {
-		_ = os.Remove(tmp)
-		return commands.UpgradeReport{OK: false, Status: "error", Note: "下载中断: " + copyErr.Error()}
-	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return commands.UpgradeReport{OK: false, Status: "error", Note: "写临时文件失败: " + closeErr.Error()}
-	}
-	if err := os.Rename(tmp, self); err != nil {
-		_ = os.Remove(tmp)
-		return commands.UpgradeReport{OK: false, Status: "error", Note: "替换二进制失败: " + err.Error()}
-	}
-	hash := hex.EncodeToString(hasher.Sum(nil))
-	return commands.UpgradeReport{OK: true, Status: "upgraded", FromHub: dataURL, Binary: self, SizeBytes: size, Hash: hash}
+	// ctx flows into the request: daemon shutdown or task cancellation
+	// aborts the download instead of finishing a replace nobody is
+	// waiting for anymore.
+	return commands.DownloadAndReplace(ctx, &http.Client{Timeout: commands.UpgradeDownloadTimeout}, dataURL, credential, self)
 }
 
 const reexecInflightWait = 10 * time.Second

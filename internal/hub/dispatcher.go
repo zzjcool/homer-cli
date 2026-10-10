@@ -148,6 +148,28 @@ func (d *Dispatcher) AgentUpgrade(ctx context.Context, agentID string) (json.Raw
 	return d.callTask(ctx, agentID, TaskKindUpgrade, TaskOptions{Confirm: true})
 }
 
+// AgentPlatform reports the platform a machine last reported with its
+// heartbeat (host.os / host.arch). It backs web.PlatformSource so a hub can
+// route platform-less /dl/homer requests from old clients by the machine's
+// real platform instead of streaming its own binary (2026-10-10 Mac
+// incident follow-up). ok is false when the machine is unknown or has not
+// reported a platform yet.
+func (d *Dispatcher) AgentPlatform(agentID string) (goos, goarch string, ok bool) {
+	if d == nil || d.Registry == nil {
+		return "", "", false
+	}
+	info, known := d.Registry.Get(agentID)
+	if !known || info.Host == nil {
+		return "", "", false
+	}
+	goos = strings.TrimSpace(info.Host.OS)
+	goarch = strings.TrimSpace(info.Host.Arch)
+	if goos == "" || goarch == "" {
+		return "", "", false
+	}
+	return goos, goarch, true
+}
+
 func (d *Dispatcher) AgentToolUpgrade(ctx context.Context, agentID, tool string) (json.RawMessage, error) {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {
@@ -485,3 +507,8 @@ func (d *Dispatcher) RemoveAgent(agentID string) bool {
 var _ web.AgentsSource = (*Dispatcher)(nil)
 var _ web.InspectSource = (*Dispatcher)(nil)
 var _ web.ResolutionSource = (*Dispatcher)(nil)
+
+// Compile-time guarantee the platform capability cannot silently rot:
+// without this assertion a signature change would degrade every
+// platform-less /dl/homer request to 409 with no build error.
+var _ web.PlatformSource = (*Dispatcher)(nil)

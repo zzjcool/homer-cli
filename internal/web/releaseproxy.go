@@ -18,7 +18,8 @@ import (
 // Release archive so a machine never receives a binary it cannot execute
 // (2026-10-10 Mac incident: a linux/amd64 hub binary reached a darwin/arm64
 // agent and bricked it with an exec format error).
-const releaseBaseURL = "https://github.com/zzjcool/homer-cli/releases/latest/download"
+// A var (not const) so tests can point it at a local fixture server.
+var releaseBaseURL = "https://github.com/zzjcool/homer-cli/releases/latest/download"
 
 // releaseCacheTTL bounds how long a proxied release archive stays in memory.
 const releaseCacheTTL = 10 * time.Minute

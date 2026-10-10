@@ -566,3 +566,39 @@ func TestTaskOptionsForScopeCopiesResolutionAndConfigPolicyFields(t *testing.T) 
 		t.Fatalf("task options = %+v", options)
 	}
 }
+
+// TestDispatcherAgentPlatform verifies the PlatformSource capability the
+// web /dl/homer router uses to route platform-less requests from old
+// clients: the platform comes from the machine's heartbeat (host.os/arch),
+// and machines without a reported platform are reported as unknown rather
+// than guessed (2026-10-10 Mac incident follow-up).
+func TestDispatcherAgentPlatform(t *testing.T) {
+	registry := NewRegistry()
+	dispatcher := NewDispatcher(registry, "")
+	// Machines must be attached before their heartbeats can update the
+	// host snapshot (Registry.UpdateHost is a no-op for unknown IDs).
+	for _, id := range []string{"mac-agent", "bare-agent"} {
+		sess, peer := registryTestSession()
+		registry.Attach(AgentInfo{AgentID: id, Hostname: id}, sess)
+		defer peer.CloseNow()
+		defer sess.Close(stream.CloseNormal, "test complete")
+	}
+	registry.UpdateHost("mac-agent", HostSnapshot{OS: "darwin", Arch: "arm64"})
+	registry.UpdateHost("bare-agent", HostSnapshot{OS: "linux"}) // no arch: unknown
+
+	goos, goarch, ok := dispatcher.AgentPlatform("mac-agent")
+	if !ok || goos != "darwin" || goarch != "arm64" {
+		t.Fatalf("mac-agent platform = %q/%q ok=%v, want darwin/arm64", goos, goarch, ok)
+	}
+	if goos, goarch, ok := dispatcher.AgentPlatform("bare-agent"); ok {
+		t.Fatalf("partial platform must be unknown, got %q/%q", goos, goarch)
+	}
+	if goos, goarch, ok := dispatcher.AgentPlatform("missing-agent"); ok {
+		t.Fatalf("unknown machine must be unknown, got %q/%q", goos, goarch)
+	}
+	// A nil dispatcher must not panic (embedded sources).
+	var nilDispatcher *Dispatcher
+	if _, _, ok := nilDispatcher.AgentPlatform("any"); ok {
+		t.Fatal("nil dispatcher must report unknown")
+	}
+}
