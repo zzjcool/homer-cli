@@ -20,12 +20,13 @@ func TestTaskOptionsZeroValueOmitsResolutionFields(t *testing.T) {
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatal(err)
 	}
-	// Round-trip of every new field.
+	// Round-trip of every newly added field, including config policy.
 	filled, err := json.Marshal(TaskOptions{
 		ResolutionAction: "record",
 		ResolutionChoice: "center",
 		CenterGeneration: 7,
 		ApplyResolutions: true,
+		ConfigPolicy:     map[string]string{"pi": "center"},
 		ClearResolutions: true,
 	})
 	if err != nil {
@@ -36,7 +37,8 @@ func TestTaskOptionsZeroValueOmitsResolutionFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reparsed.ResolutionAction != "record" || reparsed.ResolutionChoice != "center" ||
-		reparsed.CenterGeneration != 7 || !reparsed.ApplyResolutions || !reparsed.ClearResolutions {
+		reparsed.CenterGeneration != 7 || !reparsed.ApplyResolutions || !reparsed.ClearResolutions ||
+		reparsed.ConfigPolicy["pi"] != "center" {
 		t.Fatalf("resolution fields did not round-trip: %s", filled)
 	}
 }

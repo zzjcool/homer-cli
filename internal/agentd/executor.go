@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/zzjcool/homer-cli/internal/backup"
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/resolutions"
@@ -274,13 +276,13 @@ func (e *localExecutor) Push(ctx context.Context, confirm bool, adapters []strin
 }
 
 func (e *localExecutor) Pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool) (commands.PullReport, error) {
-	return e.pull(ctx, confirm, adapters, preferRemote, nil)
+	return e.pull(ctx, confirm, adapters, preferRemote, nil, nil)
 }
 
 // pull is the private extension point for applying center choices to only the
-// selected adapters. Pull retains its frozen Executor signature and delegates
-// with nil, which preserves PreferRemote's existing whole-selection behavior.
-func (e *localExecutor) pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool, preferRemoteAdapters []string) (commands.PullReport, error) {
+// selected adapters and aligning selected config definitions. Pull retains
+// its frozen Executor signature and delegates with nil policy.
+func (e *localExecutor) pull(ctx context.Context, confirm bool, adapters []string, preferRemote bool, preferRemoteAdapters []string, configPolicy map[string]string) (commands.PullReport, error) {
 	if err := contextError(ctx); err != nil {
 		return commands.PullReport{}, err
 	}
@@ -290,7 +292,7 @@ func (e *localExecutor) pull(ctx context.Context, confirm bool, adapters []strin
 		if err != nil {
 			return commands.PullReport{}, err
 		}
-		if err := e.bootstrapFromGeneration(snapshot, meta); err != nil {
+		if err := e.bootstrapFromGeneration(snapshot, meta, configPolicy); err != nil {
 			return commands.PullReport{}, err
 		}
 		deps.HubSnapshot = snapshot
@@ -521,9 +523,9 @@ func (e *localExecutor) downloadHubSnapshotUnshared(ctx context.Context) ([]core
 // every center file as new content and applies it cleanly; seeding the
 // store with the generation would instead read the fresh machine's empty
 // tool directories as "deleted everything" and conflict. The post-apply
-// step of that first pull writes the real baseline. An existing config is
-// never overwritten (a configured machine pulls normally).
-func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta []byte) error {
+// step of that first pull writes the real baseline. An existing config stays
+// unchanged unless the dispatch carries a config policy.
+func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta []byte, policy map[string]string) error {
 	paths := core.GetHomerPaths(func(key string) string {
 		if key == "HOMER_HOME" {
 			return e.homerHome
@@ -531,7 +533,7 @@ func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta [
 		return os.Getenv(key)
 	})
 	if _, err := os.Stat(paths.ConfigFile); err == nil {
-		return addMissingAdapters(paths, meta)
+		return applyConfigPolicy(paths, meta, policy)
 	}
 	if len(meta) == 0 {
 		return nil
@@ -542,13 +544,11 @@ func (e *localExecutor) bootstrapFromGeneration(_ []core.AdapterSnapshot, meta [
 	return os.WriteFile(paths.ConfigFile, meta, 0o644)
 }
 
-// addMissingAdapters brings a configured machine up to the center's adapter
-// list. An adapter the center knows (the keyring is added on whichever
-// machine first creates a key) but this machine's homer.json lacks can never
-// be dispatched: the machine only trusts its own config and answers "没有适配器".
-// Only absent adapters are added, from the center's definition; anything the
-// machine already has is left exactly as the user set it.
-func addMissingAdapters(paths core.HomerPaths, meta []byte) error {
+// applyConfigPolicy brings a configured machine up to the center's adapter
+// list and applies any requested definitions without blocking a pull when the
+// center or the machine's config cannot be read. An adapter absent locally is
+// always added so newly introduced adapters (including keyring) can dispatch.
+func applyConfigPolicy(paths core.HomerPaths, meta []byte, policy map[string]string) error {
 	if len(meta) == 0 {
 		return nil
 	}
@@ -561,21 +561,99 @@ func addMissingAdapters(paths core.HomerPaths, meta []byte) error {
 	if err != nil {
 		return nil // a broken local config is reported by the pull itself
 	}
-	added := false
-	for id, adapter := range center.Adapters {
-		if _, ok := local.Adapters[id]; ok {
+
+	changed := false
+	for id, centerAdapter := range center.Adapters {
+		localAdapter, exists := local.Adapters[id]
+		if !exists {
+			if local.Adapters == nil {
+				local.Adapters = map[string]core.AdapterConfig{}
+			}
+			local.Adapters[id] = centerAdapter
+			changed = true
 			continue
 		}
-		if local.Adapters == nil {
-			local.Adapters = map[string]core.AdapterConfig{}
+
+		switch policy[id] {
+		case "center":
+			if !reflect.DeepEqual(localAdapter, centerAdapter) {
+				local.Adapters[id] = centerAdapter
+				changed = true
+			}
+		case "keep":
+			adapterChanged := false
+			for categoryName, centerCategory := range centerAdapter.Categories {
+				localCategory, exists := localAdapter.Categories[categoryName]
+				if !exists {
+					if localAdapter.Categories == nil {
+						localAdapter.Categories = map[string]core.CategoryConfig{}
+					}
+					localAdapter.Categories[categoryName] = centerCategory
+					changed = true
+					adapterChanged = true
+					continue
+				}
+				paths := unionConfigPaths(localCategory.Paths, centerCategory.Paths)
+				if !equalConfigPaths(paths, localCategory.Paths) {
+					localCategory.Paths = paths
+					localAdapter.Categories[categoryName] = localCategory
+					changed = true
+					adapterChanged = true
+				}
+			}
+			if adapterChanged {
+				local.Adapters[id] = localAdapter
+			}
 		}
-		local.Adapters[id] = adapter
-		added = true
 	}
-	if !added {
+	if !changed {
 		return nil
 	}
+	if _, err := backup.BackupFiles(paths, "pull", []backup.BackupTarget{{
+		SourceAbs: paths.ConfigFile,
+		Label:     "homer.json",
+	}}); err != nil {
+		return err
+	}
 	return core.SaveConfig(paths, *local)
+}
+
+// unionConfigPaths keeps local declarations first and appends center paths
+// that are not already present after the same path normalization used by the
+// adapter scanner.
+func unionConfigPaths(local, center []string) []string {
+	if len(local) == 0 && len(center) == 0 {
+		return local
+	}
+	seen := make(map[string]struct{}, len(local)+len(center))
+	merged := make([]string, 0, len(local)+len(center))
+	appendUnique := func(value string) {
+		normalized := filepath.ToSlash(value)
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		merged = append(merged, normalized)
+	}
+	for _, value := range local {
+		appendUnique(value)
+	}
+	for _, value := range center {
+		appendUnique(value)
+	}
+	return merged
+}
+
+func equalConfigPaths(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // uploadHubSnapshot pushes prepared snapshots to the hub.
