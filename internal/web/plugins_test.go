@@ -182,6 +182,43 @@ func TestPluginInstallPublishesGenerationAndPreservesStore(t *testing.T) {
 	}
 }
 
+func TestPluginInstallUsesHubConfigWhenNoGenerationExists(t *testing.T) {
+	home := pluginTestHome(t)
+	paths := pluginTestPaths(t, home)
+	if err := core.SaveConfig(paths, core.HomerConfig{
+		Version: 1,
+		Adapters: map[string]core.AdapterConfig{
+			"legacy": {
+				Root: "~/.legacy",
+				Categories: map[string]core.CategoryConfig{
+					"files": {Paths: []string{"settings.json"}, Mode: core.SyncModeMirror},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newPluginTestServer(t, home, pluginruntime.New(home), nil)
+	response := request(t, server.Handler(), http.MethodPost, "/api/plugins/install", `{"id":"vscode"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("install vscode = %d %s", response.Code, response.Body)
+	}
+	head, ok := gens.New(home).Read()
+	if !ok || head.Generation != 1 {
+		t.Fatalf("generation head = %+v, ok=%v; want generation 1", head, ok)
+	}
+	config, problems := core.ValidateConfig(head.Meta)
+	if config == nil {
+		t.Fatalf("published homer.json invalid: %v", problems)
+	}
+	if _, exists := config.Adapters["legacy"]; !exists {
+		t.Fatalf("install lost current hub adapter config: %+v", config.Adapters)
+	}
+	if _, exists := config.Adapters["vscode"]; !exists {
+		t.Fatalf("install did not add vscode to hub config: %+v", config.Adapters)
+	}
+}
+
 func TestPluginInstallStartsGenerationFromEmptyConfigWhenNeeded(t *testing.T) {
 	home := pluginTestHome(t)
 	state := pluginruntime.New(home)
@@ -305,6 +342,11 @@ func TestPluginActionInstallUninstallAndUnsupportedRoute(t *testing.T) {
 	installed := request(t, server.Handler(), http.MethodPost, "/api/plugins/install", `{"id":"ssh-key"}`)
 	if installed.Code != http.StatusOK || !state.IsInstalled("ssh-key") {
 		t.Fatalf("install action = %d %s", installed.Code, installed.Body)
+	}
+	listed := request(t, server.Handler(), http.MethodGet, "/api/plugins")
+	var list pluginsListResponse
+	if listed.Code != http.StatusOK || json.Unmarshal(listed.Body.Bytes(), &list) != nil || len(list.Installed) != 1 || list.Installed[0].ID != "ssh-key" {
+		t.Fatalf("GET after action install = %d %s", listed.Code, listed.Body)
 	}
 	if _, exists := gens.New(home).Read(); exists {
 		t.Fatal("installing action plugin unexpectedly published a generation")
