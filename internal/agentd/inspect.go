@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -364,6 +365,22 @@ func mergeInspectStatusReports(reports []commands.StatusReport) (commands.Status
 		Errors:   make([]string, 0),
 		Disabled: make([]string, 0),
 	}
+	// Each per-adapter RunStatus loads the same full config, so every report
+	// carries an identical config outline. Propagate it so the merged report
+	// stays field-for-field equal to a whole RunStatus; disagreeing outlines
+	// mean the config changed mid-inspect — take the whole-status fallback
+	// instead of inventing a merge.
+	var outline *[]commands.ConfigOutlineAdapter
+	for i := range reports {
+		if i == 0 {
+			outline = reports[i].ConfigOutline
+			continue
+		}
+		if !configOutlinesEqual(outline, reports[i].ConfigOutline) {
+			return commands.StatusReport{}, false
+		}
+	}
+	merged.ConfigOutline = outline
 	seenAdapters := make(map[string]struct{})
 	for _, report := range reports {
 		for _, adapter := range report.Adapters {
@@ -405,6 +422,17 @@ func mergeInspectStatusReports(reports []commands.StatusReport) (commands.Status
 		merged.Warnings = nil
 	}
 	return merged, true
+}
+
+// configOutlinesEqual compares two status outlines by value; nil and empty
+// are both "no outline" and compare equal.
+func configOutlinesEqual(left, right *[]commands.ConfigOutlineAdapter) bool {
+	leftEmpty := left == nil || len(*left) == 0
+	rightEmpty := right == nil || len(*right) == 0
+	if leftEmpty || rightEmpty {
+		return leftEmpty == rightEmpty
+	}
+	return reflect.DeepEqual(*left, *right)
 }
 
 func selectInspectAdapters(report commands.StatusReport, requested []string) commands.StatusReport {
