@@ -59,12 +59,11 @@ func TestKeyDispatchUnlocksOnTarget(t *testing.T) {
 	assertKeyDispatchFile(t, world, keyDispatchInitialPlaintext, dispatchBody)
 }
 
-// TestKeyDispatchConflictSkipsUnlockSilently pins the currently observed
-// conflict path: after a successful initial dispatch, a divergent local edit
-// to settings.json conflicts with a newer center generation. The keyring
-// ciphertext still arrives, but the target's models.json stays local because
-// the hub skips unlock for the non-ok pull report and gives no key/unlock notice.
-func TestKeyDispatchConflictSkipsUnlockSilently(t *testing.T) {
+// TestKeyDispatchConflictStillUnlocks verifies that a partial dispatch still
+// opens the delivered keyring item when another file remains conflicted. The
+// center's models.json is applied while the conflicting local settings.json
+// stays untouched, and the response continues to report the conflict.
+func TestKeyDispatchConflictStillUnlocks(t *testing.T) {
 	world := setupKeyDispatchWorld(t)
 
 	collectCode, collectBody := collectKeyDispatch(t, world)
@@ -112,17 +111,16 @@ func TestKeyDispatchConflictSkipsUnlockSilently(t *testing.T) {
 	secondDispatchCode, secondDispatchBody := pullKeyDispatch(t, world)
 	status, _ := jsonPath(t, secondDispatchBody, "status").(string)
 	ok, _ := jsonPath(t, secondDispatchBody, "ok").(bool)
-	conflictOrNonOK := status == "conflicts-remain" || status == "conflicts" || secondDispatchCode != http.StatusOK || !ok
-	if !conflictOrNonOK {
-		t.Fatalf("second dispatch did not report a conflict or non-ok result: HTTP %d body=%s\nhub output: %s",
+	if secondDispatchCode != http.StatusUnprocessableEntity || ok || status != "conflicts-remain" {
+		t.Fatalf("second dispatch should report conflicts-remain (HTTP 422, ok=false): HTTP %d body=%s\nhub output: %s",
 			secondDispatchCode, secondDispatchBody, procOutput[world.hubProc])
 	}
 	assertKeyDispatchManifest(t, world, secondDispatchBody)
 	assertKeyDispatchConflict(t, secondDispatchBody)
 	assertKeyDispatchBlobApplied(t, world, secondDispatchBody)
 
-	if strings.Contains(secondDispatchBody, "密钥") || strings.Contains(secondDispatchBody, "解开") {
-		t.Fatalf("second dispatch unexpectedly mentioned a key/unlock action: %s\nhub output: %s",
+	if strings.Contains(secondDispatchBody, "口令不正确") {
+		t.Fatalf("second dispatch reported an incorrect password: %s\nhub output: %s",
 			secondDispatchBody, procOutput[world.hubProc])
 	}
 	settingsAfter, err := os.ReadFile(settingsB)
@@ -130,10 +128,10 @@ func TestKeyDispatchConflictSkipsUnlockSilently(t *testing.T) {
 		t.Fatalf("machine-b settings.json = %q err=%v; conflict must keep B's local content; response=%s\nhub output: %s",
 			settingsAfter, err, secondDispatchBody, procOutput[world.hubProc])
 	}
-	assertKeyDispatchFile(t, world, keyDispatchConflictPlaintext, secondDispatchBody)
+	assertKeyDispatchFile(t, world, keyDispatchUpdatedPlaintext, secondDispatchBody)
 	t.Logf("machine-b settings.json remains local (%d bytes)", len(settingsAfter))
-	t.Logf("silent conflict observation: HTTP %d ok=%v status=%q; keyring ciphertext advanced, machine-b kept its local models.json; response has no 密钥/解开 notice; body=%s",
-		secondDispatchCode, ok, status, secondDispatchBody)
+	t.Logf("partial conflict: HTTP %d ok=%v status=%q; settings.json stayed local and the center's models.json was unlocked; response confirms the keyring item was applied",
+		secondDispatchCode, ok, status)
 }
 
 func setupKeyDispatchWorld(t *testing.T) *keyDispatchWorld {

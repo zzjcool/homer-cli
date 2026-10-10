@@ -597,9 +597,11 @@ func (s *Server) handleAgentPull(w http.ResponseWriter, r *http.Request, agentID
 		writeErrorValue(w, err)
 		return
 	}
-	if confirmValue(r) && remoteReportOK(raw) {
+	if confirmValue(r) && pullWarrantsUnlock(raw) {
 		if messages := s.unlockDispatched(r.Context(), agentID, scope); len(messages) > 0 {
-			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", "内容已经下发，但没有解开。", messages)
+			message := "内容已经下发，但没有解开。"
+			details := pullUnlockFailureDetails(raw, message, messages)
+			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", message, details)
 			return
 		}
 	}
@@ -719,6 +721,62 @@ func hasConfigError(messages []string) bool {
 		}
 	}
 	return false
+}
+
+func pullWarrantsUnlock(raw json.RawMessage) bool {
+	var report struct {
+		OK      bool   `json:"ok"`
+		Status  string `json:"status"`
+		Applied struct {
+			Written []json.RawMessage `json:"written"`
+		} `json:"applied"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &report) != nil {
+		return false
+	}
+	// A successful pull may be a no-op; preserve the existing unlock behavior.
+	// A non-ok pull warrants unlock only when it proves that content was
+	// actually written. In particular, a conflict-only, aborted, or otherwise
+	// empty report must not trigger an unlock attempt.
+	return report.OK || len(report.Applied.Written) > 0
+}
+
+// pullUnlockFailureDetails preserves the pull's partial-failure context in
+// the unlock-failed error envelope. The console can still recognize a
+// conflicts-remain report and show its conflict actions, while the unlock
+// failure remains visible in the same details list.
+func pullUnlockFailureDetails(raw json.RawMessage, message string, unlockMessages []string) []string {
+	details := make([]string, 0, len(unlockMessages)+2)
+	var report struct {
+		OK        bool              `json:"ok"`
+		Status    string            `json:"status"`
+		Errors    []string          `json:"errors"`
+		Conflicts []json.RawMessage `json:"conflicts"`
+	}
+	if len(raw) > 0 && json.Unmarshal(raw, &report) == nil && !report.OK {
+		details = append(details, report.Errors...)
+		if report.Status == "conflicts-remain" {
+			hasConflictSummary := false
+			for _, line := range report.Errors {
+				if strings.Contains(line, "两边都改过") || (strings.Contains(line, "检测到 ") && strings.Contains(line, "个冲突")) {
+					hasConflictSummary = true
+					break
+				}
+			}
+			if !hasConflictSummary {
+				if len(report.Conflicts) > 0 {
+					details = append(details, "检测到 "+strconv.Itoa(len(report.Conflicts))+" 个冲突（已保留本地）。")
+				} else {
+					details = append(details, msgBothChanged)
+				}
+			}
+		}
+	}
+	if message != "" {
+		details = append(details, message)
+	}
+	details = append(details, unlockMessages...)
+	return details
 }
 
 func writeRemoteWriteReport(w http.ResponseWriter, raw json.RawMessage) {

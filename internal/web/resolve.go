@@ -292,9 +292,11 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 	if recordImmediate && remoteReportOK(raw) {
 		pending = nil
 	}
-	if choice == resolveCenter && remoteReportOK(raw) {
+	if choice == resolveCenter && pullWarrantsUnlock(raw) {
 		if messages := s.unlockDispatched(r.Context(), agentID, scope); len(messages) > 0 {
-			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", "内容已经写上，但密钥没有解开。", messages)
+			message := "内容已经写上，但密钥没有解开。"
+			details := pullUnlockFailureDetails(raw, message, messages)
+			writeError(w, http.StatusUnprocessableEntity, "unlock-failed", message, details)
 			return
 		}
 	}
