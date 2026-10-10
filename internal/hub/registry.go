@@ -46,8 +46,9 @@ type Registry struct {
 }
 
 type registryAgent struct {
-	info    AgentInfo
-	session *stream.Session
+	info             AgentInfo
+	session          *stream.Session
+	ReportedAdapters []string
 }
 
 func NewRegistry() *Registry {
@@ -222,6 +223,17 @@ func (r *Registry) NoteWriteOutcome(agentID, status string, ok bool, conflicts i
 		if agent.info.Drift == nil || fresh || hadConflicts {
 			agent.info.Drift = &AgentDrift{}
 		}
+	}
+}
+
+func (r *Registry) NoteReportedAdapters(agentID string, ids []string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if agent, ok := r.agents[agentID]; ok {
+		agent.ReportedAdapters = cloneStrings(ids)
 	}
 }
 
