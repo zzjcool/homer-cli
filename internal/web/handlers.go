@@ -70,6 +70,15 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.requireAuth(w, r) {
 			return
 		}
+		// Platform-aware download (2026-10-10 Mac incident): a request that
+		// names a platform other than the hub's own must NOT receive the
+		// hub's binary — it would brick the machine with an exec format
+		// error. Serve the matching GitHub Release archive instead.
+		goos, goarch := r.URL.Query().Get("goos"), r.URL.Query().Get("goarch")
+		if goos != "" && goarch != "" && (goos != runtime.GOOS || goarch != runtime.GOARCH) {
+			s.serveReleaseBinary(w, r, goos, goarch, path == "/dl/homer.gz")
+			return
+		}
 		s.serveSelfBinary(w, r, path == "/dl/homer.gz")
 		return
 	}

@@ -199,6 +199,9 @@ type Server struct {
 	opts    ServeOptions
 	handler http.Handler
 	auth    *authStore
+	// releaseCache memoizes proxied GitHub-Release binaries per platform
+	// (see releaseproxy.go); a sync.Map needs no init.
+	releaseCache sync.Map
 }
 
 // writeMutex is intentionally package-global. Multiple Server values in one

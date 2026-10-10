@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"sync"
@@ -1238,4 +1240,43 @@ func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition did not become true")
+}
+
+// TestDaemonUpgradeRefusesPlatformMismatch guards the 2026-10-10 Mac
+// incident: a hub serving its own linux/amd64 binary to a darwin/arm64 agent
+// must never replace the agent's executable. The marker header carries the
+// platform; the upgrade reports platform-mismatch and leaves the binary
+// untouched.
+func TestDaemonUpgradeRefusesPlatformMismatch(t *testing.T) {
+	self := filepath.Join(t.TempDir(), "homer")
+	if err := os.WriteFile(self, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that wrongly serves its own binary to a DIFFERENT
+	// platform: pick a platform the test binary is guaranteed not to be.
+	wrongPlatform := "windows/386"
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Homer-Platform", wrongPlatform)
+		_, _ = w.Write([]byte("not a native binary"))
+	}))
+	defer dataPlane.Close()
+	previous := currentExecutable
+	currentExecutable = func() (string, error) { return self, nil }
+	t.Cleanup(func() { currentExecutable = previous })
+	d := New(Config{
+		HubURL:      "http://control.example",
+		DataURL:     dataPlane.URL,
+		AgentSecret: "upgrade-secret",
+	}, &testExecutor{})
+	report := d.runUpgrade(context.Background())
+	if report.OK || report.Status != "platform-mismatch" {
+		t.Fatalf("upgrade report = %+v, want platform-mismatch refusal", report)
+	}
+	data, err := os.ReadFile(self)
+	if err != nil || string(data) != "#!/bin/sh\nexit 0\n" {
+		t.Fatalf("the binary must be untouched: %q err=%v", data, err)
+	}
+	if _, err := os.Stat(self + ".upgrade"); !os.IsNotExist(err) {
+		t.Fatalf("no staging file may survive a refusal: %v", err)
+	}
 }

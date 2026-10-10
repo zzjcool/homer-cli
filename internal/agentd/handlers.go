@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -263,6 +264,10 @@ func (d *Daemon) runTaskCommand(ctx context.Context, req *stream.Request, option
 // agent secret, then atomically replaces the running executable. Keeping this
 // inside agentd lets DataURL be honored without changing the frozen command or
 // Executor APIs.
+// currentExecutable is the injectable seam over os.Executable for tests;
+// nil (the zero value) means the real call.
+var currentExecutable = os.Executable
+
 func (d *Daemon) runUpgrade(ctx context.Context) commands.UpgradeReport {
 	dataURL := strings.TrimRight(strings.TrimSpace(d.cfg.DataURL), "/")
 	if dataURL == "" {
@@ -275,12 +280,16 @@ func (d *Daemon) runUpgrade(ctx context.Context) commands.UpgradeReport {
 	if credential == "" {
 		return commands.UpgradeReport{OK: false, Status: "no-credential", Note: "没有 agent secret 或 hub token，无法下载 homer"}
 	}
-	self, err := os.Executable()
+	self, err := currentExecutable()
 	if err != nil {
 		return commands.UpgradeReport{OK: false, Status: "error", Note: "定位当前二进制失败: " + err.Error()}
 	}
 	self, _ = filepath.EvalSymlinks(self)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, dataURL+"/dl/homer", nil)
+	// Ask for THIS machine's platform. A hub serving its own binary only
+	// has the hub's platform; cross-platform requests are satisfied from
+	// GitHub Releases by the hub (see serveSelfBinary).
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		dataURL+"/dl/homer?goos="+runtime.GOOS+"&goarch="+runtime.GOARCH, nil)
 	if err != nil {
 		return commands.UpgradeReport{OK: false, Status: "error", Note: err.Error()}
 	}
@@ -293,6 +302,15 @@ func (d *Daemon) runUpgrade(ctx context.Context) commands.UpgradeReport {
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return commands.UpgradeReport{OK: false, Status: "error", Note: fmt.Sprintf("下载失败: HTTP %d %s", response.StatusCode, strings.TrimSpace(string(body)))}
+	}
+	// Trust but verify: a wrong-architecture replacement bricks the machine
+	// (exec format error on next start, exactly the 2026-10-10 Mac incident
+	// where a linux/amd64 hub binary reached a darwin/arm64 agent). Refuse
+	// instead of replacing.
+	if status := response.Header.Get("X-Homer-Platform"); status != "" && status != runtime.GOOS+"/"+runtime.GOARCH {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		return commands.UpgradeReport{OK: false, Status: "platform-mismatch",
+			Note: "hub 提供的是 " + status + " 的 homer，这台机器是 " + runtime.GOOS + "/" + runtime.GOARCH + "，已拒绝替换（请从 GitHub Releases 安装对应平台版本）: " + strings.TrimSpace(string(body))}
 	}
 	tmp := self + ".upgrade"
 	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
