@@ -494,6 +494,7 @@ const app = {
   agents: [],             // 最近一次 /api/agents 的机器列表
   plugins: null,          // 最近一次 /api/plugins 的安装状态
   pluginAction: null,     // 当前正在填写的 action 插件
+  pluginListSignature: null,
   pendingAction: null,    // 收取/下发/裁决/密钥 待确认
   keys: [],
   scopeKeys: [],
@@ -2534,6 +2535,9 @@ function renderPluginList(targetID, plugins, installed) {
 function renderPlugins() {
   const installed = app.plugins && Array.isArray(app.plugins.installed) ? app.plugins.installed : null;
   const available = app.plugins && Array.isArray(app.plugins.available) ? app.plugins.available : null;
+  const signature = JSON.stringify({ installed, available });
+  if (signature === app.pluginListSignature) return;
+  app.pluginListSignature = signature;
   renderPluginList("plugins-installed", installed, true);
   renderPluginList("plugins-available", available, false);
 }

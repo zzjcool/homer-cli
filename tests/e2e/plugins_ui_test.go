@@ -141,9 +141,12 @@ func TestPluginManagementConsole(t *testing.T) {
 		t.Fatal("ssh-key action form did not render an online machine and the required githubUser field from its form spec")
 	}
 	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__pluginsBeforeSSHActionRefresh = app.plugins`, nil),
 		chromedp.Evaluate(`document.getElementById("plugin-action-agent").value = "ui-box"; document.querySelector('#plugin-action-fields input[name="githubUser"]').value = "octocat";`, nil),
 		chromedp.Click(`#btn-plugin-action-submit`, chromedp.ByQuery),
 		chromedp.Poll(`window.__pluginUIRequests.some(request => request.url === "/api/agents/ui-box/ssh-key")`, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
+		chromedp.Poll(`app.plugins !== window.__pluginsBeforeSSHActionRefresh`, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
+		chromedp.WaitVisible(`#plugins-installed [data-plugin-id="pi"] button[data-plugin-action="dispatch"]`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("submit ssh-key action: %v\npage:\n%s", err, browserText(ctx))
 	}
@@ -163,8 +166,11 @@ func TestPluginManagementConsole(t *testing.T) {
 
 	// Adapter dispatch confirms the operation and posts the explicit adapter scope.
 	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__pluginsBeforeDispatchRefresh = app.plugins`, nil),
 		chromedp.Click(`#plugins-installed [data-plugin-id="pi"] button[data-plugin-action="dispatch"]`, chromedp.ByQuery),
 		chromedp.Poll(`window.__pluginUIRequests.some(request => request.url.startsWith("/api/sync?direction=dispatch"))`, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
+		chromedp.Poll(`app.plugins !== window.__pluginsBeforeDispatchRefresh`, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
+		chromedp.WaitVisible(`#plugins-installed [data-plugin-id="pi"] button[data-plugin-action="uninstall"]`, chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("dispatch adapter plugin: %v\npage:\n%s", err, browserText(ctx))
 	}
