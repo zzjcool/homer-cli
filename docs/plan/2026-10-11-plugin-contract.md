@@ -69,7 +69,9 @@ func Builtins() []Plugin
 | opencode | adapter | opencode | opencode.DefaultOpencodeAdapter + desc「opencode 配置」 |
 | vscode | adapter | VS Code | vscode.DefaultVSCodeAdapter + desc「VS Code 设置与扩展」 |
 | keyring | carrier | 密钥环 | keys.DefaultAdapter + desc「跟随同步的加密密钥载体」 |
-| ssh-key | action | 登录公钥 | form: [githubUser/GitHub 用户名/必填/例如 octocat] + desc「把 GitHub 用户公钥写入机器 authorized_keys」 |
+| ssh-key | action | 登录公钥 | ActionSpec{Method:"ssh-key", Form:[{Field:"githubUser", Label:"GitHub 用户名", Required:true, Placeholder:"例如 octocat"}]} + desc「把 GitHub 用户公钥写入机器 authorized_keys」 |
+
+**勘误（v1.2）**：pi 的凭证文件实为 **2 条**（auth.json、mcp-auth.json，见 internal/adapter/pi/defaults.go SecretFiles），opencode 1 条。任务描述里「pi 返回 3 条」作废，以实际 SecretFiles 为准。PluginCredentialFiles 从 pi.SecretFiles/SecretDestination 与 opencode 常量平移。
 
 **ActionSpec 仅做 UI 呈现与表单渲染**，不驱动执行（执行仍走现有硬编码
 handler：/api/agents/<id>/ssh-key）。B3 允许为渲染方便加非契约字段。
@@ -100,7 +102,7 @@ A 有权修复这些测试引用（改成 `pluginregistry.*` 对应符号）。
 2. `pluginregistry.Builtin(id string) (Plugin, bool)`
 3. `pluginregistry.Tools() []adapter.Tool` / `pluginregistry.ToolByID(id)` / `pluginregistry.OfficialInstall(binary)` —— **内置清单整体从 internal/adapter/tools.go 迁入 pluginregistry**（避免 import 环：pluginregistry import adapter 拿 Tool 类型与各 defaults，故 adapter 包不得反向引用 pluginregistry）。adapter 包保留 `Tool` 类型定义本身（toolctl/hub/agentd 的类型引用不动）；`adapter.Tools()/ToolByID/OfficialInstall` 三个函数**删除**，调用方全部切换：toolctl.go、toolcheck.go。B1/B3 不直接消费这三项。
 4. `pluginregistry.CredentialRules() []web.CredentialRule` —— **砍掉**，A 不碰 web；改为 B1 在 web/plugins.go 里定义 `func (s *Server) installedCredentialRules()`：遍历 `pluginregistry.Builtins()` 中 role=adapter 的、且 `pluginregistry.PluginCredentialFiles(p)` 非空的。故 A 提供第 3.5 项：
-   `pluginregistry.PluginCredentialFiles(p Plugin) []CredentialFile`，`type CredentialFile struct{ Name, Destination, Note string }`（pi 三条 + opencode 一条，从现 credentials.go 平移）
+   `pluginregistry.PluginCredentialFiles(p Plugin) []CredentialFile`，`type CredentialFile struct{ Name, Destination, Note string }`（pi 2 条：auth.json「登录凭证和 API key」、mcp-auth.json「MCP 服务的登录凭证」；opencode 1 条：auth.json「provider 登录凭证」，destination ~/.local/share/opencode/auth.json；从现 credentials.go 语义平移）
 5. keyring 包删除 `ensureAdapter` 的自动调用（keyring.go:183 一带）：Apply 不再自动把 keyring 塞进 homer.json。**谁补位**：B1 的 key API 层在 keyring 插件已安装时确保 adapter 存在（见 B1 节）。
 6. `web.ServeOptions.Plugins *pluginruntime.State`：**由 B1 负责添加**（pluginruntime 是 B1 的新包；A 不碰 web 包任何文件）。web 对 nil 值必须全兼容（单测/老 e2e 不传）。
 
