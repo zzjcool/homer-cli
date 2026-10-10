@@ -311,7 +311,7 @@ html { scroll-behavior: smooth; }
 
     <section id="sec-keys" aria-label="密钥">
       <h2>密钥</h2>
-      <p class="muted small">这里显示中心已经收下的密钥。在某台机器上新建之后，收取时勾选「密钥」，收完就会出现在这里。</p>
+      <p class="muted small">这里显示中心已经收下的密钥。在某台机器上新建之后，收取时勾选它绑定的适配器，密钥会自动跟着收上来，收完就会出现在这里。下发时同理，密钥自动跟随，不用单独选。</p>
       <div id="key-body"></div>
     </section>
 
@@ -1524,6 +1524,18 @@ function renderScopeChoices(data) {
       centerBtn.addEventListener("click", ev => {
         ev.preventDefault();
         const agentId = app.scopeAgent.agentId;
+        // 这个适配器绑定了密钥时，「以中心为准」必须连同密钥一起写并解开。
+        // 直接发请求会撞后端的密钥闸（422），而且弹窗里没有口令输入，
+        // 用户会被死文案堵死。改走裁决弹窗的两段式：先记录决定并进入
+        // 口令步，密钥能自动跟随，填一次口令即可执行。
+        if (secretsBoundTo(item.id).length) {
+          $("dlg-confirm").close("cancel");
+          // 预选「以中心为准」并直接进入口令步的弹窗：resolutionPreset 勾 radio，
+          // recordChoiceSelections 记住这个预选，用户确认时不再重复选择。
+          app.recordChoiceSelections[item.id] = "center";
+          setTimeout(() => confirmResolveOn("center", { agentId: agentId, hostname: app.scopeAgent.hostname }, true), 0);
+          return;
+        }
         $("dlg-confirm").close("cancel");
         executeResolveOn("center", agentId, [item.id]);
       });
@@ -1809,7 +1821,9 @@ function openScopeDialog(opts) {
   app.scopeChoices = [];
   app.scopePrecheck = null;
   app.resolutionPreset = opts.resolutionPreset || "";
-  app.recordChoiceSelections = {};
+  // confirmResolveOn 前预设的 recordChoiceSelections（冲突行「以中心为准」且
+  // 绑了密钥时写入）不能被抹掉：抹掉后 radio 回到未选。仅在没有预设时清空。
+  if (!opts.keepRecordSelections) app.recordChoiceSelections = {};
   app.resolutionScopeAltLabel = opts.altLabel || "";
   app.scopeLoading = opts.direction === "collect";
   app.scopeStreamFailed = false;
@@ -1882,7 +1896,7 @@ function confirmSSHKey(agent) {
   $("dlg-confirm").showModal();
   setTimeout(() => input.focus(), 0);
 }
-function confirmResolve(agent, preset) {
+function confirmResolve(agent, preset, keepRecordSelections) {
   const name = agent.hostname || agent.agentId;
   openScopeDialog({
     agent: agent,
@@ -1891,11 +1905,12 @@ function confirmResolve(agent, preset) {
     okLabel: "记录决定",
     altLabel: "记录并立即执行",
     resolutionPreset: preset,
+    keepRecordSelections: !!keepRecordSelections,
     action: { kind: "resolve-record", agentId: agent.agentId, name: name },
   });
 }
-function confirmResolveOn(choice, agent) {
-  return confirmResolve(agent, choice);
+function confirmResolveOn(choice, agent, keepRecordSelections) {
+  return confirmResolve(agent, choice, keepRecordSelections);
 }
 
 $("dlg-confirm").querySelector("form").addEventListener("submit", ev => ev.preventDefault());

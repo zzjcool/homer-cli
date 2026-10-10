@@ -25,6 +25,13 @@ func TestConsoleUserCopy(t *testing.T) {
 			t.Fatalf("console copy contains git word %q — the console must speak in sync vocabulary", banned)
 		}
 	}
+	// 密钥行在弹窗里被隐藏（跟着适配器自动走），引导用户去「勾选密钥」的文案
+	// 指向一个不存在的交互，禁止回归。
+	for _, banned := range []string{"勾选「密钥」", "勾选\"密钥\"", "单独「下发」"} {
+		if strings.Contains(html, banned) {
+			t.Fatalf("console copy references a hidden interaction %q — keys ride along with their bound adapters", banned)
+		}
+	}
 	for _, required := range []string{
 		"项未收取", "项待下发", "项冲突",
 		"中心还没有任何内容",
