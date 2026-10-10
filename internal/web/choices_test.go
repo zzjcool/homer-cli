@@ -158,6 +158,53 @@ func TestBuildDispatchChoices(t *testing.T) {
 	}
 }
 
+// A key-only drift (a rotated password, a newly encrypted file) leaves the
+// bound adapter with no pull of its own. The console hides the keyring row,
+// so the key can only travel with its bound adapter; that adapter must then
+// be pre-checked or the key silently strands in the center with no visible
+// way to send it.
+func TestBuildDispatchChoicesPreChecksBoundAdaptersOnKeyDrift(t *testing.T) {
+	machine := choiceReport(
+		commands.StatusAdapterReport{ID: "pi", Pull: 0},
+		commands.StatusAdapterReport{ID: "herdr", Pull: 0},
+		commands.StatusAdapterReport{ID: "keyring", Pull: 4},
+	)
+	got := BuildDispatchChoicesWithKeys([]string{"pi", "herdr", "keyring"}, machine, nil, map[string]bool{"pi": true})
+	byID := map[string]AdapterChoice{}
+	for _, choice := range got {
+		byID[choice.ID] = choice
+	}
+	if !byID["pi"].Checked || !byID["pi"].Enabled {
+		t.Fatalf("pi must be pre-checked so its key can travel: %#v", byID["pi"])
+	}
+	if byID["herdr"].Checked {
+		t.Fatalf("herdr has no key bound and no drift: %#v", byID["herdr"])
+	}
+	// No pending key drift: nothing changes even when an adapter has a key.
+	fresh := choiceReport(
+		commands.StatusAdapterReport{ID: "pi", Pull: 0},
+		commands.StatusAdapterReport{ID: "keyring", Pull: 0},
+	)
+	got = BuildDispatchChoicesWithKeys([]string{"pi", "keyring"}, fresh, nil, map[string]bool{"pi": true})
+	for _, choice := range got {
+		if choice.ID == "pi" && choice.Checked {
+			t.Fatalf("pi must stay unchecked without key drift: %#v", choice)
+		}
+	}
+	// A conflicted adapter stays uncheckable; the recorded decision path
+	// remains the only route for it.
+	conflicted := choiceReport(
+		commands.StatusAdapterReport{ID: "pi", Conflicts: 2},
+		commands.StatusAdapterReport{ID: "keyring", Pull: 4},
+	)
+	got = BuildDispatchChoicesWithKeys([]string{"pi", "keyring"}, conflicted, nil, map[string]bool{"pi": true})
+	for _, choice := range got {
+		if choice.ID == "pi" && choice.Checked {
+			t.Fatalf("conflicted pi must not be pre-checked: %#v", choice)
+		}
+	}
+}
+
 func TestBuildResolveChoicesOnlyConflicts(t *testing.T) {
 	got := BuildResolveChoices(choiceReport(
 		commands.StatusAdapterReport{ID: "pad", Conflicts: 2, Push: 1},
@@ -195,7 +242,7 @@ func TestSyncChoicesEndpoint(t *testing.T) {
 	if !strings.Contains(dispatch.Body.String(), `"id":"vscode"`) || strings.Contains(dispatch.Body.String(), "only-local") {
 		t.Fatalf("dispatch body = %s", dispatch.Body)
 	}
-	if !strings.Contains(dispatch.Body.String(), "口令能解开才会下发") {
+	if !strings.Contains(dispatch.Body.String(), "密钥会自动跟着它绑定的适配器一起下发") {
 		t.Fatalf("dispatch hint = %s", dispatch.Body)
 	}
 

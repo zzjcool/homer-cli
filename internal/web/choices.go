@@ -107,6 +107,19 @@ func BuildDispatchChoices(centerIDs []string, machine []commands.StatusAdapterRe
 // BuildDispatchChoicesWithResolutions builds the ordinary dispatch rows and
 // overlays recorded decisions on adapters that currently conflict.
 func BuildDispatchChoicesWithResolutions(centerIDs []string, machine []commands.StatusAdapterReport, views map[string]ResolutionView) []AdapterChoice {
+	return buildDispatchChoices(centerIDs, machine, views, nil)
+}
+
+// BuildDispatchChoicesWithKeys additionally pre-checks adapters whose key
+// has center drift, so a key-only drift (a rotated password, a newly
+// encrypted file) still reaches the machine: the console hides the keyring
+// row and a key rides along with its bound adapters, so without this the
+// key could never be selected and would silently strand in the center.
+func BuildDispatchChoicesWithKeys(centerIDs []string, machine []commands.StatusAdapterReport, views map[string]ResolutionView, keyBound map[string]bool) []AdapterChoice {
+	return buildDispatchChoices(centerIDs, machine, views, keyBound)
+}
+
+func buildDispatchChoices(centerIDs []string, machine []commands.StatusAdapterReport, views map[string]ResolutionView, keyBound map[string]bool) []AdapterChoice {
 	onMachine := map[string]commands.StatusAdapterReport{}
 	for _, adapter := range machine {
 		if !core.ValidAdapterID(adapter.ID) {
@@ -167,6 +180,13 @@ func BuildDispatchChoicesWithResolutions(centerIDs []string, machine []commands.
 				}
 			}
 		} else if item.Pull > 0 {
+			choice.Checked = true
+		}
+		// A key with pending drift cannot be picked on its own (the console
+		// hides the keyring row); pre-check its bound adapters so the key has
+		// a channel to travel. Only when the machine still lacks the keyring
+		// itself: otherwise the key already rode along.
+		if keyringChoice := onMachine["keyring"]; keyringChoice.Pull > 0 && choice.Enabled && keyBound[id] {
 			choice.Checked = true
 		}
 		out = append(out, choice)
@@ -561,6 +581,25 @@ func (s *Server) handleSyncChoices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+// keyBoundAdapters maps each adapter that has a key bound to it. It is
+// derived from the hub's keyring so the console's dispatch defaults can
+// pre-check those adapters when the key itself has pending drift.
+func (s *Server) keyBoundAdapters() map[string]bool {
+	bound := map[string]bool{}
+	listed := keyring.Apply(s.opts.HomerHome, keyring.Command{Action: "list"})
+	if !listed.OK {
+		return bound
+	}
+	for _, key := range listed.Keys {
+		for _, file := range key.Files {
+			if file.Adapter != "" {
+				bound[file.Adapter] = true
+			}
+		}
+	}
+	return bound
+}
+
 func (s *Server) buildSyncChoicesResponse(direction, agentID string, report commands.StatusReport) (syncChoicesResponse, error) {
 	choices := []AdapterChoice{}
 	hint := ""
@@ -574,7 +613,7 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 			hint = "中心还没有任何内容。先从一台机器收取。"
 		} else {
 			views := statusResolutionViews(report.Resolutions, s.centerGeneration())
-			choices = BuildDispatchChoicesWithResolutions(ids, report.Adapters, views)
+			choices = BuildDispatchChoicesWithKeys(ids, report.Adapters, views, s.keyBoundAdapters())
 			if _, adapters, outlineErr := s.readStorageOutline(); outlineErr == nil {
 				attachStorageOutline(choices, adapters)
 			}
@@ -585,7 +624,7 @@ func (s *Server) buildSyncChoicesResponse(direction, agentID string, report comm
 			if len(choices) == 0 {
 				hint = "中心还没有可下发的适配器。"
 			} else {
-				hint = "只会把勾选的适配器写到这台机器。其他适配器这次不动。带密钥的适配器要先填口令，口令能解开才会下发。"
+				hint = "只会把勾选的适配器写到这台机器。其他适配器这次不动。密钥会自动跟着它绑定的适配器一起下发，确认时填一次口令即可。"
 			}
 		}
 	default:

@@ -188,7 +188,7 @@ func (s *Server) refuseBoundKeyGap(w http.ResponseWriter, scope SyncScope) bool 
 	}
 	messages := make([]string, 0, len(gaps))
 	for _, adapter := range gaps {
-		messages = append(messages, adapter+" 绑定了密钥，必须连同密钥一起下发并解开；这次没有带上密钥，所以什么都没有写。请勾选「密钥」并填写口令。")
+		messages = append(messages, adapter+" 绑定了密钥，密钥必须连同配置一起下发并解开；这次没有带上密钥，所以什么都没有写。请把 "+adapter+" 和密钥一起下发（控制台勾选 "+adapter+" 即可自动带上），并填口令。")
 	}
 	writeError(w, http.StatusUnprocessableEntity, "unlock-required", "下发带了密钥，要先解开。", messages)
 	return true

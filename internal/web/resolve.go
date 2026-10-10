@@ -337,7 +337,7 @@ func (s *Server) resolveOnMachine(w http.ResponseWriter, r *http.Request, choice
 		// step per machine). Keep the upload, skip the fan-out for that scope,
 		// and say so, rather than writing the adapter without its key.
 		if gaps := boundKeyGaps(s.opts.HomerHome, scope); len(gaps) > 0 {
-			fanoutNote = strings.Join(gaps, "、") + " 绑定了密钥，没法连同密钥自动发给其他机器，所以只写到了中心，没有下发给其他机器。需要时到那台机器上单独「下发」并填口令。"
+			fanoutNote = strings.Join(gaps, "、") + " 绑定了密钥，没法连同密钥自动发给其他机器，所以只写到了中心，没有下发给其他机器。需要时到那台机器上「下发」，勾选绑定了密钥的适配器（如 " + strings.Join(gaps, "、") + "）并填口令，密钥会自动跟过去。"
 		} else {
 			for _, applied := range fanoutPullOnlineAgents(r.Context(), s.opts.Agents, scope) {
 				if applied.AgentID != agentID {
