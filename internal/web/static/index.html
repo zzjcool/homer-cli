@@ -248,6 +248,35 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; ma
 .join-cmd { display: flex; gap: 8px; margin: 12px 0; }
 .join-cmd input { font-family: var(--mono); font-size: var(--fs-small); }
 
+/* plugin management */
+#dlg-plugins { max-width: 760px; max-height: calc(100vh - 32px); overflow: hidden; }
+#dlg-plugin-action { max-width: 520px; }
+.plugin-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plugin-dialog-head h2 { margin: 0; }
+.plugin-dialog-body { max-height: 72vh; overflow: auto; padding-right: 4px; }
+.plugin-section { margin-top: 18px; }
+.plugin-section h3 { margin: 0 0 8px; font-size: var(--fs-body); }
+.plugin-list { border-top: 1px solid var(--line); }
+.plugin-row { display: grid; gap: 6px; padding: 12px 4px; border-bottom: 1px solid var(--line); }
+.plugin-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plugin-name { font-weight: 650; }
+.plugin-id { color: var(--ink-dim); font-size: var(--fs-small); }
+.plugin-role { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-radius: 99px; font-size: var(--fs-small); }
+.plugin-role.role-adapter { color: var(--accent-d); border-color: #9bc8b5; }
+.plugin-role.role-carrier { color: #725b00; border-color: #d9c77b; }
+.plugin-role.role-action { color: #385a91; border-color: #a9bedf; }
+.plugin-description { margin: 0; }
+.plugin-meta { display: flex; gap: 12px; flex-wrap: wrap; }
+.plugin-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.plugin-error { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--danger); background: var(--bg-sink); color: var(--danger); white-space: pre-line; }
+.plugin-form { display: grid; gap: 8px; margin-top: 10px; }
+.plugin-field { display: grid; gap: 4px; }
+.plugin-field input, .plugin-field select, .plugin-field textarea { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid #bbb; border-radius: 4px; background: var(--bg); color: var(--ink); }
+.plugin-field input, .plugin-field select { min-height: 40px; }
+.plugin-field textarea { min-height: 180px; resize: vertical; font-family: var(--mono); font-size: var(--fs-small); }
+.plugin-action-fields { display: grid; gap: 10px; margin-top: 12px; }
+.plugin-dialog-menu { padding: 0; margin: 14px 0 0; display: flex; justify-content: flex-end; gap: 8px; }
+
 /* skeleton */
 .skel { color: transparent !important; background: var(--bg-sink); border-radius: 4px;
   animation: pulse 1s infinite alternate; pointer-events: none; }
@@ -268,6 +297,7 @@ html { scroll-behavior: smooth; }
   <h1>homer</h1>
   <span class="muted small" id="ver">v1.3.0</span>
   <span class="spacer"></span>
+  <button class="text" id="btn-plugins" type="button" aria-haspopup="dialog">插件</button>
   <button class="text" id="btn-join-top" type="button">接入命令</button>
   <button class="text" id="btn-refresh" type="button">刷新</button>
   <button class="text" id="btn-logout" type="button">退出</button>
@@ -389,6 +419,48 @@ html { scroll-behavior: smooth; }
     <menu><button value="ok" class="primary">完成</button></menu>
   </form>
 </dialog>
+<dialog id="dlg-plugins" class="plugin-dialog" aria-labelledby="plugins-title">
+  <div class="plugin-dialog-head">
+    <h2 id="plugins-title">插件管理</h2>
+    <button type="button" class="small-btn" id="btn-plugin-close">关闭</button>
+  </div>
+  <div id="plugin-error" class="plugin-error small hidden" role="alert"></div>
+  <div class="plugin-dialog-body">
+    <p class="muted small">插件决定可同步的适配器、密钥载体和机器动作。卸载不会删除机器上的文件。</p>
+    <div class="plugin-section">
+      <h3>已安装</h3>
+      <div class="plugin-list" id="plugins-installed"><div class="muted small">插件列表加载中…</div></div>
+    </div>
+    <div class="plugin-section">
+      <h3>可安装</h3>
+      <div class="plugin-list" id="plugins-available"><div class="muted small">插件列表加载中…</div></div>
+    </div>
+    <div class="plugin-section">
+      <h3>第三方插件</h3>
+      <p class="muted small">目前仅支持 schemaVersion 为 1 的第三方适配器 manifest。请先确认插件来源可信。</p>
+      <button type="button" class="small-btn" id="btn-plugin-custom-toggle" aria-expanded="false" aria-controls="form-plugin-manifest">粘贴第三方 manifest</button>
+      <form id="form-plugin-manifest" class="plugin-form hidden">
+        <label class="plugin-field small muted" for="plugin-manifest">Manifest JSON
+          <textarea id="plugin-manifest" spellcheck="false" autocomplete="off" placeholder='{"schemaVersion":1,"id":"my-plugin","role":"adapter","root":"~/.config/my-plugin","categories":{"files":{"paths":["settings.json"],"mode":"mirror"}}}'></textarea>
+        </label>
+        <button type="submit" class="small-btn primary" id="btn-plugin-manifest-submit">安装第三方插件</button>
+      </form>
+    </div>
+  </div>
+</dialog>
+<dialog id="dlg-plugin-action" aria-labelledby="plugin-action-title">
+  <form id="form-plugin-action" style="margin:0">
+    <h2 id="plugin-action-title">执行插件动作</h2>
+    <p id="plugin-action-description" class="muted small"></p>
+    <div id="plugin-action-machine"></div>
+    <div id="plugin-action-fields" class="plugin-action-fields"></div>
+    <div id="plugin-action-error" class="plugin-error small hidden" role="alert"></div>
+    <menu class="plugin-dialog-menu">
+      <button type="button" id="btn-plugin-action-cancel">取消</button>
+      <button type="submit" class="primary" id="btn-plugin-action-submit">执行</button>
+    </menu>
+  </form>
+</dialog>
 
 <script>
 "use strict";
@@ -419,6 +491,9 @@ const $ = id => document.getElementById(id);
  * =================================================================== */
 const app = {
   console: null,          // 最近一次 /api/console 的存储视角
+  agents: [],             // 最近一次 /api/agents 的机器列表
+  plugins: null,          // 最近一次 /api/plugins 的安装状态
+  pluginAction: null,     // 当前正在填写的 action 插件
   pendingAction: null,    // 收取/下发/裁决/密钥 待确认
   keys: [],
   scopeKeys: [],
@@ -493,7 +568,7 @@ function showGate(which, note) {
   $("workspace").classList.add("hidden");
   $("gate-setup").classList.toggle("hidden", which !== "setup");
   $("gate-login").classList.toggle("hidden", which !== "login");
-  $("btn-join-top").classList.add("hidden"); $("btn-refresh").classList.add("hidden"); $("btn-logout").classList.add("hidden");
+  $("btn-plugins").classList.add("hidden"); $("btn-join-top").classList.add("hidden"); $("btn-refresh").classList.add("hidden"); $("btn-logout").classList.add("hidden");
   if (which === "login") {
     $("login-note").textContent = note || "homer hub 控制台";
     setTimeout(() => $("in-login-pw").focus(), 0);
@@ -503,7 +578,7 @@ function showGate(which, note) {
 function showWorkspace() {
   $("gate-setup").classList.add("hidden"); $("gate-login").classList.add("hidden");
   $("workspace").classList.remove("hidden");
-  $("btn-join-top").classList.remove("hidden"); $("btn-refresh").classList.remove("hidden"); $("btn-logout").classList.remove("hidden");
+  $("btn-plugins").classList.remove("hidden"); $("btn-join-top").classList.remove("hidden"); $("btn-refresh").classList.remove("hidden"); $("btn-logout").classList.remove("hidden");
 }
 
 /* ---------- ① hero: the server's storage view ---------- */
@@ -2424,6 +2499,294 @@ async function executeSSHKey(agentId, name, githubUser) {
     showAlert("登录公钥没有写入", e.errors && e.errors.length ? e.errors : [e.message], null);
   } finally { clearBusy(); okBtn.disabled = false; okBtn.textContent = "确认"; }
 }
+function pluginRoleLabel(role) {
+  const labels = { adapter: "适配器", carrier: "载体", action: "动作" };
+  return labels[role] || role || "插件";
+}
+function pluginErrorMessage(error) {
+  const details = error && Array.isArray(error.errors) ? error.errors.filter(Boolean) : [];
+  const message = error && error.message ? error.message : "操作没有完成";
+  return details.length ? message + "：" + details.join("；") : message;
+}
+function setPluginError(message) {
+  const box = $("plugin-error");
+  box.textContent = message || "";
+  box.classList.toggle("hidden", !message);
+}
+function setPluginActionError(message) {
+  const box = $("plugin-action-error");
+  box.textContent = message || "";
+  box.classList.toggle("hidden", !message);
+}
+function renderPluginList(targetID, plugins, installed) {
+  const host = $(targetID);
+  clear(host);
+  if (!Array.isArray(plugins)) {
+    host.append(el("div", "muted small", "插件列表加载中…"));
+    return;
+  }
+  if (!plugins.length) {
+    host.append(el("div", "muted small", installed ? "还没有已安装的插件。" : "没有可安装的官方插件。"));
+    return;
+  }
+  plugins.forEach(plugin => host.append(renderPluginRow(plugin, installed)));
+}
+function renderPlugins() {
+  const installed = app.plugins && Array.isArray(app.plugins.installed) ? app.plugins.installed : null;
+  const available = app.plugins && Array.isArray(app.plugins.available) ? app.plugins.available : null;
+  renderPluginList("plugins-installed", installed, true);
+  renderPluginList("plugins-available", available, false);
+}
+function pluginButton(label, action, handler) {
+  const button = el("button", "small-btn", label);
+  button.type = "button";
+  button.dataset.pluginAction = action;
+  button.addEventListener("click", () => handler(button));
+  return button;
+}
+function renderPluginRow(plugin, installed) {
+  const row = el("article", "plugin-row");
+  row.classList.add(installed ? "is-installed" : "is-available");
+  row.dataset.pluginId = plugin.id || "";
+
+  const title = el("div", "plugin-title");
+  title.append(el("span", "plugin-name", plugin.name || plugin.id || "未命名插件"));
+  title.append(el("span", "plugin-role role-" + (plugin.role || "unknown"), pluginRoleLabel(plugin.role)));
+  title.append(el("code", "plugin-id", plugin.id || ""));
+  const meta = el("div", "plugin-meta muted small");
+  const machineCount = Number.isFinite(plugin.machineCount) ? Math.max(0, Math.floor(plugin.machineCount)) : 0;
+  meta.append(el("span", "plugin-machine-count", machineCount + " 台机器"));
+  row.append(title);
+  if (plugin.description) row.append(el("p", "plugin-description muted small", plugin.description));
+  row.append(meta);
+
+  const actions = el("div", "plugin-actions");
+  if (plugin.id === "ssh-key") {
+    actions.append(pluginButton("执行", "execute", () => openPluginAction(plugin)));
+  }
+  if (installed && plugin.role === "adapter") {
+    actions.append(pluginButton("下发到全部机器", "dispatch", button => dispatchPluginToAll(plugin, button)));
+  }
+  if (installed) {
+    actions.append(pluginButton("卸载", "uninstall", button => uninstallPlugin(plugin, button)));
+  } else {
+    actions.append(pluginButton("安装", "install", button => installPlugin(plugin, button)));
+  }
+  row.append(actions);
+  return row;
+}
+function openPluginManager() {
+  setPluginError("");
+  renderPlugins();
+  $("dlg-plugins").showModal();
+}
+function installConfirmation(plugin) {
+  return "确认安装「" + (plugin.name || plugin.id) + "」吗？\n\n" +
+    "适配器/载体插件可能会发布新的配置世代。请确认了解此插件的作用。";
+}
+async function installPlugin(plugin, button) {
+  if (!window.confirm(installConfirmation(plugin))) return;
+  setPluginError("");
+  button.disabled = true;
+  button.textContent = "安装中…";
+  try {
+    await api("/api/plugins/install", { method: "POST", body: { id: plugin.id } });
+    toast("已安装「" + (plugin.name || plugin.id) + "」");
+    await refresh();
+  } catch (error) {
+    setPluginError(pluginErrorMessage(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "安装";
+  }
+}
+function uninstallConfirmation(plugin) {
+  let note = "卸载后不会删除机器上的文件或数据。";
+  if (plugin.role === "adapter") {
+    note = "卸载守卫：中心存储仍有该适配器的数据时会拒绝卸载（当前版本不提供清理）。\n" +
+      "卸载不会删除机器上的文件；机器侧残留由下次下发的保留本机定义（keep）语义处理。";
+  } else if (plugin.role === "carrier") {
+    note = "卸载守卫：若密钥仍绑定到已安装的适配器，必须先解绑。\n" +
+      "卸载不会删除机器上的密钥文件；机器侧残留由下次下发的保留本机定义（keep）语义处理。";
+  }
+  return "确定卸载「" + (plugin.name || plugin.id) + "」吗？\n\n" + note;
+}
+async function uninstallPlugin(plugin, button) {
+  if (!window.confirm(uninstallConfirmation(plugin))) return;
+  setPluginError("");
+  button.disabled = true;
+  button.textContent = "卸载中…";
+  const body = { id: plugin.id };
+  if (plugin.role === "adapter" || plugin.role === "carrier") body.force = true;
+  try {
+    await api("/api/plugins/uninstall", { method: "POST", body });
+    toast("已卸载「" + (plugin.name || plugin.id) + "」");
+    await refresh();
+  } catch (error) {
+    setPluginError(pluginErrorMessage(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "卸载";
+  }
+}
+async function dispatchPluginToAll(plugin, button) {
+  const online = app.agents.filter(agent => !agent.stale).length;
+  if (!window.confirm("确定将「" + plugin.id + "」下发到全部在线机器吗？当前在线 " + online + " 台；离线机器会跳过。")) return;
+  setPluginError("");
+  button.disabled = true;
+  button.textContent = "下发中…";
+  try {
+    const result = await api("/api/sync?direction=dispatch&confirm=true", {
+      method: "POST",
+      body: { adapters: [plugin.id], confirm: true },
+    });
+    if (result.ok) {
+      toast("已下发「" + plugin.id + "」到全部在线机器");
+    } else {
+      setPluginError((result.errors || []).join("；") || result.status || "下发没有完成");
+    }
+    await refresh();
+  } catch (error) {
+    setPluginError(pluginErrorMessage(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "下发到全部机器";
+  }
+}
+function openPluginAction(plugin) {
+  app.pluginAction = plugin;
+  setPluginActionError("");
+  $("plugin-action-title").textContent = plugin.name || plugin.id;
+  $("plugin-action-description").textContent = plugin.description || "选择一台在线机器并填写动作表单。";
+
+  const machineHost = $("plugin-action-machine");
+  clear(machineHost);
+  const machineLabel = el("label", "plugin-field");
+  machineLabel.htmlFor = "plugin-action-agent";
+  machineLabel.append(el("span", "muted small", "选择在线机器"));
+  const select = el("select");
+  select.id = "plugin-action-agent";
+  select.name = "agentId";
+  select.required = true;
+  const placeholder = el("option", null, "请选择机器");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  select.append(placeholder);
+  const online = app.agents.filter(agent => !agent.stale);
+  online.forEach(agent => {
+    const name = agent.hostname || agent.agentId;
+    const option = el("option", null, name + "（" + agent.agentId + "）");
+    option.value = agent.agentId;
+    select.append(option);
+  });
+  if (!online.length) {
+    const none = el("option", null, "当前没有在线机器");
+    none.value = "";
+    none.disabled = true;
+    none.selected = true;
+    select.replaceChildren(none);
+  }
+  machineLabel.append(select);
+  machineHost.append(machineLabel);
+
+  const fieldsHost = $("plugin-action-fields");
+  clear(fieldsHost);
+  const fields = plugin.action && Array.isArray(plugin.action.form) ? plugin.action.form : [];
+  fields.forEach((field, index) => {
+    const name = field.field || "field-" + index;
+    const label = el("label", "plugin-field");
+    const input = el("input");
+    input.type = "text";
+    input.id = "plugin-action-field-" + index;
+    input.name = name;
+    input.required = !!field.required;
+    input.autocomplete = name === "githubUser" ? "username" : "off";
+    input.spellcheck = false;
+    input.placeholder = field.placeholder || "";
+    if (name === "githubUser") {
+      try { input.value = localStorage.getItem("homer-github-user") || ""; } catch (_) {}
+    }
+    label.htmlFor = input.id;
+    label.append(el("span", "muted small", field.label || name), input);
+    fieldsHost.append(label);
+  });
+  if (!fields.length) fieldsHost.append(el("div", "muted small", "此动作没有可填写的表单字段。"));
+  $("btn-plugin-action-submit").disabled = !online.length;
+  $("dlg-plugin-action").showModal();
+}
+async function submitPluginAction(event) {
+  event.preventDefault();
+  const plugin = app.pluginAction;
+  const agentID = $("plugin-action-agent").value;
+  if (!plugin || plugin.id !== "ssh-key") {
+    setPluginActionError("目前只支持执行 ssh-key 动作。");
+    return;
+  }
+  if (!agentID) {
+    setPluginActionError("请选择一台在线机器。");
+    return;
+  }
+  const body = {};
+  $("plugin-action-fields").querySelectorAll("input[name]").forEach(input => {
+    body[input.name] = input.value.trim();
+  });
+  const button = $("btn-plugin-action-submit");
+  setPluginActionError("");
+  button.disabled = true;
+  button.textContent = "执行中…";
+  try {
+    const result = await api("/api/agents/" + encodeURIComponent(agentID) + "/ssh-key", {
+      method: "POST",
+      body,
+    });
+    if (!result.ok) {
+      setPluginActionError((result.errors || []).join("；") || "登录公钥没有写入。");
+      return;
+    }
+    if (body.githubUser) {
+      try { localStorage.setItem("homer-github-user", body.githubUser); } catch (_) {}
+    }
+    toast("已把 " + (body.githubUser || "GitHub 用户") + " 的 " + (result.installed || "") + " 个公钥写入机器");
+    $("dlg-plugin-action").close("success");
+    await refresh();
+  } catch (error) {
+    setPluginActionError(pluginErrorMessage(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "执行";
+  }
+}
+async function submitThirdPartyPlugin(event) {
+  event.preventDefault();
+  let manifest;
+  try {
+    manifest = JSON.parse($("plugin-manifest").value);
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("manifest 必须是 JSON 对象");
+  } catch (error) {
+    setPluginError("manifest JSON 无效：" + error.message);
+    return;
+  }
+  if (!window.confirm("即将安装第三方插件「" + (manifest.id || "未命名") + "」。仅安装可信来源；第三方适配器会发布新的配置世代。确认继续？")) return;
+  setPluginError("");
+  const button = $("btn-plugin-manifest-submit");
+  button.disabled = true;
+  button.textContent = "安装中…";
+  try {
+    await api("/api/plugins/install", { method: "POST", body: { manifest } });
+    toast("已安装第三方插件「" + (manifest.name || manifest.id || "未命名") + "」");
+    $("plugin-manifest").value = "";
+    $("form-plugin-manifest").classList.add("hidden");
+    $("btn-plugin-custom-toggle").setAttribute("aria-expanded", "false");
+    await refresh();
+  } catch (error) {
+    setPluginError(pluginErrorMessage(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "安装第三方插件";
+  }
+}
+
 async function clearResolution(agentId, adapterId) {
   try {
     await api("/api/resolve/clear?agent=" + encodeURIComponent(agentId) + "&confirm=true", {
@@ -3376,14 +3739,18 @@ function stampRefresh(failed) {
 
 async function refresh() {
   try {
-    const [consoleView, agents] = await Promise.all([
+    const [consoleView, agents, plugins] = await Promise.all([
       api("/api/console"),
       api("/api/agents"),
+      api("/api/plugins"),
     ]);
     showWorkspace();
     app.console = consoleView;
+    app.agents = agents.agents || [];
+    app.plugins = plugins;
     renderHero();
-    loadAgentsRender(agents.agents || [], false);
+    renderPlugins();
+    loadAgentsRender(app.agents, false);
     loadKeys();
     stampRefresh(false);
   } catch (e) {
@@ -3456,6 +3823,19 @@ $("btn-logout").addEventListener("click", async () => {
   showGate("login");
 });
 $("btn-refresh").addEventListener("click", refresh);
+$("btn-plugins").addEventListener("click", openPluginManager);
+$("btn-plugin-close").addEventListener("click", () => $("dlg-plugins").close());
+$("btn-plugin-custom-toggle").addEventListener("click", () => {
+  const form = $("form-plugin-manifest");
+  const opening = form.classList.contains("hidden");
+  form.classList.toggle("hidden", !opening);
+  $("btn-plugin-custom-toggle").setAttribute("aria-expanded", String(opening));
+  if (opening) $("plugin-manifest").focus();
+});
+$("form-plugin-manifest").addEventListener("submit", submitThirdPartyPlugin);
+$("form-plugin-action").addEventListener("submit", submitPluginAction);
+$("btn-plugin-action-cancel").addEventListener("click", () => $("dlg-plugin-action").close());
+$("dlg-plugin-action").addEventListener("close", () => { app.pluginAction = null; });
 
 /* ---------- boot ---------- */
 // Returns "setup" (hub unconfigured, setup gate shown), "error" (status
