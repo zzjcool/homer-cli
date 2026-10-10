@@ -143,10 +143,11 @@ func TestAgentKeyRoute(t *testing.T) {
 
 type recordingKeySource struct {
 	sourceStub
-	keyMu   sync.Mutex
-	agentID string
-	cmd     keyring.Command
-	raw     []byte
+	keyMu    sync.Mutex
+	agentID  string
+	cmd      keyring.Command
+	keyCalls int
+	raw      []byte
 }
 
 func (s *recordingKeySource) AgentKey(_ context.Context, agentID string, cmd keyring.Command) (json.RawMessage, error) {
@@ -154,6 +155,7 @@ func (s *recordingKeySource) AgentKey(_ context.Context, agentID string, cmd key
 	defer s.keyMu.Unlock()
 	s.agentID = agentID
 	s.cmd = cmd
+	s.keyCalls++
 	return append(json.RawMessage(nil), s.raw...), nil
 }
 
@@ -342,6 +344,87 @@ func TestResolveCenterReportsUnlockFailureAfterWrite(t *testing.T) {
 		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
 	if resp.Code != http.StatusUnprocessableEntity || !strings.Contains(resp.Body.String(), "unlock-failed") {
 		t.Fatalf("unlock failure after write = %d body=%s", resp.Code, resp.Body)
+	}
+}
+
+// The non-record resolve path shares the dispatch gate: a conflicts-remain
+// report with delivered keyring ciphertext must still open the key.
+func TestResolveCenterWithoutRecordStillUnlocksAfterConflictsRemain(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	stub.pullRaw = []byte(`{"ok":false,"status":"conflicts-remain","applied":{"written":[{"adapterId":"keyring","relPath":"pi/files/models.age"}]},"conflicts":[{"adapterId":"pi","relPath":"settings.json"}],"errors":["检测到 1 个冲突（已保留本地）"]}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=center&agent=box&confirm=true",
+		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if stub.keyCalls != 1 || stub.cmd.Action != "unlock" || stub.cmd.ID != "pi" {
+		t.Fatalf("conflicts-remain resolve without record should unlock once, calls=%d command=%+v body=%s", stub.keyCalls, stub.cmd, resp.Body)
+	}
+	body := resp.Body.String()
+	if resp.Code != http.StatusUnprocessableEntity || !strings.Contains(body, "conflicts-remain") {
+		t.Fatalf("partial resolve = %d body=%s", resp.Code, body)
+	}
+}
+
+func TestDispatchStillUnlocksAfterConflictsRemain(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.pullRaw = []byte(`{"ok":false,"status":"conflicts-remain","applied":{"written":[{"adapterId":"keyring","relPath":"pi/files/models.age"}]},"conflicts":[{"adapterId":"pi","relPath":"settings.json"}],"errors":["检测到 1 个冲突（已保留本地）"]}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true",
+		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if stub.keyCalls != 1 || stub.cmd.Action != "unlock" || stub.cmd.ID != "pi" {
+		t.Fatalf("conflicts-remain pull should unlock once, calls=%d command=%+v body=%s", stub.keyCalls, stub.cmd, resp.Body)
+	}
+	if resp.Code != http.StatusUnprocessableEntity || !strings.Contains(resp.Body.String(), `"status":"conflicts-remain"`) {
+		t.Fatalf("partial conflict should remain non-ok after unlock = %d body=%s", resp.Code, resp.Body)
+	}
+}
+
+func TestDispatchWithNoAppliedWritesDoesNotUnlock(t *testing.T) {
+	for _, report := range []string{
+		`{"ok":false,"status":"aborted","applied":{"written":[]}}`,
+		`{"ok":false,"status":"error","applied":{"written":[]}}`,
+		`{"ok":false,"status":"conflicts-remain","applied":{"written":[]},"conflicts":[{}]}`,
+	} {
+		t.Run(report, func(t *testing.T) {
+			server, stub := dispatchFixtureWithBoundKey(t)
+			stub.pullRaw = []byte(report)
+			resp := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true",
+				`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+			if stub.keyCalls != 0 {
+				t.Fatalf("pull without applied writes must not unlock, calls=%d body=%s", stub.keyCalls, resp.Body)
+			}
+		})
+	}
+}
+
+func TestDispatchUnlockFailureKeepsConflictDetails(t *testing.T) {
+	server, stub := dispatchFixtureWithBoundKey(t)
+	stub.raw = []byte(`{"ok":false,"status":"error","errors":["口令不正确"]}`)
+	stub.pullRaw = []byte(`{"ok":false,"status":"conflicts-remain","applied":{"written":[{"adapterId":"keyring","relPath":"pi/files/models.age"}]},"conflicts":[{"adapterId":"pi","relPath":"settings.json"}],"errors":["检测到 1 个冲突（已保留本地）"]}`)
+	resp := request(t, server.Handler(), http.MethodPost, "/api/agents/box/pull?confirm=true",
+		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	body := resp.Body.String()
+	if resp.Code != http.StatusUnprocessableEntity || !strings.Contains(body, `"code":"unlock-failed"`) {
+		t.Fatalf("partial pull unlock failure = %d body=%s", resp.Code, body)
+	}
+	for _, want := range []string{"检测到 1 个冲突", "口令不正确", "内容已经下发，但没有解开"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("unlock failure response missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestResolveCenterStillUnlocksAfterConflictsRemain(t *testing.T) {
+	server, keySource := dispatchFixtureWithBoundKey(t)
+	keySource.list = []AgentInfo{{AgentID: "box", Hostname: "box"}}
+	keySource.pullRaw = []byte(`{"ok":false,"status":"conflicts-remain","applied":{"written":[{"adapterId":"keyring","relPath":"pi/files/models.age"}]},"conflicts":[{"adapterId":"pi","relPath":"settings.json"}],"errors":["检测到 1 个冲突（已保留本地）"]}`)
+	stub := &resolutionWithKeySource{recordingKeySource: keySource}
+	server.opts.Agents = stub
+	resp := request(t, server.Handler(), http.MethodPost, "/api/resolve?choice=center&agent=box&confirm=true&record=true",
+		`{"adapters":["pi","keyring"],"unlocks":[{"id":"pi","password":"long-password"}]}`)
+	if keySource.keyCalls != 1 || keySource.cmd.Action != "unlock" || keySource.cmd.ID != "pi" {
+		t.Fatalf("conflicts-remain resolve should unlock once, calls=%d command=%+v body=%s", keySource.keyCalls, keySource.cmd, resp.Body)
+	}
+	if resp.Code != http.StatusUnprocessableEntity || len(stub.records) != 1 || len(keySource.pullValues) != 1 {
+		t.Fatalf("partial recorded resolve = %d records=%d pulls=%d body=%s", resp.Code, len(stub.records), len(keySource.pullValues), resp.Body)
 	}
 }
 
