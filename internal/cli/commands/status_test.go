@@ -183,6 +183,9 @@ func TestStatusFallsBackToDefaultsOnFreshMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fresh machine status must fall back to defaults: %v", err)
 	}
+	if report.ConfigOutline != nil {
+		t.Fatalf("fresh machine fallback must not attach configOutline: %#v", *report.ConfigOutline)
+	}
 	found := false
 	for _, adapter := range report.Adapters {
 		if adapter.ID == "pi" {
