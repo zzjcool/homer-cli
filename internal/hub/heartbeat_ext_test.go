@@ -46,11 +46,11 @@ func TestMachineReportedAdapters(t *testing.T) {
 			// 携带实际触及的 adapterId（F4 修复后的抽取路径）。
 			name:   "pull report applied refs",
 			status: json.RawMessage(`{"ok":true,"status":"synced","applied":{"written":[{"adapterId":"pi","category":"settings","relPath":"settings.json"},{"adapterId":"pi","category":"models","relPath":"models.json"}],"deleted":[{"adapterId":"opencode","category":"config","relPath":"config.json"}]}}`),
-			want: []string{"opencode", "pi"},
+			want:   []string{"opencode", "pi"},
 		},
 		{
 			// 空 applied（noop pull）：没有触及任何 adapter，返回 nil——
-		// 保留之前 status 已记录的集合，不把覆盖数清零。
+			// 保留之前 status 已记录的集合，不把覆盖数清零。
 			name:    "pull report empty applied keeps previous report",
 			status:  json.RawMessage(`{"ok":true,"status":"noop","applied":{"written":[],"deleted":[]}}`),
 			wantNil: true,
