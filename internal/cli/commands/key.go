@@ -7,7 +7,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	"golang.org/x/term"
 )
 
@@ -91,6 +93,15 @@ func RunKeyArgs(args []string, out, errOut io.Writer) int {
 		}
 		cmd.NewPassword = password
 	}
+	// 密钥环现在是插件：机器侧 CLI 创建/加密密钥前确保 keyring adapter
+	// 存在于本地 homer.json（等价于原 keyring.ensureAdapter 的自动注入，
+	// 位置上移到 commands 层避免 keyring → pluginregistry 循环依赖）。
+	if action == "create" || action == "encrypt" {
+		if err := ensureKeyringAdapterConfig(flags.home); err != nil {
+			fmt.Fprintln(errOut, err.Error())
+			return 1
+		}
+	}
 	result := keyring.Apply(flags.home, cmd)
 	if flags.json {
 		encoded, err := json.Marshal(result)
@@ -113,6 +124,41 @@ func RunKeyArgs(args []string, out, errOut io.Writer) int {
 type keyFlags struct {
 	home, id, name, file, path, adapter, password, newPassword string
 	json, help                                                 bool
+}
+
+// ensureKeyringAdapterConfig mirrors the hub-side prepareKeyringWrite: the
+// keyring plugin's adapter declaration must exist in homer.json before a key
+// is created, or the keyring directory never enters the sync store.
+func ensureKeyringAdapterConfig(home string) error {
+	paths := keyringHome(home)
+	config, err := core.LoadConfig(paths)
+	if err != nil {
+		return err
+	}
+	if _, exists := config.Adapters["keyring"]; exists {
+		return nil
+	}
+	plugin, ok := pluginregistry.Builtin("keyring")
+	if !ok || plugin.Adapter == nil {
+		return fmt.Errorf("官方密钥环插件配置不可用")
+	}
+	if config.Adapters == nil {
+		config.Adapters = map[string]core.AdapterConfig{}
+	}
+	config.Adapters[plugin.ID] = *plugin.Adapter
+	return core.SaveConfig(paths, *config)
+}
+
+func keyringHome(home string) core.HomerPaths {
+	if strings.TrimSpace(home) == "" {
+		return core.GetHomerPaths(nil)
+	}
+	return core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return home
+		}
+		return os.Getenv(name)
+	})
 }
 
 func parseKeyFlags(args []string) (keyFlags, error) {
