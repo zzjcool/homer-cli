@@ -2,7 +2,7 @@
 // herdr, opencode, VS Code), decides when a machine has fallen behind, and
 // upgrades a program in place.
 //
-// Everything is keyed by the tool IDs registered in package adapter. Nothing
+// Everything is keyed by the tool IDs registered in package pluginregistry. Nothing
 // here accepts a command line from a caller: a request names a tool, and the
 // agent runs the argument list the registry holds for it. A hub, a browser or
 // a stray HTTP client can therefore ask for "pi" to be upgraded, but never for
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/adapter"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	"github.com/zzjcool/homer-cli/internal/shellenv"
 	"github.com/zzjcool/homer-cli/internal/upgrade"
 )
@@ -60,7 +61,7 @@ func ProbeLocal(ctx context.Context) []Status {
 // ProbeAll checks every registered program, concurrently, against path and
 // returns the installed ones in registry order.
 func ProbeAll(ctx context.Context, path string) []Status {
-	tools := adapter.Tools()
+	tools := pluginregistry.Tools()
 	found := make([]*Status, len(tools))
 	var wg sync.WaitGroup
 	for i, tool := range tools {
@@ -129,7 +130,7 @@ func Behind(version, reference string) bool {
 // against: the newest release any machine reports, or the tool's declared
 // floor when that is newer. fleet holds one report per machine.
 func Reference(fleet [][]Status) map[string]string {
-	return reference(fleet, adapter.Tools())
+	return reference(fleet, pluginregistry.Tools())
 }
 
 func reference(fleet [][]Status, tools []adapter.Tool) map[string]string {
@@ -189,7 +190,7 @@ var upgradeSlot = make(chan struct{}, 1)
 func Upgrade(ctx context.Context, id, path string) UpgradeResult {
 	defer shellenv.Invalidate()
 
-	tool, ok := adapter.ToolByID(id)
+	tool, ok := pluginregistry.ToolByID(id)
 	if !ok {
 		return UpgradeResult{Status: "unknown-tool", Tool: clip(id, 40), Note: "不认识这个应用：" + clip(id, 40)}
 	}

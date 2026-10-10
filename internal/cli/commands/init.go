@@ -10,13 +10,10 @@ import (
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/adapter"
-	"github.com/zzjcool/homer-cli/internal/adapter/herdr"
-	"github.com/zzjcool/homer-cli/internal/adapter/opencode"
-	"github.com/zzjcool/homer-cli/internal/adapter/pi"
-	"github.com/zzjcool/homer-cli/internal/adapter/vscode"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/gitx"
 	"github.com/zzjcool/homer-cli/internal/orderedjson"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 )
 
 // InitOptions controls the non-interactive scan performed by homer init.
@@ -68,17 +65,24 @@ type InitReport struct {
 	Warnings  []string            `json:"warnings,omitempty"`
 }
 
-// KNOWN_ADAPTERS is the P3 registration table.  The map is exported for
-// focused tests and callers that need to inspect the built-in set; iteration
-// order is controlled by knownAdapterOrder below.
-var KNOWN_ADAPTERS = map[string]core.AdapterConfig{
-	pi.PIAdapterID:             pi.DefaultPIAdapter,
-	herdr.HerdrAdapterID:       herdr.DefaultHerdrAdapter,
-	opencode.OpencodeAdapterID: opencode.DefaultOpencodeAdapter,
-	vscode.VSCodeAdapterID:     vscode.DefaultVSCodeAdapter,
-}
+// KNOWN_ADAPTERS is the adapter-role view of the built-in plugin registry.
+// The map is exported for focused tests and callers that need to inspect the
+// built-in set; iteration order is controlled by knownAdapterOrder.
+var KNOWN_ADAPTERS, knownAdapterOrder = builtinAdapterRegistry()
 
-var knownAdapterOrder = []string{pi.PIAdapterID, herdr.HerdrAdapterID, opencode.OpencodeAdapterID, vscode.VSCodeAdapterID}
+func builtinAdapterRegistry() (map[string]core.AdapterConfig, []string) {
+	plugins := pluginregistry.Builtins()
+	adapters := make(map[string]core.AdapterConfig, len(plugins))
+	order := make([]string, 0, len(plugins))
+	for _, plugin := range plugins {
+		if plugin.Role != pluginregistry.RoleAdapter || plugin.Adapter == nil {
+			continue
+		}
+		adapters[plugin.ID] = cloneAdapterConfig(*plugin.Adapter)
+		order = append(order, plugin.ID)
+	}
+	return adapters, order
+}
 
 const INIT_USAGE = `用法: homer init [options]
 
@@ -114,7 +118,7 @@ func selectedAdapters(ids []string) (map[string]core.AdapterConfig, error) {
 		}
 		config, ok := KNOWN_ADAPTERS[id]
 		if !ok {
-			return nil, core.NewCliError(fmt.Sprintf("未知 adapter: %s；已知 adapter: pi, herdr, opencode, vscode；自定义 adapter 请直接编辑 homer.json", id))
+			return nil, core.NewCliError(fmt.Sprintf("未知 adapter: %s；可用: %s；自定义 adapter 请直接编辑 homer.json 或在 hub 插件页安装", id, strings.Join(knownAdapterOrder, ", ")))
 		}
 		selected[id] = config
 	}

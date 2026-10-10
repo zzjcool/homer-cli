@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zzjcool/homer-cli/internal/adapter"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 )
 
 // standIn is a pretend pi, herdr or opencode. It answers --version from a
@@ -138,7 +138,7 @@ func hermeticBin(t *testing.T) string {
 func skipIfARealToolCouldBeFound(t *testing.T) {
 	t.Helper()
 	for _, dir := range []string{"/home/linuxbrew/.linuxbrew/bin", "/opt/homebrew/bin"} {
-		for _, tool := range adapter.Tools() {
+		for _, tool := range pluginregistry.Tools() {
 			if _, err := os.Stat(filepath.Join(dir, tool.Binary)); err == nil {
 				t.Skipf("%s is installed in %s; an agent would find it before the stand-in", tool.Binary, dir)
 			}
@@ -462,8 +462,8 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	})
 
 	t.Run("a program that is not installed says how to install it", func(t *testing.T) {
-		pi, _ := adapter.ToolByID("pi")
-		opencode, _ := adapter.ToolByID("opencode")
+		pi, _ := pluginregistry.ToolByID("pi")
+		opencode, _ := pluginregistry.ToolByID("opencode")
 		for _, tc := range []struct {
 			agent, tool, manual string
 		}{
@@ -549,7 +549,7 @@ func TestToolVersionsAndUpgradeThroughHub(t *testing.T) {
 	})
 
 	t.Run("a failed upgrade keeps the version and explains itself", func(t *testing.T) {
-		pi, _ := adapter.ToolByID("pi")
+		pi, _ := pluginregistry.ToolByID("pi")
 		for _, tc := range []struct {
 			agent string
 			m     machine

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/adapter"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	"github.com/zzjcool/homer-cli/internal/shellenv"
 )
 
@@ -50,7 +51,7 @@ func setVersion(t *testing.T, dir, file, version string) {
 
 func mustTool(t *testing.T, id string) adapter.Tool {
 	t.Helper()
-	tool, ok := adapter.ToolByID(id)
+	tool, ok := pluginregistry.ToolByID(id)
 	if !ok {
 		t.Fatalf("tool %s is not registered", id)
 	}

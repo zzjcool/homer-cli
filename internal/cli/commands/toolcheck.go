@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zzjcool/homer-cli/internal/adapter"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/manifest"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	"github.com/zzjcool/homer-cli/internal/shellenv"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
@@ -70,7 +70,7 @@ func missingToolErrors(config core.HomerConfig, ids []string, look func(string) 
 			continue
 		}
 		for _, binary := range missingBinaries(cfg, look) {
-			install, _ := adapter.OfficialInstall(binary)
+			install, _ := pluginregistry.OfficialInstall(binary)
 			errors = append(errors, missingToolMessage(id, binary, install))
 		}
 	}
@@ -95,7 +95,7 @@ func missingBinaries(cfg core.AdapterConfig, look func(string) (string, error)) 
 			if binary == "" {
 				continue
 			}
-			if _, ok := adapter.OfficialInstall(binary); !ok {
+			if _, ok := pluginregistry.OfficialInstall(binary); !ok {
 				continue
 			}
 			if _, dup := seen[binary]; dup {

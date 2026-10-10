@@ -1,13 +1,15 @@
-package adapter
+package adapter_test
 
 import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 )
 
 func TestOfficialInstallPi(t *testing.T) {
-	got, ok := OfficialInstall("pi")
+	got, ok := pluginregistry.OfficialInstall("pi")
 	if !ok {
 		t.Fatal("pi installer missing")
 	}
@@ -26,10 +28,10 @@ func TestOfficialInstallPi(t *testing.T) {
 }
 
 func TestOfficialInstallUnknown(t *testing.T) {
-	if _, ok := OfficialInstall("code"); ok {
+	if _, ok := pluginregistry.OfficialInstall("code"); ok {
 		t.Fatal("code has no official one-line installer registered")
 	}
-	if _, ok := OfficialInstall("definitely-not-a-tool"); ok {
+	if _, ok := pluginregistry.OfficialInstall("definitely-not-a-tool"); ok {
 		t.Fatal("unknown binary reported an installer")
 	}
 }
@@ -37,7 +39,7 @@ func TestOfficialInstallUnknown(t *testing.T) {
 func TestToolsRegistryInvariants(t *testing.T) {
 	seenID := map[string]bool{}
 	seenBinary := map[string]bool{}
-	for _, tool := range Tools() {
+	for _, tool := range pluginregistry.Tools() {
 		if tool.ID == "" || tool.Adapter == "" || tool.Label == "" || tool.Binary == "" {
 			t.Fatalf("incomplete tool: %+v", tool)
 		}
@@ -66,31 +68,31 @@ func TestToolsRegistryInvariants(t *testing.T) {
 }
 
 func TestToolsReturnsACopy(t *testing.T) {
-	first := Tools()
+	first := pluginregistry.Tools()
 	first[0].ID = "tampered"
 	first[0].UpgradeArgs[0] = "rm"
-	again := Tools()
+	again := pluginregistry.Tools()
 	if again[0].ID == "tampered" || again[0].UpgradeArgs[0] == "rm" {
 		t.Fatalf("Tools() leaked internal state: %+v", again[0])
 	}
 }
 
 func TestToolByID(t *testing.T) {
-	pi, ok := ToolByID("pi")
+	pi, ok := pluginregistry.ToolByID("pi")
 	if !ok || pi.Binary != "pi" || !pi.CanUpgrade() {
 		t.Fatalf("pi = %+v ok=%v", pi, ok)
 	}
 	if got := strings.Join(pi.UpgradeArgs, " "); got != "update --self" {
 		t.Fatalf("pi upgrade = %q, want the self-only update", got)
 	}
-	vscode, ok := ToolByID("vscode")
+	vscode, ok := pluginregistry.ToolByID("vscode")
 	if !ok || vscode.Binary != "code" || vscode.CanUpgrade() {
 		t.Fatalf("vscode = %+v ok=%v (version only: the OS package manager updates it)", vscode, ok)
 	}
-	if _, ok := ToolByID("rm"); ok {
+	if _, ok := pluginregistry.ToolByID("rm"); ok {
 		t.Fatal("an arbitrary program resolved as a tool")
 	}
-	if _, ok := ToolByID(""); ok {
+	if _, ok := pluginregistry.ToolByID(""); ok {
 		t.Fatal("empty id resolved as a tool")
 	}
 }

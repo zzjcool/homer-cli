@@ -180,9 +180,6 @@ func create(paths core.HomerPaths, cmd Command) Result {
 	if _, err := findKeyDir(paths, id); err == nil {
 		return fail("exists", "密钥已存在: "+id)
 	}
-	if err := ensureAdapter(paths); err != nil {
-		return fail("error", err.Error())
-	}
 	identity := agecrypto.GenerateIdentity()
 	envelope, err := sealIdentity(identity.SecretKey, cmd.Password, work(cmd.WorkFactor))
 	if err != nil {
@@ -475,21 +472,6 @@ func browsePath(home string, tilde bool, abs string, dir bool) string {
 		out += "/"
 	}
 	return out
-}
-
-func ensureAdapter(paths core.HomerPaths) error {
-	config, err := core.LoadConfig(paths)
-	if err != nil {
-		return errors.New("请先运行 homer init")
-	}
-	if _, ok := config.Adapters[keys.AdapterID]; ok {
-		return nil
-	}
-	if config.Adapters == nil {
-		config.Adapters = map[string]core.AdapterConfig{}
-	}
-	config.Adapters[keys.AdapterID] = keys.DefaultAdapter
-	return core.SaveConfig(paths, *config)
 }
 
 func readAll(items string) ([]Summary, bool) {

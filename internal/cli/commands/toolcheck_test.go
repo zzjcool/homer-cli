@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zzjcool/homer-cli/internal/adapter"
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/manifest"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	syncx "github.com/zzjcool/homer-cli/internal/sync"
 )
 
@@ -33,7 +33,7 @@ func TestMissingToolErrorsNamesOfficialInstaller(t *testing.T) {
 	if len(got) != 1 || !strings.Contains(got[0], "未安装 pi，无法下发适配器 pi。") {
 		t.Fatalf("errors = %#v", got)
 	}
-	install, _ := adapter.OfficialInstall("pi")
+	install, _ := pluginregistry.OfficialInstall("pi")
 	if !strings.Contains(got[0], install) || !strings.Contains(got[0], "复制下面这一行安装后再下发：") {
 		t.Fatalf("errors = %#v", got)
 	}
