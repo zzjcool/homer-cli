@@ -326,16 +326,23 @@ func (s *Server) pluginUninstallGuard(plugin pluginregistry.Plugin) (string, err
 		}
 	}
 	if plugin.Role == pluginregistry.RoleAdapter {
+		// 守卫的 head/store 读取必须与快照上传（generationMutex）和插件
+		// 卸载发布同锁：否则「读到空 store 放行 → 并发 scoped 上传落进该
+		// adapter 的数据 → 卸载发布仅删 meta」会把孤儿数据留在中心 store。
+		generationMutex.Lock()
 		head, exists := gens.New(s.opts.HomerHome).Read()
 		if exists {
 			store, err := readGenerationStore(head.StoreDir)
 			if err != nil {
+				generationMutex.Unlock()
 				return "", err
 			}
 			if len(store[plugin.ID]) > 0 {
+				generationMutex.Unlock()
 				return "中心 store 仍有 " + plugin.ID + " 的数据，请先清理中心数据后再卸载（当前版本不提供清理）", nil
 			}
 		}
+		generationMutex.Unlock()
 	}
 	return "", nil
 }

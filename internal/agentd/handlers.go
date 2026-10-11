@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/zzjcool/homer-cli/internal/cli/commands"
+	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/hub"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 	"github.com/zzjcool/homer-cli/internal/resolutions"
 	"github.com/zzjcool/homer-cli/internal/sshkey"
 	"github.com/zzjcool/homer-cli/internal/stream"
@@ -40,6 +42,48 @@ func (d *Daemon) registerHandlers(session *stream.Session) {
 			return result, err
 		})
 	}
+}
+
+// keyringWriteAction mirrors web.isKeyringWriteAction: the actions that
+// persist new keyring content on this machine.
+func keyringWriteAction(action string) bool {
+	switch action {
+	case "create", "encrypt":
+		return true
+	default:
+		return false
+	}
+}
+
+// ensureMachineKeyringAdapter writes the keyring adapter declaration into
+// this machine's homer.json when missing. It reuses the official plugin's
+// frozen declaration instead of importing commands (which would drag the CLI
+// into the daemon). A missing or unreadable homer.json is an error (mirroring
+// the old keyring.ensureAdapter semantics) rather than something to silently
+// recreate: the remote write path must not invent a machine configuration.
+func ensureMachineKeyringAdapter(homerHome string) error {
+	paths := core.GetHomerPaths(func(name string) string {
+		if name == "HOMER_HOME" {
+			return homerHome
+		}
+		return os.Getenv(name)
+	})
+	config, err := core.LoadConfig(paths)
+	if err != nil {
+		return errors.New("请先运行 homer init")
+	}
+	if _, exists := config.Adapters["keyring"]; exists {
+		return nil
+	}
+	plugin, ok := pluginregistry.Builtin("keyring")
+	if !ok || plugin.Adapter == nil {
+		return errors.New("官方密钥环插件配置不可用")
+	}
+	if config.Adapters == nil {
+		config.Adapters = map[string]core.AdapterConfig{}
+	}
+	config.Adapters[plugin.ID] = *plugin.Adapter
+	return core.SaveConfig(paths, *config)
 }
 
 func (d *Daemon) executeTask(parent context.Context, req *stream.Request) (any, error) {
@@ -252,6 +296,15 @@ func (d *Daemon) runTaskCommand(ctx context.Context, req *stream.Request, option
 		}
 		if command.Action == "" {
 			command.Action = options.SecretAction
+		}
+		// 远程建密/加密是 keyring 插件的机器侧落地：目标机器的 homer.json
+		// 必须声明 keyring adapter，否则密文落在 ~/.homer/keyring 但永远
+		// 进不了 collect 选择列表（旧链路由 keyring.ensureAdapter 自动
+		// 注入，插件化后改由写入方补位——hub 侧在 keys.go，机器侧在此）。
+		if keyringWriteAction(command.Action) {
+			if err := ensureMachineKeyringAdapter(d.cfg.HomerHome); err != nil {
+				return keyring.Result{OK: false, Status: "error", Errors: []string{"补位 keyring 适配器失败: " + err.Error()}}, nil
+			}
 		}
 		return keyring.Apply(d.cfg.HomerHome, command), nil
 	case string(hub.TaskKindUpgrade):

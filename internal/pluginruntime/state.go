@@ -69,6 +69,8 @@ func NewWithLegacyDefault(home string) *State {
 		return state
 	}
 	// 只在「从未初始化过」（空态且磁盘上没有状态文件）时播种。
+	// Stat 的其它错误（权限、IO）不是「从未存在」：尊重磁盘，不播种，
+	// 让后续第一个真正写操作暴露真实错误。
 	state.mu.RLock()
 	fresh := len(state.installed) == 0 && len(state.custom) == 0
 	state.mu.RUnlock()
@@ -78,9 +80,16 @@ func NewWithLegacyDefault(home string) *State {
 	if _, err := os.Stat(state.path); err == nil {
 		// 状态文件存在但解析出空态：尊重磁盘状态，不播种。
 		return state
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "homer: 读取插件状态 %s 失败（跳过默认安装）: %v\n", state.path, err)
+		return state
 	}
 	for _, plugin := range pluginregistry.Builtins() {
-		_ = state.Install(plugin)
+		if err := state.Install(plugin); err != nil {
+			// 播种失败必须可见：否则 hub 以空插件集静默起服务，首次建密钥
+			// 的 503 会误导用户去插件页，而真正原因是磁盘/权限问题。
+			fmt.Fprintf(os.Stderr, "homer: 默认安装插件 %s 失败: %v\n", plugin.ID, err)
+		}
 	}
 	return state
 }

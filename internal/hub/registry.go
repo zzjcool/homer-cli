@@ -91,8 +91,10 @@ func (r *Registry) Attach(info AgentInfo, sess *stream.Session) (prev *stream.Se
 			info.Version = current.info.Version
 		}
 		// A fresh hello negotiates capabilities anew. This intentionally does
-		// not retain a method the new process no longer advertises.
-		r.agents[info.AgentID] = &registryAgent{info: cloneAgentInfo(info), session: sess}
+		// not retain a method the new process no longer advertises. The last
+		// reported adapter set survives the reconnect: it is observational
+		// state (what the console last saw), refreshed by the next status/pull.
+		r.agents[info.AgentID] = &registryAgent{info: cloneAgentInfo(info), session: sess, ReportedAdapters: current.ReportedAdapters}
 		return prev
 	}
 	r.agents[info.AgentID] = &registryAgent{info: cloneAgentInfo(info), session: sess}

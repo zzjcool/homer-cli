@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/zzjcool/homer-cli/internal/core"
 	"github.com/zzjcool/homer-cli/internal/keyring"
+	"github.com/zzjcool/homer-cli/internal/orderedjson"
 	"github.com/zzjcool/homer-cli/internal/pluginregistry"
 )
 
@@ -343,23 +347,41 @@ func isKeyringWriteAction(action string) bool {
 }
 
 func (s *Server) ensureKeyringAdapter() error {
-	paths := s.paths()
-	config, err := core.LoadConfig(paths)
+	path := filepath.Join(s.opts.HomerHome, "homer.json")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return errors.New("请先运行 homer init")
 	}
-	if _, exists := config.Adapters["keyring"]; exists {
+	root, err := orderedjson.Parse(data)
+	if err != nil {
+		return fmt.Errorf("读取 homer 配置: %w", err)
+	}
+	object, ok := root.(*orderedjson.Object)
+	if !ok || object == nil {
+		return errors.New("homer 配置必须是 JSON 对象")
+	}
+	adapters, ok := object.M["adapters"].(*orderedjson.Object)
+	if !ok || adapters == nil {
+		return errors.New("homer 配置缺少 adapters 对象")
+	}
+	if _, exists := adapters.M["keyring"]; exists {
 		return nil
 	}
 	plugin, ok := pluginregistry.Builtin("keyring")
 	if !ok || plugin.Adapter == nil {
 		return errors.New("官方密钥环插件配置不可用")
 	}
-	if config.Adapters == nil {
-		config.Adapters = map[string]core.AdapterConfig{}
+	adapterValue, err := pluginAdapterJSONValue(plugin.ID, *plugin.Adapter)
+	if err != nil {
+		return err
 	}
-	config.Adapters[plugin.ID] = *plugin.Adapter
-	return core.SaveConfig(paths, *config)
+	adapters.Keys = append(adapters.Keys, "keyring")
+	adapters.M["keyring"] = adapterValue
+	newData := orderedjson.SerializeFile(object)
+	if validated, problems := core.ValidateConfig(newData); validated == nil {
+		return fmt.Errorf("密钥环插件配置无效: %s", strings.Join(problems, "; "))
+	}
+	return os.WriteFile(path, newData, 0o600)
 }
 
 func readKeyCommand(r *http.Request) (keyring.Command, error) {

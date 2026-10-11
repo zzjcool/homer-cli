@@ -160,8 +160,8 @@ curl -sS -X POST "$HUB/api/plugins/uninstall" \
 adapter/carrier 卸载还需显式传 `{"id":"claude","force":true}`，并通过数据守卫；例如中心仍有该
 adapter 的数据，或 keyring 中仍有绑定到已安装 adapter 的密钥时，返回 HTTP 409、`code` 为
 `uninstall-guard`。`force` 不会绕过守卫。卸载不会删除机器上的本地文件；v1 也没有清理中心
-store 的 API。当 hub 的 `ServeOptions` 未接入插件状态（嵌入式模式）时，三个插件端点均返回
-HTTP 503、`code` 为 `plugins-disabled`。
+store 的 API。当 hub 的 `ServeOptions` 未接入插件状态（嵌入式模式）时，install 与 uninstall
+返回 HTTP 503、`code` 为 `plugins-disabled`；GET 返回 200 的空表（`available` 为空）。
 
 ## 按 adapter 范围下发：`POST /api/sync?direction=dispatch`
 

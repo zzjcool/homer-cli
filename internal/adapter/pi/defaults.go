@@ -72,7 +72,7 @@ var DefaultPIAdapter = core.AdapterConfig{
 		// applyCmd installs that exact build on pull). A fresh machine's
 		// plugins must be visible (and syncable) without any configuration.
 		// The "pi" program name is checked before a dispatch. The copy-paste
-		// installer for a missing binary lives in adapter.OfficialInstall.
+		// installer for a missing binary lives in pluginregistry.OfficialInstall.
 		"packages": {
 			Mode:      core.SyncMode("mirror"),
 			Kind:      kindPtr(core.CategoryKindManifest),
