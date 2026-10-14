@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 
@@ -205,6 +206,89 @@ func TestResolveServeTokenLifecycle(t *testing.T) {
 	persisted, _ = hub.ReadHubToken(home)
 	if persisted != "rotate-me" {
 		t.Fatalf("env leaked into file: %q", persisted)
+	}
+}
+
+// --show-join must print the persisted join command even when the hub is
+// already bound to that address. It must not listen.
+func TestServeShowJoinDoesNotListenWhenHubIsUp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOMER_HUB_TOKEN", "")
+	token, _, err := hub.CreateHubToken(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Occupy the default serve address, matching a hub that is already up.
+	listener, err := net.Listen("tcp", defaultServeAddr)
+	if err != nil {
+		t.Fatalf("bind %s: %v", defaultServeAddr, err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	var out, errOut bytes.Buffer
+	code := runWithIO([]string{"serve", "--show-join", "--home", home}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("show-join exit %d stderr %q stdout %q", code, errOut.String(), out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q", errOut.String())
+	}
+	want := joinCommand(defaultServeAddr, token)
+	if strings.TrimSpace(out.String()) != want {
+		t.Fatalf("stdout = %q, want %q", strings.TrimSpace(out.String()), want)
+	}
+	again, ok := hub.ReadHubToken(home)
+	if !ok || again != token {
+		t.Fatalf("token changed: %q ok=%v", again, ok)
+	}
+
+	// An explicit address that is already taken must behave the same way.
+	explicit, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = explicit.Close() })
+	addr := explicit.Addr().String()
+	out.Reset()
+	errOut.Reset()
+	code = runWithIO([]string{"serve", "--show-join", "--addr", addr, "--home", home}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("explicit show-join exit %d stderr %q stdout %q", code, errOut.String(), out.String())
+	}
+	want = joinCommand(addr, token)
+	if strings.TrimSpace(out.String()) != want {
+		t.Fatalf("explicit stdout = %q, want %q", strings.TrimSpace(out.String()), want)
+	}
+
+	// No persisted token: still must not try to bind, and must not invent one.
+	empty := t.TempDir()
+	out.Reset()
+	errOut.Reset()
+	code = runWithIO([]string{"serve", "--show-join", "--home", empty}, &out, &errOut)
+	if code == 0 {
+		t.Fatal("missing token should fail")
+	}
+	if strings.Contains(errOut.String(), "监听失败") || strings.Contains(errOut.String(), "address already in use") {
+		t.Fatalf("missing token tried to bind: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "尚未配置 token") {
+		t.Fatalf("stderr = %q", errOut.String())
+	}
+	if _, ok := hub.ReadHubToken(empty); ok {
+		t.Fatal("show-join generated a token")
+	}
+}
+
+func TestShowJoinAddrNeverNeedsAListener(t *testing.T) {
+	if got := showJoinAddr(""); got != defaultServeAddr {
+		t.Fatalf("default = %q", got)
+	}
+	if got := showJoinAddr(":7760"); got != "0.0.0.0:7760" {
+		t.Fatalf(":port = %q", got)
+	}
+	if got := showJoinAddr("127.0.0.1:7760"); got != "127.0.0.1:7760" {
+		t.Fatalf("explicit = %q", got)
 	}
 }
 

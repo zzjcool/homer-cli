@@ -38,6 +38,15 @@ func hubTokenFromEnv(flagToken string) string {
 // rule from plan §2.1; the CLI layer surfaces its error and exits 1.
 func runServe(options CommandOptions, out, errOut io.Writer) int {
 	paths := ResolveHomerPaths(options.Home)
+	// --show-join prints the copy-paste agent bootstrap command and exits
+	// without serving. The token is long-lived, so it must be fetchable
+	// without scraping startup logs (Tailscale's "print once" follow-up).
+	// This path must not listen: the hub is often already bound here, and
+	// the flag only reads the persisted token.
+	if options.ShowJoin {
+		return showJoinCommand(paths, showJoinAddr(options.Addr), options, out, errOut)
+	}
+
 	listener, err := net.Listen("tcp", defaultAddr(options.Addr))
 	if err != nil {
 		writeLine(errOut, fmt.Sprintf("homer serve: 监听失败: %s", err.Error()))
@@ -47,14 +56,6 @@ func runServe(options CommandOptions, out, errOut io.Writer) int {
 	// what both the loopback check and the startup message must use.
 	boundAddr := listener.Addr().String()
 	loopback := isLoopbackBound(boundAddr)
-
-	// --show-join prints the copy-paste agent bootstrap command and exits
-	// without serving: the token is long-lived, so it must be fetchable
-	// without scraping startup logs (Tailscale's "print once" follow-up).
-	if options.ShowJoin {
-		_ = listener.Close()
-		return showJoinCommand(paths, boundAddr, options, out, errOut)
-	}
 
 	// Token lifecycle (advisor ruling): --token persists (deliberate
 	// rotation), HOMER_HUB_TOKEN overrides this process only, then
@@ -424,4 +425,16 @@ func defaultAddr(addr string) string {
 		return defaultServeAddr
 	}
 	return addr
+}
+
+// showJoinAddr is the address printed by --show-join. It never opens a
+// socket. A bare ":port" is an unspecified bind; joinCommand only rewrites
+// a parsed unspecified IP, so substitute one without listening.
+func showJoinAddr(addr string) string {
+	addr = defaultAddr(addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host != "" {
+		return addr
+	}
+	return net.JoinHostPort("0.0.0.0", port)
 }
